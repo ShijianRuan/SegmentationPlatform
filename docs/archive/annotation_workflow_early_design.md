@@ -2,22 +2,24 @@
 
 日期: 2026-06-02
 
+> 状态说明：这是早期标注管线设计稿，保留为历史参考。当前平台主设计以 `docs/architecture/platform_blueprint.md` 为准。若本文与主蓝图冲突，尤其是“accepted pseudo 是否可进入训练”“统一器官名称与任务级 label map 的关系”，以主蓝图为准。
+
 ## 1. 设计概览
 
 本设计面向多器官分割数据集构建。系统自动完成图像标准化、模型分割、来源标签归一化、草稿融合、标注包生成、人工结果导回、自动校验、差异记录和数据集导出。
 
-人工只参与标注审核环节：在标注工具中检查、必要时修正，并保存一次。保存导回后的标签是最终真值。
+人工只参与标注审核环节：在标注工具中检查、必要时修正，并保存一次。保存导回后的标签在第一阶段可记为 `verified_label`。当前主蓝图还允许高质量伪标签在明确策略下作为训练准入标签，因此本文中“最终真值”的说法应理解为早期人工审核路径。
 
 设计目标：
 
 - 将多来源分割结果组织成可复现、可追溯的数据生产流程。
 - 将人工操作压缩到标注工具内的检查、修正和保存。
-- 明确区分自动生成草稿与人工确认真值，防止未审核标签进入最终数据集。
+- 明确区分自动生成草稿与人工确认标签，防止未审核标签进入训练准入数据。
 - 通过配置文件管理器官、来源和融合策略，降低新增器官或模型来源的成本。
 
 设计理由：
 
-- 模型分割结果不直接作为真值，只作为人工审核草稿。
+- 模型分割结果不直接作为 verified 标签，只作为人工审核草稿。
 - 人工确认不采用 checklist 或逐器官表单，避免增加标注负担。
 - 所有自动步骤通过状态流转和 metadata 记录，保证批量处理时仍可追溯。
 - 标注工具通过适配器接入，避免管线绑定具体工具。
@@ -27,15 +29,16 @@
 | 对象 | 含义 |
 |---|---|
 | `draft_label.nii.gz` | 自动生成的待审核草稿 |
-| `verified_label.nii.gz` | 人工检查并保存后的最终真值 |
+| `verified_label.nii.gz` | 人工检查并保存后的 verified 标签 |
 | `metadata.json` | 系统自动维护的处理记录 |
 
 ## 2. 总体架构
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
-│                    organ_config.yaml                         │
-│        器官定义 / 来源 ID 映射 / 融合策略 / 颜色              │
+│        early organ_config.yaml                               │
+│  当前主蓝图拆分为 anatomy_vocabulary / review_label_map       │
+│  / task_label_maps                                            │
 └──────────────────────────────┬───────────────────────────────┘
                                │
 ┌──────────────────────────────▼───────────────────────────────┐
@@ -99,7 +102,7 @@ Export
 |---|---|---|
 | `ct.nii.gz` | Acquire | 标准化后的 CT 图像 |
 | `draft_label.nii.gz` | Fuse Draft | 自动融合草稿 |
-| `verified_label.nii.gz` | Review | 人工保存后的最终真值 |
+| `verified_label.nii.gz` | Review | 人工保存后的 verified 标签 |
 | `metadata.json` | 全流程 | 处理记录、来源、差异和异常 |
 | `review_workspace/` | Review | 标注工具工作区 |
 
@@ -158,7 +161,7 @@ validated ───────────────→ exported
 
 ## 5. 配置文件
 
-系统使用单一 `organ_config.yaml`。
+早期设计使用单一 `organ_config.yaml`。当前主蓝图已将它拆分为 `anatomy_vocabulary.yaml`、`review_label_map.yaml` 和 `task_label_maps.yaml`，以区分统一器官名称、标注工具标签编号和训练任务标签编号。
 
 ```yaml
 version: "1.0"
@@ -275,7 +278,7 @@ sources/{model}/{case_id}.nii.gz
 ```text
 ct.nii.gz
 sources/*/{case_id}.nii.gz
-organ_config.yaml
+review_label_map.yaml
 ```
 
 输出：
@@ -352,7 +355,7 @@ review_workspace/{case_id}/verified_from_tool.*
 ./adapters/{tool_name}/ingest.sh \
   /path/to/review_workspace/{case_id}/verified_from_tool.* \
   /path/to/{case_id}/ct.nii.gz \
-  /path/to/organ_config.yaml \
+  /path/to/review_label_map.yaml \
   /path/to/{case_id}/verified_label.nii.gz
 ```
 
@@ -399,7 +402,7 @@ review_workspace/{case_id}/verified_from_tool.*
 
 职责：
 
-- 从 `verified_label.nii.gz` 生成最终数据集。
+- 从 `verified_label.nii.gz` 生成早期人工审核路径的数据集。
 - 将多标签文件拆分为每器官独立二值 mask。
 - 输出 TotalSegmentator 风格目录。
 
@@ -481,17 +484,17 @@ review_workspace/{case_id}/verified_from_tool.*
 3. 新草稿重新进入 Review。
 4. 人工再次保存后生成新的 `verified_label.nii.gz`。
 
-任何自动 re-fuse 只能生成草稿，不能直接改写真值。
+任何自动 re-fuse 只能生成草稿，不能直接改写人工 verified 标签。
 
 ## 9. 关键设计决策
 
 | 决策 | 当前设计 | 理由 |
 |---|---|---|
-| 真值来源 | `verified_label.nii.gz` | 只有人工检查并保存后的结果才进入最终数据集 |
+| 真值来源 | `verified_label.nii.gz` | 早期设计只允许人工检查并保存后的结果进入最终数据集；当前主蓝图允许 `accepted_pseudo_label` 按任务策略进入训练 |
 | 自动融合产物 | `draft_label.nii.gz` | 自动结果只作为待审核草稿 |
 | 人工确认方式 | 标注工具中保存一次 | 减少人工流程，不引入额外表单 |
 | 人工参与点 | 仅 Review | Acquire、Fuse、Validate、Export 均自动化 |
-| 配置方式 | 单一 `organ_config.yaml` | 器官定义、来源 ID 和融合策略集中管理 |
+| 配置方式 | 早期为单一 `organ_config.yaml`；当前主蓝图拆分为 anatomy/review/task 三层配置 | 避免把器官名称、标注工具 label id 和训练任务 label id 混在一起 |
 | 模型调用 | 外部脚本 | 隔离模型运行环境 |
 | 标注工具接入 | 适配器 | 支持 3D Slicer、Mimics、ITK-SNAP 等工具切换 |
 | 空间统一 | RAS + CT 网格 | 保证多来源标签可以正确融合 |
