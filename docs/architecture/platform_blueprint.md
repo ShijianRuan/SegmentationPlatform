@@ -109,7 +109,7 @@ flowchart LR
 
 ## 6. 标签设计
 
-### 5.1 统一器官名称不是统一训练编号
+### 6.1 统一器官名称不是统一训练编号
 
 统一器官名称解决“这是什么结构”的问题。
 
@@ -125,7 +125,7 @@ flowchart LR
 
 nnUNet 官方数据格式要求分割标签是整数图，背景为 0，语义类别整数连续。现有 `ModelMap.toml` 的注释和内容也采用这个原则。因此平台应保留任务级编号，而不是设计一个全平台唯一训练 label id。
 
-### 5.2 推荐的数据结构
+### 6.2 推荐的数据结构
 
 ```yaml
 anatomy_vocabulary:
@@ -153,7 +153,7 @@ combine_map:
 
 `anatomy_vocabulary` 是平台语义层；`task_label_map` 是训练层；`combine_map` 是展示、合并或导出层。
 
-### 5.3 同一套数据能服务多个任务
+### 6.3 同一套数据能服务多个任务
 
 同一个病例的图像和标签只在 Data Registry 中注册一次。不同训练任务通过 Dataset Snapshot 选择它们需要的病例、器官和标签状态。
 
@@ -174,7 +174,7 @@ flowchart TB
 
 需要注意：同一病例可以进入多个任务，但训练/验证/测试拆分必须按病例或患者级别冻结，不能让同一个患者在一个任务里训练、另一个相近评估任务里泄漏。
 
-### 5.4 缺失标签不等于器官不存在
+### 6.4 缺失标签不等于器官不存在
 
 医学分割里常见三种情况：
 
@@ -217,6 +217,17 @@ label_policy:
     qc_report: required
 ```
 
+### 7.1 QC 不是一个单独标签状态
+
+QC（Quality Control，质量控制）是标签进入后续流程前的检查，不是一个新的标签状态。第一阶段把 QC 分成三层：
+
+| 层面 | 检查内容 | 不通过的后果 |
+| --- | --- | --- |
+| 空间/几何 QC | 文件可读、shape 一致、spacing/origin/direction/affine 可解释、标签值合法 | 通常直接拒绝；shape 一致但 affine 不一致时可尝试修复 |
+| 标签内容 QC | 空标签、越界、器官覆盖、左右结构是否合理 | 记录问题，由任务策略决定是否拒绝 |
+| 准入策略 QC | 标签状态、来源、任务规则是否允许进入训练 | 不满足时不进入当前 Dataset Snapshot |
+
+`candidate_label` 不是天然低质量，`verified_label` 也不代表永远无误。平台真正要保证的是：每个标签的真实状态和来源不被改写，训练准入由 `label_policy` 显式决定。
 
 ## 8. 平台流程
 
@@ -231,7 +242,7 @@ label_policy:
 - TotalSegmentator、CADS 等公开算法或公开资源。
 - 标注工具导出的修正结果。
 
-所有数据进入平台后，都先变成 Image Artifact 或 Label Artifact，并记录来源、hash、空间信息和许可/用途限制。
+所有数据进入平台后，都先变成 Image Artifact 或 Label Artifact，并记录来源、hash 和空间信息。数据许可和用途限制需要由平台治理层记录，但不归 `label_generation` 域负责裁决。
 
 ### 8.2 标签生成与回流治理
 
@@ -255,7 +266,7 @@ stateDiagram-v2
     rejected_label --> [*]
 ```
 
-公开算法的输出不能直接当作平台真值。它先是 `candidate_label`，经过 label mapping、空间校验、质量规则或抽检后，才能变成 `accepted_pseudo_label` 或 `draft_label`。
+公开算法的输出不能直接当作平台真值。它先是 `candidate_label`，经过 label mapping、空间校验、质量规则或抽检后，有三个出口：进入人工修正的 `draft_label`、按任务策略接收的 `accepted_pseudo_label`、或被丢弃的 `rejected_label`。
 
 ### 8.3 标注和审核
 
@@ -370,7 +381,7 @@ Mimics 当前最合理的定位是“优先 POC 的人工标注/修正工具”�
 | MONAI Label | server-client、模型辅助标注、3D Slicer/OHIF 等客户端思路 | 不要把平台直接做成 MONAI Label；它更像标注/主动学习框架 |
 | 3D Slicer | 开源、插件生态、可集成 MONAI Label 和 TotalSegmentator | 上手成本较高，不一定适合作为主要生产标注工具 |
 | TotalSegmentator | CT/MR 多结构分割，适合作为公开算法标签源 | 输出不能直接当最终训练标签 |
-| CADS | 大规模全身 CT 数据和伪标签/质量控制思路 | 具体数据许可、质量和任务适配仍要单独判断 |
+| CADS | 大规模全身 CT 数据和伪标签/质量控制思路 | 质量和任务适配仍要单独判断；许可问题由平台治理层处理 |
 | nnU-Net | 强基线训练框架，数据格式清晰 | 不应成为平台唯一训练框架 |
 
 ## 11. 分阶段架构，不是详细计划
@@ -396,7 +407,7 @@ Mimics 当前最合理的定位是“优先 POC 的人工标注/修正工具”�
 | 问题 | 决定 | 说明 |
 |------|------|------|
 | 训练准入 | **默认允许 `accepted_pseudo_label` 进入训练**，具体取决于器官、任务和模型。默认允许 + 特定排除，而非默认禁止。 | 不应设立"逐器官审批"的高门槛；由 `label_policy` 的 `allow_status` 字段控制 |
-| 评估准入 | **正式评估（论文、注册、模型对比等对外场景）只用 `verified_label`**；内部迭代评估可用 `accepted_pseudo_label` | 这不是技术问题，是对外可信度问题 |
+| 评估准入 | 暂不作为第一阶段架构决策 | 会议中判断“现在考虑太早”；后续评估设计再单独收敛 |
 | 模型拆分 | 第一阶段保持多模型组合（现有 CT1-16、MR1-8 方案），后期再实验统一模型 | 多模型方案已验证可行 |
 | 第一阶段器官范围 | 第一阶段就是 v500 训练的所有模型，涵盖全身多处器官 | 不需要缩小范围，现有 ModelMap 就是起点 |
 | Mimics POC | 先做好 Mimics 使用方式和集成方案的调研准备，再启动 POC | 见 `docs/domains/labeling/mimics_feasibility.md` |
@@ -407,6 +418,7 @@ Mimics 当前最合理的定位是“优先 POC 的人工标注/修正工具”�
 |------|----------------|
 | 扫描范围 | 平台如何记录器官不在扫描范围内，避免误当背景？ |
 | 数据许可 | 公开算法或公开数据生成的标签是否允许用于产品训练或对外发布模型？ |
+| 正式评估准入 | 正式评估是否只允许 `verified_label`，以及内部迭代评估是否允许 `accepted_pseudo_label`？ |
 
 ## 13. 参考来源
 

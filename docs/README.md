@@ -1,6 +1,6 @@
 # 文档入口
 
-> 日期：2026-06-07  
+> 日期：2026-06-08  
 > 用途：说明当前文档层级、推荐阅读顺序，以及“平台架构”和“三大实现域”之间的关系。
 
 ## 1. 先理解这一版怎么读
@@ -26,12 +26,14 @@
 | --- | --- | --- |
 | 1 | `docs/architecture/platform_blueprint.md` | 平台主蓝图，先看全局闭环和三大域边界 |
 | 2 | `docs/architecture/architecture_decisions.md` | 架构决策记录，解释为什么这样定 |
-| 3 | `docs/domains/labeling/README.md` | 标注域入口，说明 Case Package、Mimics 和标签导回怎么挂在一起 |
-| 4 | `docs/domains/training/README.md` | 训练域入口，说明当前 nnUNet 管线在平台里的位置 |
-| 5 | `docs/domains/label_generation/README.md` | 标签生成域入口，说明伪标签和候选标签如何回流 |
-| 6 | `docs/research/README.md` | 跨域研究材料入口，供后续能力扩展参考 |
-| 7 | `docs/plans/implementation_backlog.md` | 近期执行草案，方便后面落具体工作 |
-| 8 | `docs/archive/annotation_workflow_early_design.md` | 早期标注设计，作为历史参考 |
+| 3 | `docs/meeting_minutes_2026-06-07.md` | 会议纪要，记录最新讨论和领导决策 |
+| 4 | `docs/domains/labeling/README.md` | 标注域入口，说明 Case Package、Mimics 和标签导回怎么挂在一起 |
+| 5 | `docs/domains/training/README.md` | 训练域入口，说明当前 nnUNet 管线在平台里的位置 |
+| 6 | `docs/domains/label_generation/README.md` | 标签生成域入口，说明伪标签和候选标签如何回流 |
+| 7 | `docs/research/README.md` | 跨域研究材料入口，供后续能力扩展参考 |
+| 8 | `docs/plans/platform_implementation_plan_2026-10-30.md` | 2026-10-30 前的平台实施总计划、里程碑和验收清单 |
+| 9 | `docs/plans/implementation_backlog.md` | 近期执行草案，方便后面落具体工作 |
+| 10 | `docs/archive/annotation_workflow_early_design.md` | 早期标注设计，作为历史参考 |
 
 ## 3. 当前文档分层
 
@@ -69,8 +71,20 @@ flowchart TB
 | `docs/research/` | 跨域研究材料，包含原始调研和摘要版，不直接归属于某一个实现域 |
 | `docs/plans/` | 执行草案和近期 backlog |
 | `docs/archive/` | 历史设计稿，不作为当前方案依据 |
+| `docs/meeting_minutes_2026-06-07.md` | 会议纪要，作为设计调整的来源记录 |
 
-## 5. 维护原则
+## 5. 代码和实现入口
+
+| 目录 | 当前角色 |
+| --- | --- |
+| `pipelines/nnunet/` | 当前可复用的 nnUNet 训练、推理、评估代码 |
+| `adapters/mimics/` | Mimics 导入导出适配器落点，目前是 POC 骨架 |
+| `adapters/nnunet/` | nnUNet Adapter 边界说明，训练核心仍在 `pipelines/nnunet/` |
+| `adapters/fewshot/` | FewShot Adapter 落点，当前仅确认架构位置，实现后置 |
+| `adapters/label_generation/` | 公开算法、内部模型、批量推理输出的适配器落点 |
+| `scripts/` | Case Package 文件阶段的通用工具脚本 |
+
+## 6. 维护原则
 
 1. 平台设计以 `docs/architecture/platform_blueprint.md` 为准。
 2. 三大实现域是当前最重要的实现定位入口，后续新增文档优先放入对应域。

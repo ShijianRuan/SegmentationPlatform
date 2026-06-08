@@ -17,42 +17,55 @@ Case Package 的目标是让每个病例包可以被复制、打开、修正、�
 
 ## 2. 推荐目录结构
 
+同一数据集的配置集中共享，病例包只存病例独有数据：
+
 ```text
-case_package/
-  manifest.json
-  images/
-    image.nii.gz
-    dicom/
-  labels/
-    draft_label.nii.gz
-    accepted_pseudo_label.nii.gz
-    verified_label.nii.gz
-    masks/
-      liver.nii.gz
-      gallbladder.nii.gz
+dataset_package/
   config/
-    anatomy_vocabulary.yaml
-    review_label_map.yaml
-    task_label_maps.yaml
-  reports/
-    geometry_check.json
-    review_report.json
-  provenance/
-    source_labels.json
-    tool_export.json
+    anatomy_vocabulary.yaml           ← 全数据集共享，一份
+    review_label_map.yaml             ← 全数据集共享，一份
+  cases/
+    case_001/
+      manifest.json
+      images/
+        image.nii.gz
+        dicom/
+      labels/
+        draft_label.nii.gz
+        accepted_pseudo_label.nii.gz
+        verified_label.nii.gz
+        masks/
+          liver.nii.gz
+          gallbladder.nii.gz
+      reports/
+        geometry_check.json
+        review_report.json
+      provenance/
+        source_labels.json
+        tool_export.json
+    case_002/
+      ...
 ```
 
-不是每个文件都必须存在。最小包只需要图像、manifest、`anatomy_vocabulary.yaml`、`review_label_map.yaml`，以及一个标签输入或空标签入口。训练用的 `task_label_maps.yaml` 可以随任务快照生成，也可以在包里引用。
+`manifest.json` 通过相对路径引用共用配置：
 
-## 3. 三种 label map
+```json
+{
+  "config_ref": "../config/"
+}
+```
 
-为了避免后续混乱，Case Package 里明确区分三种 map。
+标注员拷贝整个 `dataset_package/` 目录即可获得所有病例和共用配置。不是每个文件都必须存在。最小病例包只需图像、manifest（含 config_ref）、一个标签输入或空标签入口。
 
-| 名称 | 用途 | 是否用于 nnUNet 训练 |
+## 3. 三种 label map 的边界
+
+为了避免后续混乱，平台明确区分三种 map。Case Package 只携带前两种，训练任务编号由 Dataset Snapshot 层处理。
+
+| 名称 | 用途 | 归属 |
 | --- | --- | --- |
-| `anatomy_vocabulary.yaml` | 统一器官名称 | 间接使用 |
-| `review_label_map.yaml` | 标注工具或多标签 review 文件中的 label id | 否 |
-| `task_label_maps.yaml` | 各训练任务的 label id | 是 |
+| `anatomy_vocabulary.yaml` | 统一器官名称 | Case Package 共用配置（config/） |
+| `review_label_map.yaml` | 标注工具或多标签 review 文件中的 label id | Case Package 共用配置（config/） |
+| `task_label_maps.yaml` | 各训练任务的 label id | Dataset Snapshot 层 |
 
 示例：
 
@@ -69,15 +82,11 @@ review_label_map:
     liver: 10
     gallbladder: 11
 
-task_label_maps:
-  CT5_Liver:
-    labels:
-      background: 0
-      gallbladder: 1
-      liver: 2
 ```
 
 同一个 `liver` 在 review 文件里可以是 10，在 `CT5_Liver` 训练任务里可以是 2，在全身合并 mask 里又可以是另一个编号。这不是冲突，而是不同层级的编号。
+
+其中 `task_label_maps.yaml` 只在训练快照导出时出现。Case Package 不应该提前绑定某个训练任务，否则同一个病例包会被某个任务的 label id 锁死。
 
 ## 4. Manifest 必填信息
 
@@ -96,8 +105,8 @@ task_label_maps:
     "orientation_note": "recorded by exporter"
   },
   "label_policy": {
-    "default_trainable_status": ["verified_label"],
-    "allow_accepted_pseudo": false
+    "allow_status": ["verified_label", "accepted_pseudo_label"],
+    "trusted_sources": []
   },
   "review": {
     "tool": "mimics",
@@ -189,60 +198,32 @@ flowchart LR
 
 ## 10. 共用配置的存储策略
 
-### 10.1 问题
+### 10.1 设计
 
-一个 Case Package 对应一个病例。但 `anatomy_vocabulary.yaml`、`review_label_map.yaml` 这类配置是跨病例通用的。如果每个病例包都存一份完整副本，会有冗余和版本不一致的风险。但在离线文件包阶段，又不能要求标注员联网访问中央配置。
-
-### 10.2 分阶段策略
-
-| 阶段 | 形态 | 共用配置存储方式 | 一致性保证 |
-|------|------|-----------------|-----------|
-| A. 文件包闭环（当前） | 离线文件夹 | 每个 Case Package 内复制一份完整副本 | `manifest.json` 记录配置文件的 SHA-256 hash，导回时校验 |
-| B. 注册中心 + 快照（后期） | Data Registry + 在线查询 | 配置集中存储在 Registry 的 `shared/` 目录，病例记录引用路径而非副本 | Registry 作为唯一主本，包导出时按需打包 |
-
-### 10.3 文件包阶段：自包含 + hash 校验
+`anatomy_vocabulary.yaml` 和 `review_label_map.yaml` 是跨病例通用的——同一个数据集的所有病例共享同一套器官名称和标注编号体系。因此采用**集中存储 + 引用**的方式，而不是每个病例包复制一份。
 
 ```text
-case_package_case001/
+dataset_package/
   config/
-    anatomy_vocabulary.yaml    ← 副本（与 case002、case003 内容相同）
-    review_label_map.yaml      ← 副本（与 case002、case003 内容相同）
-  manifest.json                ← 含各配置文件的 SHA-256
-
-case_package_case002/
-  config/
-    anatomy_vocabulary.yaml    ← 同一个文件的副本
-    review_label_map.yaml      ← 同一个文件的副本
-  manifest.json
-```
-
-冗余是刻意接受的代价，换来的是：
-- 标注员打开一个包，不需要联网找任何外部文件。
-- 导回时通过 `manifest.json` 中的 hash 比对，发现配置文件是否被误改或版本不匹配。
-
-### 10.4 平台注册层：集中管理 + 引用
-
-Data Registry 建好后，共用配置只存一份，病例记录引用它：
-
-```text
-Data Registry/
-  shared/
-    anatomy_vocabulary.yaml        ← 唯一主本
-    review_label_map.yaml          ← 唯一主本
-
+    anatomy_vocabulary.yaml        ← 全数据集共享，一份
+    review_label_map.yaml          ← 全数据集共享，一份
   cases/
-    case001/
-      image.nii.gz                 ← 病例独有数据
-      labels/
-        ...
-      config_ref: "shared/anatomy_vocabulary.yaml"  ← 只存引用
-    case002/
+    case_001/
+      manifest.json                ← config_ref: "../config/"
+      images/... labels/... reports/... provenance/...
+    case_002/
+      manifest.json                ← config_ref: "../config/"
       ...
 ```
 
-当需要导出 Case Package 给标注员时，平台从 Registry 中拉取引用指向的配置文件，打包进包内。这样既保持了 Registry 层面的集中管理，又不破坏 Case Package 的自包含性。
+### 10.2 理由
 
-### 10.5 `task_label_maps.yaml` 的归属
+- 100 个病例不需要 100 份完全相同的 yaml
+- 改器官名称或 label 编号时只需改一次
+- 标注员拷贝整个 `dataset_package/` 即可，仍然离线自包含
+- `check_case_package.py` 顺着 `config_ref` 校验配置文件的 SHA-256 hash，保证一致性
+
+### 10.3 `task_label_maps.yaml` 的归属
 
 `task_label_maps.yaml` 与具体训练任务绑定，而不是与病例绑定。同一个病例可能同时参与 `CT3_Lung`（肺叶任务）和 `CT5_Liver`（肝胆任务），在不同任务里使用不同的标签编号。
 
@@ -256,6 +237,6 @@ Data Registry/
 | 问题 | 暂定处理 |
 | --- | --- |
 | 是否强制包含 DICOM | Mimics POC 后决定；建议 POC 阶段同时保留 DICOM 和 NIfTI |
-| `accepted_pseudo_label` 是否放入同一个包 | 可以放，但必须有 `label_policy` 和 QC 报告 |
+| `accepted_pseudo_label` 是否放入同一个包 | 可以放，但必须有来源记录和 QC 报告 |
 | 多人审核如何表示 | 后期扩展 `review_report.json` |
 | 是否支持多个图像序列 | 后期扩展 `images[]`，当前先单主图像 |

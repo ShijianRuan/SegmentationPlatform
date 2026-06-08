@@ -14,5 +14,7 @@
 
 - `adapters/mimics/`：已建立目录，用于 Mimics 导入导出和标注员说明
 - `adapters/nnunet/`：已建立目录，用于说明当前 nnUNet Adapter 的实现边界
+- `adapters/fewshot/`：已建立目录，用于少样本训练 Adapter 的实验协议和后续实现
+- `adapters/label_generation/`：已建立目录，用于公开算法、内部模型和批量推理输出的适配边界
 
 注意：当前真正可复用的 nnUNet 训练代码仍主要在 `pipelines/nnunet/`。`adapters/` 的角色是把“平台数据如何接到工具”这件事显式化，而不是复制训练核心代码。

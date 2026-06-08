@@ -186,7 +186,7 @@ Case Package 是标注工具和平台之间的离线文件交换标准格式。�
 3. 三个对照组：nnUNet 全监督（上界）/ nnUNet 同数据量（基线）/ 预训练+微调（实验组）
 4. 准入标准：至少 3 次独立复现、Dice ≥ 全监督 90%、跨扫描协议差距 ≤0.05、失败率 <5%
 
-**已写入三个文档**：`training/README.md` §3、`platform_blueprint.md` §8.4、`few_shot_learning_digest.md` §4。
+**已写入三个文档**：`docs/domains/training/README.md` §3、`docs/architecture/platform_blueprint.md` §8.4、`docs/research/digests/few_shot_learning_digest.md` §4。
 
 ---
 
@@ -276,9 +276,9 @@ Case Package 是标注工具和平台之间的离线文件交换标准格式。�
 | Mimics Adapter（B5-B6）| 乐观 2 天，悲观 2 周 | 中低，依赖 A1-A3 |
 | 闭环测试 + 调试 | 1-2 周 | — |
 | 3-5 病例验证 | 1 周 | — |
-| **一切顺利** | **3-4 周** | |
-| **正常（1-2 个弯路）** | **5-6 周** | |
-| **Mimics API 受限** | 加 2-3 周转 3D Slicer | |
+| **一切顺利** | **3-4 周** | 中 |
+| **正常（1-2 个弯路）** | **5-6 周** | 中 |
+| **Mimics API 受限** | 加 2-3 周转 3D Slicer | 中低 |
 
 最大减速带不是代码量，是 Mimics 确认和几何对齐调试。
 
@@ -288,9 +288,25 @@ Case Package 是标注工具和平台之间的离线文件交换标准格式。�
 
 | 文档 | 更新内容 |
 |------|---------|
-| `platform_blueprint.md` | label_policy 默认允许 + 排除；少样本 Adapter 定位；待决策问题分已决定/待讨论 |
-| `training/README.md` | Adapter 并行架构图；FewShot 平行定位 |
-| `case_package_contract.md` | 新增 §10 共用配置存储策略、§11 当前未定 |
-| `mimics_feasibility.md` | 新增 §10 Web 调研：affine 问题证实、M5 底线重定义、Scripting Guide 存在 |
-| `cads_reference.md` | 移除许可检查相关条目 |
-| `few_shot_learning_digest.md` | 新增 §4 平台架构落点 |
+| `docs/architecture/platform_blueprint.md` | label_policy 默认允许 + 排除；少样本 Adapter 定位；待决策问题分已决定/待讨论 |
+| `docs/domains/training/README.md` | Adapter 并行架构图；FewShot 平行定位 |
+| `docs/domains/labeling/case_package_contract.md` | 共用配置改为集中存储+引用（dataset_package/config/）；task_label_maps 归属 Snapshot |
+| `docs/domains/labeling/mimics_feasibility.md` | 新增 §10 Web 调研：affine 问题证实、M5 底线重定义、Scripting Guide 存在 |
+| `docs/domains/label_generation/cads_reference.md` | 移除许可裁决相关条目 |
+| `docs/research/digests/few_shot_learning_digest.md` | 新增 §4 平台架构落点 |
+
+---
+
+### 2026-06-08 补充审读
+
+**架构师审读领导更新后的文档，逐项确认：**
+
+1. 新增 ADR-012~015 — 全部确认
+2. QC 三层递进模型（§7.1）— 空间→内容→准入，确认
+3. Case Package 共用配置 — 改为 dataset_package/config/ 集中共享 + manifest config_ref 引用
+4. Case Package 不再携带 task_label_maps.yaml — 归属 Dataset Snapshot 层，确认
+5. 实施计划修正：
+   - M3 开始日 07-13 → 07-20（等 M2 完成）
+   - M1 增加 3D Slicer 并行最小验证
+   - 命令清单加阶段标注
+6. backlog 补齐 label_generation 脚本条目（G2/G3）

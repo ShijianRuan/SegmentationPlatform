@@ -1,633 +1,566 @@
+const fs = require("fs");
+const path = require("path");
 const pptxgen = require("pptxgenjs");
-const pres = new pptxgen();
-pres.layout = "LAYOUT_16x9";
-pres.author = "ShijianRuan";
-pres.title = "Segmentation Platform Architecture";
 
-// Color palette
-const C = {
-  bg:       "0F172A",
-  card:     "1E293B",
-  white:    "FFFFFF",
-  teal:     "2DD4BF",
-  blue:     "38BDF8",
-  green:    "4ADE80",
-  amber:    "FBBF24",
-  red:      "F87171",
-  text:     "F8FAFC",
-  sub:      "94A3B8",
-  muted:    "64748B",
-  lightBg:  "F1F5F9",
-  dkText:   "0F172A",
-  dkSub:    "475569",
-  border:   "CBD5E1",
-  tBlue:    "0284C7",
-  tGreen:   "059669",
-  tAmber:   "D97706",
-  tableBg:  "F8FAFC",
+const pptx = new pptxgen();
+pptx.layout = "LAYOUT_16x9";
+pptx.author = "SegmentationPlatform";
+pptx.subject = "Medical image segmentation platform architecture";
+pptx.title = "Segmentation Platform Architecture";
+pptx.company = "SegmentationPlatform";
+pptx.lang = "zh-CN";
+pptx.theme = {
+  headFontFace: "Arial",
+  bodyFontFace: "Arial",
+  lang: "zh-CN",
 };
-const F = { title: "Arial", body: "Arial", mono: "Courier New" };
 
-// Helpers
-function slideTitle(s, text) {
-  s.addText(text, { x: 0.6, y: 0.25, w: 8.8, h: 0.55, fontSize: 26, fontFace: F.title, bold: true, color: C.dkText, margin: 0 });
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.6, y: 0.82, w: 1.0, h: 0.04, fill: { color: C.tBlue } });
+const OUT_ROOT = "/Users/ruanshijian/SegmentationPlatform/SegmentationPlatform_Architecture.pptx";
+const OUT_WORKSPACE =
+  "/Users/ruanshijian/SegmentationPlatform/outputs/019e9b11-9a8a-7ec2-9e1e-1448f3387af2/presentations/segmentation-platform-redesign/output/segmentation-platform-architecture-redesign.pptx";
+
+const C = {
+  bone: "F7F2EA",
+  paper: "FFFCF7",
+  ink: "172026",
+  muted: "5F6872",
+  hair: "D8D0C6",
+  pale: "ECE7DE",
+  teal: "1F9D8A",
+  tealDark: "106B70",
+  blue: "315F9F",
+  blueSoft: "E7EEF8",
+  green: "20805D",
+  greenSoft: "E7F2EC",
+  red: "BC4749",
+  redSoft: "F6E4E2",
+  amber: "B98520",
+  amberSoft: "F5EBD6",
+  violet: "6656A8",
+  violetSoft: "EAE7F4",
+  dark: "101820",
+  dark2: "1C2934",
+  white: "FFFFFF",
+};
+
+const F = {
+  title: "Arial",
+  body: "Arial",
+  mono: "Courier New",
+};
+
+function bg(slide, color = C.bone) {
+  slide.background = { color };
+  slide.addShape(pptx.ShapeType.rect, {
+    x: 0,
+    y: 0,
+    w: 10,
+    h: 5.625,
+    fill: { color },
+    line: { color },
+  });
 }
 
-function card(s, x, y, w, h, title, body, accent) {
-  const fill = C.white;
-  s.addShape(pres.shapes.RECTANGLE, { x, y, w, h, fill: { color: fill }, shadow: { type: "outer", blur: 6, offset: 2, angle: 135, color: "000000", opacity: 0.08 } });
-  s.addShape(pres.shapes.RECTANGLE, { x, y, w: 0.06, h, fill: { color: accent } });
-  s.addText(title, { x: x + 0.2, y: y + 0.12, w: w - 0.3, h: 0.3, fontSize: 14, fontFace: F.title, bold: true, color: C.dkText, margin: 0 });
-  if (body) {
-    s.addText(body, { x: x + 0.2, y: y + 0.48, w: w - 0.3, h: h - 0.56, fontSize: 10, fontFace: F.body, color: C.dkSub, margin: 0, valign: "top" });
+function text(slide, value, x, y, w, h, opts = {}) {
+  slide.addText(value, {
+    x,
+    y,
+    w,
+    h,
+    fontFace: opts.mono ? F.mono : opts.title ? F.title : F.body,
+    fontSize: opts.size ?? 12,
+    bold: opts.bold ?? false,
+    italic: opts.italic ?? false,
+    color: opts.color ?? C.ink,
+    align: opts.align ?? "left",
+    valign: opts.valign ?? "mid",
+    margin: opts.margin ?? 0.02,
+    breakLine: false,
+    fit: "shrink",
+  });
+}
+
+function title(slide, eyebrow, headline, note) {
+  text(slide, eyebrow, 0.55, 0.33, 2.4, 0.18, {
+    size: 7.5,
+    bold: true,
+    color: C.tealDark,
+    margin: 0,
+  });
+  text(slide, headline, 0.55, 0.58, 8.35, 0.48, {
+    size: 22,
+    bold: true,
+    color: C.ink,
+    margin: 0,
+  });
+  if (note) {
+    text(slide, note, 0.58, 1.03, 7.6, 0.22, {
+      size: 9,
+      color: C.muted,
+      margin: 0,
+    });
   }
 }
 
-function row(s, y, label, desc, color) {
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.4, y, w: 0.06, h: 0.4, fill: { color } });
-  s.addText(label, { x: 0.7, y, w: 2.3, h: 0.4, fontSize: 11, fontFace: F.title, bold: true, color: C.dkText, valign: "middle", margin: 0 });
-  s.addText(desc, { x: 3.1, y, w: 6.5, h: 0.4, fontSize: 10, fontFace: F.body, color: C.dkSub, valign: "middle", margin: 0 });
+function footer(slide, n) {
+  slide.addShape(pptx.ShapeType.line, {
+    x: 0.55,
+    y: 5.28,
+    w: 8.9,
+    h: 0,
+    line: { color: C.hair, width: 0.6 },
+  });
+  text(slide, `Segmentation Platform | ${String(n).padStart(2, "0")}`, 0.55, 5.36, 8.9, 0.14, {
+    size: 7,
+    color: "8B8175",
+    margin: 0,
+  });
 }
 
-function tableHeader(fill) {
-  return { bold: true, fill: { color: fill || C.dkText }, color: C.white, fontSize: 10, fontFace: F.body };
+function rect(slide, x, y, w, h, fill = C.paper, line = C.hair, radius = 0.06) {
+  slide.addShape(pptx.ShapeType.roundRect, {
+    x,
+    y,
+    w,
+    h,
+    rectRadius: radius,
+    fill: { color: fill },
+    line: { color: line, width: 0.8 },
+  });
 }
 
-// ============================================================
-// S1: Title
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.bg };
-  s.addShape(pres.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 0.06, fill: { color: C.teal } });
-  s.addText("医学图像分割平台架构设计", { x: 0.8, y: 1.3, w: 8.4, h: 0.8, fontSize: 38, fontFace: F.title, bold: true, color: C.white, align: "center", margin: 0 });
-  s.addShape(pres.shapes.RECTANGLE, { x: 3.8, y: 2.2, w: 2.4, h: 0.04, fill: { color: C.teal } });
-  s.addText("Segmentation Platform Architecture", { x: 0.8, y: 2.45, w: 8.4, h: 0.5, fontSize: 16, fontFace: F.title, color: C.sub, align: "center", margin: 0 });
-  s.addText("2026-06-07", { x: 0.8, y: 4.5, w: 8.4, h: 0.35, fontSize: 13, fontFace: F.body, color: C.muted, align: "center", margin: 0 });
-})();
-
-// ============================================================
-// S2: Core Positioning — clean central node diagram
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "平台核心定位");
-
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.4, y: 3.9, w: 9.2, h: 1.25, fill: { color: C.tableBg } });
-  s.addText([
-    { text: "平台中心 ≠ 某个训练框架或标注软件", options: { bold: true, breakLine: true, fontSize: 14 } },
-    { text: "平台中心 = 病例、图像、标签、训练任务、模型版本之间的关系", options: { fontSize: 13, breakLine: true } },
-    { text: "标注、训练、伪标签、离线推理都围绕这些关系发生", options: { fontSize: 11, color: C.dkSub } },
-  ], { x: 0.7, y: 4.05, w: 8.6, h: 0.95, margin: 0, valign: "top" });
-
-  // 5-node visual: 5 columns
-  const nodes = [
-    { label: "病例\nCase", x: 0.3 },
-    { label: "图像\nImage", x: 2.15 },
-    { label: "标签\nLabel", x: 4.0 },
-    { label: "训练任务\nTask", x: 5.85 },
-    { label: "模型版本\nModel", x: 7.7 },
-  ];
-  const nw = 1.7, nh = 1.5;
-  nodes.forEach((n, i) => {
-    const y = 1.4;
-    s.addShape(pres.shapes.RECTANGLE, { x: n.x, y, w: nw, h: nh, fill: { color: C.white }, shadow: { type: "outer", blur: 6, offset: 2, angle: 135, color: "000000", opacity: 0.08 }, line: { color: C.border, width: 0.5 } });
-    s.addText(n.label, { x: n.x, y, w: nw, h: nh, fontSize: 14, fontFace: F.title, bold: true, color: C.dkText, align: "center", valign: "middle", margin: 0 });
-    if (i < nodes.length - 1) {
-      s.addText("⟷", { x: n.x + nw - 0.15, y: y + 0.5, w: 0.8, h: 0.5, fontSize: 20, fontFace: F.body, color: C.tBlue, align: "center", valign: "middle", margin: 0 });
-    }
+function tag(slide, label, x, y, w, color, fill) {
+  rect(slide, x, y, w, 0.24, fill ?? C.paper, color, 0.08);
+  text(slide, label, x, y + 0.035, w, 0.13, {
+    size: 7.2,
+    bold: true,
+    color,
+    align: "center",
+    margin: 0,
   });
+}
 
-  // Arrow shapes between nodes
-  s.addShape(pres.shapes.LINE, { x: 2.0, y: 2.88, w: 0.3, h: 0, line: { color: C.tBlue, width: 1.5 } });
-  s.addShape(pres.shapes.LINE, { x: 3.85, y: 2.88, w: 0.3, h: 0, line: { color: C.tBlue, width: 1.5 } });
-  s.addShape(pres.shapes.LINE, { x: 5.7, y: 2.88, w: 0.3, h: 0, line: { color: C.tBlue, width: 1.5 } });
-  s.addShape(pres.shapes.LINE, { x: 7.55, y: 2.88, w: 0.3, h: 0, line: { color: C.tBlue, width: 1.5 } });
-})();
-
-// ============================================================
-// S3: Three Domains — 3 cards
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "三大实现域");
-
-  const domains = [
-    { title: "labeling  标注域", sub: "标签生产与导回", items: "导出 Case Package\nMimics 修正 + 保存\n几何校验\n注册 verified_label", color: C.tBlue, x: 0.3 },
-    { title: "training  训练域", sub: "任务消费标签 → 模型", items: "TaskLabelMap\nDataset Snapshot\nnnUNet Adapter\nModel Record", color: C.tGreen, x: 3.55 },
-    { title: "label_generation  标签生成域", sub: "候选标签生成与回流治理", items: "公开算法 / 自训模型推理\ncandidate_label\nQC + 准入策略\n回流到标注或训练", color: C.tAmber, x: 6.8 },
-  ];
-
-  domains.forEach((d) => {
-    card(s, d.x, 1.2, 3.05, 4.0, d.title, null, d.color);
-    s.addText(d.sub, { x: d.x + 0.35, y: 1.88, w: 2.55, h: 0.28, fontSize: 11, fontFace: F.title, bold: true, color: C.dkText, margin: 0 });
-    s.addText(d.items, { x: d.x + 0.35, y: 2.25, w: 2.55, h: 2.7, fontSize: 10, fontFace: F.body, color: C.dkSub, margin: 0, valign: "top" });
+function node(slide, label, sub, x, y, w, h, color, opts = {}) {
+  rect(slide, x, y, w, h, opts.fill ?? C.paper, color, 0.08);
+  if (opts.band) {
+    slide.addShape(pptx.ShapeType.rect, {
+      x,
+      y,
+      w: 0.08,
+      h,
+      fill: { color },
+      line: { color },
+    });
+  }
+  text(slide, label, x + 0.12, y + 0.12, w - 0.24, 0.22, {
+    size: opts.titleSize ?? 11,
+    bold: true,
+    color: opts.titleColor ?? C.ink,
+    margin: 0,
+    align: opts.align ?? "left",
   });
+  if (sub) {
+    text(slide, sub, x + 0.12, y + 0.46, w - 0.24, h - 0.55, {
+      size: opts.bodySize ?? 8.1,
+      color: opts.bodyColor ?? C.muted,
+      margin: 0,
+      valign: "top",
+      align: opts.align ?? "left",
+    });
+  }
+}
 
-  s.addText("三个域按「不同责任」划分，不是按 pipeline 顺序。故意不用 annotation_pipeline / pseudo_labeling 等对称命名", { x: 0.4, y: 5.35, w: 9.2, h: 0.25, fontSize: 9, fontFace: F.body, italic: true, color: C.muted, margin: 0 });
-})();
-
-// ============================================================
-// S4: Closed Loop Flow
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "闭环流程");
-
-  // 8 nodes in an oval loop arrangement
-  const nodes = [
-    { label: "病例数据", x: 4.2, y: 0.85, w: 1.4 },
-    { label: "标签来源", x: 7.0, y: 0.85, w: 1.6 },
-    { label: "标注审核", x: 8.2, y: 2.1, w: 1.4 },
-    { label: "数据快照", x: 8.2, y: 3.4, w: 1.4 },
-    { label: "训练", x: 7.0, y: 4.65, w: 1.6 },
-    { label: "模型", x: 4.2, y: 4.65, w: 1.4 },
-    { label: "批量推理", x: 0.4, y: 3.4, w: 1.5 },
-    { label: "候选标签", x: 0.4, y: 2.1, w: 1.5 },
-  ];
-
-  nodes.forEach((n) => {
-    s.addShape(pres.shapes.RECTANGLE, { x: n.x, y: n.y, w: n.w, h: 0.65, fill: { color: C.white }, shadow: { type: "outer", blur: 4, offset: 1, angle: 135, color: "000000", opacity: 0.06 }, line: { color: C.border, width: 0.5 } });
-    s.addText(n.label, { x: n.x, y: n.y, w: n.w, h: 0.65, fontSize: 11, fontFace: F.title, bold: true, color: C.dkText, align: "center", valign: "middle", margin: 0 });
+function arrow(slide, x1, y1, x2, y2, color = C.hair, width = 1.1) {
+  slide.addShape(pptx.ShapeType.line, {
+    x: x1,
+    y: y1,
+    w: x2 - x1,
+    h: y2 - y1,
+    line: { color, width, endArrowType: "triangle" },
   });
+}
 
-  // Domain labels (dashed boxes)
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.1, y: 1.7, w: 2.2, h: 2.65, fill: { color: "FFFFFF", transparency: 60 }, line: { color: C.tAmber, width: 1, dashType: "dash" } });
-  s.addText("label_\ngeneration", { x: 0.15, y: 2.65, w: 1.9, h: 0.6, fontSize: 8, fontFace: F.body, color: C.tAmber, align: "center", valign: "middle", margin: 0 });
+function line(slide, x1, y1, x2, y2, color = C.hair, width = 1) {
+  slide.addShape(pptx.ShapeType.line, {
+    x: x1,
+    y: y1,
+    w: x2 - x1,
+    h: y2 - y1,
+    line: { color, width },
+  });
+}
 
-  s.addShape(pres.shapes.RECTANGLE, { x: 7.7, y: 1.7, w: 2.2, h: 2.65, fill: { color: "FFFFFF", transparency: 60 }, line: { color: C.tBlue, width: 1, dashType: "dash" } });
-  s.addText("labeling", { x: 7.85, y: 2.65, w: 1.9, h: 0.6, fontSize: 8, fontFace: F.body, color: C.tBlue, align: "center", valign: "middle", margin: 0 });
+function miniTable(slide, rows, x, y, colW, rowH = 0.32, accent = C.dark2) {
+  const body = rows.map((row, ri) =>
+    row.map((cell, ci) => ({
+      text: String(cell),
+      options: {
+        fontFace: ci === 0 && ri > 0 ? F.mono : F.body,
+        fontSize: ri === 0 ? 7.8 : 7.3,
+        bold: ri === 0 || (ci === 0 && ri > 0),
+        color: ri === 0 ? C.white : C.ink,
+        fill: { color: ri === 0 ? accent : ri % 2 ? C.paper : "F1EEE7" },
+        margin: 0.05,
+        valign: "mid",
+        fit: "shrink",
+      },
+    }))
+  );
+  slide.addTable(body, {
+    x,
+    y,
+    w: colW.reduce((a, b) => a + b, 0),
+    colW,
+    rowH,
+    border: { pt: 0.35, color: C.hair },
+  });
+}
 
-  s.addShape(pres.shapes.RECTANGLE, { x: 5.8, y: 3.8, w: 3.8, h: 1.8, fill: { color: "FFFFFF", transparency: 60 }, line: { color: C.tGreen, width: 1, dashType: "dash" } });
-  s.addText("training", { x: 5.85, y: 4.45, w: 3.5, h: 0.5, fontSize: 8, fontFace: F.body, color: C.tGreen, align: "center", valign: "middle", margin: 0 });
-})();
+function ctSlice(slide, x, y, scale = 1) {
+  const w = 2.6 * scale;
+  const h = 2.6 * scale;
+  slide.addShape(pptx.ShapeType.ellipse, {
+    x,
+    y,
+    w,
+    h,
+    fill: { color: "24313D" },
+    line: { color: "EBE7DF", width: 1.2 },
+  });
+  slide.addShape(pptx.ShapeType.ellipse, {
+    x: x + 0.22 * scale,
+    y: y + 0.2 * scale,
+    w: w - 0.44 * scale,
+    h: h - 0.42 * scale,
+    fill: { color: "2E3D49" },
+    line: { color: "97A4AF", width: 0.5 },
+  });
+  slide.addShape(pptx.ShapeType.arc, {
+    x: x + 0.42 * scale,
+    y: y + 0.42 * scale,
+    w: 1.75 * scale,
+    h: 1.5 * scale,
+    adjustPoint: 0.25,
+    line: { color: "CAD2D9", width: 0.6, transparency: 25 },
+  });
+  slide.addShape(pptx.ShapeType.ellipse, {
+    x: x + 0.83 * scale,
+    y: y + 0.88 * scale,
+    w: 0.58 * scale,
+    h: 0.72 * scale,
+    fill: { color: C.red },
+    line: { color: C.red },
+  });
+  slide.addShape(pptx.ShapeType.ellipse, {
+    x: x + 1.35 * scale,
+    y: y + 0.92 * scale,
+    w: 0.45 * scale,
+    h: 0.58 * scale,
+    fill: { color: C.teal },
+    line: { color: C.teal },
+  });
+  slide.addShape(pptx.ShapeType.ellipse, {
+    x: x + 1.05 * scale,
+    y: y + 1.47 * scale,
+    w: 0.55 * scale,
+    h: 0.32 * scale,
+    fill: { color: C.amber },
+    line: { color: C.amber },
+  });
+}
 
-// ============================================================
-// S5: Six Label States
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "六种标签状态");
+function slide1() {
+  const s = pptx.addSlide();
+  bg(s, C.dark);
+  s.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: 4.35, h: 5.625, fill: { color: "131F28" }, line: { color: "131F28" } });
+  text(s, "SEGMENTATION PLATFORM", 0.62, 0.56, 2.6, 0.18, { size: 7.2, bold: true, color: "8EDAD5", margin: 0 });
+  text(s, "分割平台\n不是三条管线", 0.62, 1.2, 3.6, 1.05, { size: 25, bold: true, color: C.white, margin: 0, valign: "top" });
+  text(s, "而是一套标签生命周期治理系统", 0.62, 2.5, 3.35, 0.3, { size: 13.5, color: "D9E1E7", margin: 0 });
+  text(s, "标注、训练、候选标签回流，都围绕同一组稳定对象发生。", 0.64, 3.92, 3.0, 0.45, { size: 9.5, color: "AEBBC5", margin: 0, valign: "top" });
+  text(s, "2026-06-08", 0.64, 4.9, 2.2, 0.18, { size: 8.5, color: "8997A3", margin: 0 });
 
-  // State machine diagram: simplified boxes + arrows
-  const srcX = 0.4, candX = 2.8, row2y = 1.4, row3y = 2.85;
-  // Source boxes
-  s.addShape(pres.shapes.RECTANGLE, { x: srcX, y: row2y, w: 1.4, h: 0.5, fill: { color: C.tableBg }, line: { color: C.tBlue, width: 1 } });
-  s.addText("source_label", { x: srcX, y: row2y, w: 1.4, h: 0.5, fontSize: 9, fontFace: F.mono, bold: true, color: C.dkText, align: "center", valign: "middle", margin: 0 });
-  s.addShape(pres.shapes.RECTANGLE, { x: candX, y: row2y, w: 1.5, h: 0.5, fill: { color: C.tableBg }, line: { color: C.tAmber, width: 1 } });
-  s.addText("candidate_label", { x: candX, y: row2y, w: 1.5, h: 0.5, fontSize: 9, fontFace: F.mono, bold: true, color: C.dkText, align: "center", valign: "middle", margin: 0 });
+  ctSlice(s, 5.65, 0.68, 1.3);
+  const labels = [
+    ["labeling", 5.02, 4.18, C.blue],
+    ["training", 6.55, 4.18, C.green],
+    ["label_generation", 8.08, 4.18, C.amber],
+  ];
+  labels.forEach(([l, x, y, c]) => tag(s, l, x, y, 1.18, c, "172533"));
+  text(s, "Case  /  Image  /  Label  /  Snapshot  /  Model", 5.02, 4.7, 3.98, 0.18, {
+    size: 8,
+    color: "BBC6CE",
+    align: "center",
+    margin: 0,
+  });
+}
 
-  // Downstream states
+function slide2() {
+  const s = pptx.addSlide();
+  bg(s);
+  title(s, "WHY CHANGE", "现在的问题不是缺一条 pipeline，而是边界会互相污染", "如果架构只按“标注 / 训练 / 伪标签脚本”拆，后面很快会找不到责任归属。");
+  text(s, "三类变化会同时发生", 0.65, 1.55, 2.2, 0.35, { size: 17, bold: true, color: C.ink, margin: 0 });
+  const symptoms = [
+    ["数据区域变化", "CT/MR、全身/局部、不同模型组合，不能假设每个任务看到同一组器官。", C.blue],
+    ["训练任务变化", "同一套数据可给肺任务、肝胆任务、全身组合任务使用，label id 必须任务级定义。", C.green],
+    ["标签来源变化", "人工 confirmed、公开数据、自训模型、候选伪标签都可能进入闭环，但来源不能被抹平。", C.amber],
+  ];
+  symptoms.forEach(([h, b, c], i) => {
+    const y = 1.47 + i * 1.05;
+    slideNumberBlob(s, i + 1, 3.52, y + 0.1, c);
+    node(s, h, b, 4.0, y, 5.15, 0.78, c, { fill: C.paper, band: true, bodySize: 8.2 });
+  });
+  node(s, "架构判断", "先稳定对象关系和责任边界，再讨论具体工具。Mimics 与 nnUNet 都应该被 Adapter 包住。", 0.7, 4.35, 8.65, 0.58, C.red, { fill: C.redSoft, titleSize: 10.5, bodySize: 8.2 });
+  footer(s, 2);
+}
+
+function slideNumberBlob(slide, n, x, y, color) {
+  slide.addShape(pptx.ShapeType.ellipse, {
+    x,
+    y,
+    w: 0.42,
+    h: 0.42,
+    fill: { color },
+    line: { color },
+  });
+  text(slide, String(n), x, y + 0.06, 0.42, 0.18, { size: 10.5, bold: true, color: C.white, align: "center", margin: 0 });
+}
+
+function slide3() {
+  const s = pptx.addSlide();
+  bg(s);
+  title(s, "OBJECT MAP", "平台中心：五类对象，而不是某个工具", "每个后续模块都应该能回答：它读写哪个对象？改变哪个状态？留下什么证据？");
+  const centerX = 4.05;
+  const centerY = 2.05;
+  node(s, "LabelArtifact", "标签文件 + 状态 + 来源 + QC 证据", centerX, centerY, 2.15, 0.95, C.teal, { fill: "E7F6F5", titleSize: 13, bodySize: 8.6, align: "center" });
+  const surrounding = [
+    ["Case", "病例身份与元数据", 0.78, 1.25, C.blue],
+    ["ImageArtifact", "CT/MR 图像与空间几何", 0.78, 3.45, C.blue],
+    ["DatasetSnapshot", "冻结训练视图", 7.0, 1.25, C.green],
+    ["TrainingTask", "任务级 label map 和策略", 7.0, 3.45, C.green],
+    ["ModelRecord", "训练产物与推理来源", 4.05, 4.15, C.violet],
+  ];
+  surrounding.forEach(([h, b, x, y, c]) => node(s, h, b, x, y, 2.05, 0.78, c, { fill: C.paper, titleSize: 11, bodySize: 7.8 }));
+  arrow(s, 2.83, 1.64, centerX, centerY + 0.25, C.blue);
+  arrow(s, 2.83, 3.84, centerX, centerY + 0.62, C.blue);
+  arrow(s, centerX + 2.15, centerY + 0.25, 7.0, 1.64, C.green);
+  arrow(s, centerX + 2.15, centerY + 0.62, 7.0, 3.84, C.green);
+  arrow(s, 5.12, 4.15, 5.12, 3.0, C.violet);
+  text(s, "工具只能接入对象，不能重新定义对象", 2.65, 1.48, 4.0, 0.22, { size: 10, bold: true, color: C.tealDark, align: "center", margin: 0 });
+  footer(s, 3);
+}
+
+function slide4() {
+  const s = pptx.addSlide();
+  bg(s);
+  title(s, "DOMAIN BOUNDARY", "三大域的名字不是为了对称，而是为了防止误放代码", "每个域都有明确的输入、输出和不负责事项。");
+  const lanes = [
+    ["labeling", "生产 / 审核 / 导回标签", "Case Package\nMimics import/export\ngeometry check\nverified_label", "不决定训练编号", 0.62, C.blue, C.blueSoft],
+    ["training", "消费标签并产出模型", "Dataset Snapshot\nTaskLabelMap\nnnUNet Adapter\nModel Record", "不治理标签来源", 3.65, C.green, C.greenSoft],
+    ["label_generation", "生成候选并回流", "offline inference\ncandidate_label\nQC report\naccepted/rejected", "不等于伪标签脚本", 6.68, C.amber, C.amberSoft],
+  ];
+  lanes.forEach(([name, claim, body, not, x, c, fill]) => {
+    rect(s, x, 1.28, 2.72, 3.62, fill, c, 0.1);
+    text(s, name, x + 0.18, 1.5, 2.3, 0.25, { size: 15, bold: true, color: c, margin: 0 });
+    text(s, claim, x + 0.18, 1.9, 2.3, 0.22, { size: 9.5, bold: true, color: C.ink, margin: 0 });
+    line(s, x + 0.18, 2.25, x + 2.5, 2.25, c, 1.2);
+    text(s, body, x + 0.18, 2.55, 2.3, 1.12, { size: 9, color: C.ink, margin: 0, valign: "top" });
+    tag(s, not, x + 0.18, 4.26, 2.1, C.red, C.redSoft);
+  });
+  footer(s, 4);
+}
+
+function slide5() {
+  const s = pptx.addSlide();
+  bg(s);
+  title(s, "LABEL LIFECYCLE", "QC 是闸门，不是标签状态", "标签状态描述“它现在是什么”，QC 描述“它为什么能或不能进入下一步”。");
+  const y = 2.02;
   const states = [
-    { label: "draft_label", x: 5.0, color: C.blue },
-    { label: "accepted_pseudo", x: 6.6, color: C.green },
-    { label: "verified_label", x: 8.2, color: C.tGreen },
-    { label: "rejected_label", x: 0.4, color: C.red },
+    ["source_label", 0.55, C.blue],
+    ["candidate_label", 2.42, C.amber],
+    ["draft_label", 4.38, C.teal],
+    ["verified_label", 6.26, C.green],
   ];
-  states.forEach((st) => {
-    s.addShape(pres.shapes.RECTANGLE, { x: st.x, y: row3y, w: 1.4, h: 0.5, fill: { color: C.white }, shadow: { type: "outer", blur: 3, offset: 1, angle: 135, color: "000000", opacity: 0.06 }, line: { color: st.color, width: 1.5 } });
-    s.addText(st.label, { x: st.x, y: row3y, w: 1.4, h: 0.5, fontSize: 9, fontFace: F.mono, bold: true, color: C.dkText, align: "center", valign: "middle", margin: 0 });
+  states.forEach(([label, x, c]) => {
+    node(s, label, "", x, y, 1.45, 0.52, c, { fill: C.paper, titleSize: 8.4, align: "center" });
   });
-
-  // Arrow labels
-  s.addText("→", { x: 1.8, y: row2y + 0.08, w: 0.6, h: 0.4, fontSize: 16, fontFace: F.body, color: C.tBlue, align: "center", valign: "middle", margin: 0 });
-  s.addText("QC 通过 →", { x: 3.5, y: row2y + 0.08, w: 1.0, h: 0.4, fontSize: 9, fontFace: F.body, color: C.tGreen, valign: "middle", margin: 0 });
-  s.addText("失败 →", { x: 1.3, y: row2y + 0.08, w: 0.8, h: 0.4, fontSize: 9, fontFace: F.body, color: C.red, valign: "middle", margin: 0 });
-
-  // Label state table
-  const stateTable = [
-    [{ text: "状态", options: tableHeader(C.dkText) }, { text: "含义", options: tableHeader(C.dkText) }, { text: "默认可训练", options: tableHeader(C.dkText) }],
-    ["source_label", "外部数据集自带标签，未经平台判断", "视来源质量"],
-    ["candidate_label", "模型/算法生成候选结果", "默认否，策略可纳入"],
-    ["draft_label", "专门准备给人修正的起点", "否"],
-    ["accepted_pseudo_label", "经 QC + 策略接受的伪标签", "任务策略决定"],
-    ["verified_label", "人工确认标签（单人保存即 verified）", "是"],
-    ["rejected_label", "已判定不可用", "否"],
-  ].map((r, ri) => r.map((c, ci) => typeof c === 'string' ? ({
-    text: c,
-    options: { fontSize: 10, fontFace: ci === 0 ? F.mono : F.body, bold: ri === 0, fill: { color: ri === 0 ? C.dkText : (ri % 2 === 1 ? C.tableBg : C.white) }, color: ri === 0 ? C.white : C.dkText },
-  }) : c));
-
-  s.addTable(stateTable, { x: 0.4, y: 3.7, w: 9.2, colW: [2.5, 4.5, 2.2], border: { pt: 0.5, color: C.border }, fontFace: F.body, rowH: [0.35, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3] });
-})();
-
-// ============================================================
-// S6: 3-Layer Label Map
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "三层 Label Map 设计");
-
-  const layers = [
-    {
-      title: "anatomy_vocabulary", sub: "这是什么器官？", eg: "liver = 肝脏", eg2: "纯语义，无数字，全平台唯一", x: 0.3, color: C.tBlue, label: "语义层",
-    },
-    {
-      title: "review_label_map", sub: "工具里是几号？", eg: "liver = 10 (Mimics)", eg2: "受标注软件限制，可随工具换", x: 3.55, color: C.tAmber, label: "工具层",
-    },
-    {
-      title: "task_label_maps", sub: "训练时是几号？", eg: "liver = 2 (CT5_Liver)", eg2: "nnUNet 要求类内连续整数", x: 6.8, color: C.tGreen, label: "训练层",
-    },
+  arrow(s, 2.0, y + 0.26, 2.42, y + 0.26, C.blue);
+  arrow(s, 3.87, y + 0.26, 4.38, y + 0.26, C.amber);
+  arrow(s, 5.83, y + 0.26, 6.26, y + 0.26, C.teal);
+  node(s, "accepted_pseudo_label", "", 6.26, 3.25, 2.0, 0.52, C.green, { fill: C.greenSoft, titleSize: 7.7, align: "center" });
+  node(s, "rejected_label", "", 2.42, 3.25, 1.45, 0.52, C.red, { fill: C.redSoft, titleSize: 8.4, align: "center" });
+  arrow(s, 3.15, y + 0.52, 3.15, 3.25, C.red);
+  arrow(s, 4.06, y + 0.52, 6.26, 3.25, C.green);
+  const gates = [
+    ["空间 QC", "shape / spacing / origin / direction / affine", 0.72],
+    ["内容 QC", "空标签、越界、器官覆盖、异常体积", 3.44],
+    ["准入 QC", "allow_status、trusted_sources、任务策略", 6.15],
   ];
-
-  layers.forEach((l) => {
-    card(s, l.x, 1.15, 3.05, 2.15, l.title, null, l.color);
-    s.addShape(pres.shapes.RECTANGLE, { x: l.x + 1.7, y: 1.22, w: 1.1, h: 0.26, fill: { color: l.color, transparency: 85 } });
-    s.addText(l.label, { x: l.x + 1.7, y: 1.22, w: 1.1, h: 0.26, fontSize: 9, fontFace: F.body, color: l.color, align: "center", valign: "middle", margin: 0 });
-    s.addText(l.sub, { x: l.x + 0.35, y: 1.72, w: 2.5, h: 0.3, fontSize: 14, fontFace: F.title, bold: true, color: C.dkText, margin: 0 });
-    s.addText([{ text: l.eg, options: { breakLine: true, bold: true, fontSize: 12 } }, { text: l.eg2, options: { fontSize: 10, color: C.dkSub } }], { x: l.x + 0.35, y: 2.1, w: 2.5, h: 1.0, margin: 0, valign: "top" });
+  gates.forEach(([h, b, x], i) => {
+    rect(s, x, 4.28, 2.35, 0.55, i === 0 ? C.blueSoft : i === 1 ? C.amberSoft : C.greenSoft, i === 0 ? C.blue : i === 1 ? C.amber : C.green, 0.08);
+    text(s, h, x + 0.12, 4.36, 0.7, 0.16, { size: 8, bold: true, color: i === 0 ? C.blue : i === 1 ? C.amber : C.green, margin: 0 });
+    text(s, b, x + 0.92, 4.34, 1.25, 0.2, { size: 6.8, color: C.ink, margin: 0, fit: "shrink" });
   });
+  footer(s, 5);
+}
 
-  // Key insight
-  s.addText("同一个 liver：review 文件里 = 10，CT5_Liver 任务里 = 2，CT_Combine 展示 = 37。不是数字冲突，是层级分工。", { x: 0.4, y: 3.55, w: 9.2, h: 0.3, fontSize: 10, fontFace: F.body, color: C.dkSub, margin: 0 });
-
-  // Table: why cannot merge
-  const mergeTable = [
-    [{ text: "尝试合并", options: tableHeader(C.dkText) }, { text: "为什么不行", options: tableHeader(C.dkText) }],
-    ["合并 anatomy + review", "换标注工具就要改器官名称表；器官名称应是全平台稳定引用"],
-    ["合并 review + task", "同一 liver 在不同任务编号不同 (CT5=2, CT_All_Coarse=5)，没有唯一编号"],
-    ["全合并成一张表", "语义层、工具层、训练层的约束来源各不相同，修改会互相拉扯"],
-  ].map((r, ri) => r.map((c, ci) => typeof c === "string" ? ({
-    text: c,
-    options: { fontSize: 10, fontFace: F.body, bold: ri === 0, fill: { color: ri === 0 ? C.dkText : (ri % 2 === 1 ? C.tableBg : C.white) }, color: ri === 0 ? C.white : C.dkText },
-  }) : c));
-
-  s.addTable(mergeTable, { x: 0.4, y: 4.05, w: 9.2, colW: [3.0, 6.2], border: { pt: 0.5, color: C.border }, fontFace: F.body, rowH: [0.35, 0.32, 0.32, 0.32] });
-})();
-
-// ============================================================
-// S7: Case Package Contract
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "Case Package 契约");
-
-  // Left: directory tree
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.4, y: 1.15, w: 3.8, h: 3.5, fill: { color: C.dkText } });
-  s.addText([
-    { text: "case_package/", options: { bold: true, color: C.teal, fontSize: 12, fontFace: F.mono, breakLine: true } },
-    { text: "├── manifest.json", options: { color: C.white, fontSize: 11, fontFace: F.mono, breakLine: true } },
-    { text: "├── images/image.nii.gz", options: { color: C.sub, fontSize: 11, fontFace: F.mono, breakLine: true } },
-    { text: "├── labels/", options: { color: C.white, fontSize: 11, fontFace: F.mono, breakLine: true } },
-    { text: "│   ├── draft_label.nii.gz", options: { color: C.sub, fontSize: 11, fontFace: F.mono, breakLine: true } },
-    { text: "│   ├── verified_label.nii.gz", options: { color: C.green, fontSize: 11, fontFace: F.mono, breakLine: true } },
-    { text: "│   └── masks/liver.nii.gz", options: { color: C.sub, fontSize: 11, fontFace: F.mono, breakLine: true } },
-    { text: "├── config/", options: { color: C.white, fontSize: 11, fontFace: F.mono, breakLine: true } },
-    { text: "│   ├── anatomy_vocabulary.yaml", options: { color: C.sub, fontSize: 11, fontFace: F.mono, breakLine: true } },
-    { text: "│   └── review_label_map.yaml", options: { color: C.sub, fontSize: 11, fontFace: F.mono, breakLine: true } },
-    { text: "├── reports/", options: { color: C.white, fontSize: 11, fontFace: F.mono, breakLine: true } },
-    { text: "└── provenance/", options: { color: C.white, fontSize: 11, fontFace: F.mono } },
-  ], { x: 0.55, y: 1.25, w: 3.5, h: 3.3, valign: "top", margin: 0 });
-
-  // Right: validation rules
-  const validTable = [
-    [{ text: "校验规则", options: { ...tableHeader(C.dkText), colSpan: 3 } }, { text: "", options: { fill: { color: C.dkText } } }, { text: "", options: { fill: { color: C.dkText } } }],
-    [{ text: "校验项", options: tableHeader(C.tBlue) }, { text: "级别", options: tableHeader(C.tBlue) }, { text: "处理", options: tableHeader(C.tBlue) }],
-    ["图像 sha256 不一致", "Error", "拒绝导入"],
-    ["标签 shape 不一致", "Error", "不可修复，拒绝"],
-    ["spacing/affine 不一致", "Warning", "check_geometry.py 自动修复"],
-    ["label id 不合法", "Error", "拒绝"],
-    ["只有 draft 无 verified", "Warning", "标记，不阻塞"],
-    ["必需器官缺失", "Warning", "记录在报告中"],
-  ].map((r, ri) => r.map((c, ci) => typeof c === "string" ? ({
-    text: c,
-    options: { fontSize: 10, fontFace: F.body, bold: ri <= 1, fill: { color: ri === 0 ? C.dkText : (ri === 1 ? C.tableBg : (ri % 2 === 0 ? C.tableBg : C.white)) }, color: ri === 0 ? C.white : C.dkText },
-  }) : c));
-
-  s.addTable(validTable, { x: 4.5, y: 1.15, w: 5.1, colW: [2.4, 1.0, 1.7], border: { pt: 0.5, color: C.border }, fontFace: F.body, rowH: [0.35, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3] });
-
-  s.addText("一个病例一个包，自包含可搬运。nnUNet 不直接读 Case Package → 经 Registry + Snapshot 导出", { x: 0.4, y: 4.85, w: 9.2, h: 0.3, fontSize: 10, fontFace: F.body, italic: true, color: C.dkSub, margin: 0 });
-})();
-
-// ============================================================
-// S8: nnUNet Pipeline
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "训练管线 — nnUNet 五阶段");
-
-  // Framework box
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.4, y: 1.15, w: 9.2, h: 0.5, fill: { color: C.dkText } });
-  s.addText("Config.toml  +  ModelMap.toml  →  AutoSegmentationFramework（编排器）", { x: 0.4, y: 1.15, w: 9.2, h: 0.5, fontSize: 14, fontFace: F.title, bold: true, color: C.white, align: "center", valign: "middle", margin: 0 });
-
-  // 5 Action cards
-  const actions = [
-    { n: "1", title: "数据转换", sub: "标注数据 → nnUNet 格式\n重采样 + 合并 + 划分", x: 0.3 },
-    { n: "2", title: "预处理", sub: "指纹提取 + 实验规划\n支持手动覆盖参数", x: 2.1 },
-    { n: "3", title: "训练", sub: "GPU 管理 + 5 折交叉\nDDP 多卡支持", x: 3.9 },
-    { n: "4", title: "推理", sub: "预插值加速\n多模型共享分辨率", x: 5.7 },
-    { n: "5", title: "评估", sub: "Dice + Surface Dice\n多格式报告 + 聚合", x: 7.5 },
+function slide6() {
+  const s = pptx.addSlide();
+  bg(s);
+  title(s, "LABEL SPACE", "统一器官名称，不等于统一 label id", "这个设计的价值是：同一套病例数据可以被多个任务复用。");
+  const levels = [
+    ["anatomy_vocabulary", "语义层", "liver = 肝脏\n全平台稳定，无数字", 1.28, C.blue, C.blueSoft],
+    ["review_label_map", "工具层", "Mimics 中 liver = 10\n服务人工审核，可换工具", 2.6, C.amber, C.amberSoft],
+    ["task_label_maps", "训练层", "CT5_Liver: liver = 2\nCT_All: liver 可为另一个编号", 3.92, C.green, C.greenSoft],
   ];
-
-  actions.forEach((a, i) => {
-    s.addShape(pres.shapes.RECTANGLE, { x: a.x, y: 2.1, w: 1.65, h: 1.8, fill: { color: C.white }, shadow: { type: "outer", blur: 4, offset: 1, angle: 135, color: "000000", opacity: 0.06 }, line: { color: C.border, width: 0.5 } });
-    // Number circle
-    s.addShape(pres.shapes.OVAL, { x: a.x + 0.6, y: 2.2, w: 0.4, h: 0.4, fill: { color: C.tBlue } });
-    s.addText(a.n, { x: a.x + 0.6, y: 2.2, w: 0.4, h: 0.4, fontSize: 14, fontFace: F.title, bold: true, color: C.white, align: "center", valign: "middle", margin: 0 });
-    s.addText(a.title, { x: a.x + 0.1, y: 2.7, w: 1.45, h: 0.35, fontSize: 11, fontFace: F.title, bold: true, color: C.dkText, align: "center", valign: "middle", margin: 0 });
-    s.addText(a.sub, { x: a.x + 0.08, y: 3.15, w: 1.5, h: 0.65, fontSize: 9, fontFace: F.body, color: C.dkSub, align: "center", valign: "top", margin: 0 });
-    if (i < actions.length - 1) {
-      s.addText("→", { x: a.x + 1.55, y: 2.65, w: 0.35, h: 0.35, fontSize: 16, fontFace: F.body, color: C.tBlue, align: "center", valign: "middle", margin: 0 });
-    }
+  levels.forEach(([name, level, body, y, c, fill], i) => {
+    rect(s, 0.92, y, 8.2, 0.78, fill, c, 0.1);
+    text(s, level, 1.15, y + 0.18, 0.85, 0.22, { size: 10, bold: true, color: c, margin: 0 });
+    text(s, name, 2.2, y + 0.16, 2.35, 0.24, { size: 11, bold: true, color: C.ink, mono: true, margin: 0 });
+    text(s, body, 5.05, y + 0.12, 3.55, 0.42, { size: 8.4, color: C.ink, margin: 0, valign: "mid" });
+    if (i < levels.length - 1) arrow(s, 5.0, y + 0.78, 5.0, y + 1.0, c);
   });
+  text(s, "Case Package 只带 anatomy + review；task label map 在 Dataset Snapshot 中冻结。", 1.08, 4.98, 7.9, 0.18, {
+    size: 9.2,
+    bold: true,
+    color: C.tealDark,
+    align: "center",
+    margin: 0,
+  });
+  footer(s, 6);
+}
 
-  // Bottom notes
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.4, y: 4.2, w: 9.2, h: 0.7, fill: { color: C.tableBg } });
-  s.addText("ModelMap.toml 已是 TaskLabelMap 雏形：每模型独立从 1 编号，支持扁平格式（细粒度）和分组格式（粗分割）", { x: 0.6, y: 4.3, w: 8.8, h: 0.5, fontSize: 10, fontFace: F.body, color: C.dkText, valign: "middle", margin: 0 });
-  s.addText("多 GPU 调度：不同 GPU 并行 + 同 GPU 串行 → 自动生成 gpu{0,1,2,3}.sh", { x: 0.4, y: 5.05, w: 9.2, h: 0.3, fontSize: 10, fontFace: F.body, italic: true, color: C.dkSub, margin: 0 });
-})();
+function slide7() {
+  const s = pptx.addSlide();
+  bg(s);
+  title(s, "CASE PACKAGE", "Case Package 是标注交换契约，不是训练数据集", "它让文件阶段可搬运、自包含；训练阶段另行冻结 Dataset Snapshot。");
+  rect(s, 0.7, 1.3, 3.45, 3.55, C.dark2, C.dark2, 0.08);
+  text(
+    s,
+    "case_package/\n├─ manifest.json\n├─ images/image.nii.gz\n├─ labels/\n│  ├─ draft_label.nii.gz\n│  ├─ verified_label.nii.gz\n│  └─ masks/liver.nii.gz\n├─ config/\n│  ├─ anatomy_vocabulary.yaml\n│  └─ review_label_map.yaml\n├─ reports/\n└─ provenance/",
+    0.93,
+    1.55,
+    3.0,
+    2.9,
+    { size: 8.0, color: "EDF3F7", mono: true, margin: 0, valign: "top" }
+  );
+  node(s, "Registry", "病例、图像、标签来源、审计记录。\n第一阶段可后置，但概念不能丢。", 4.78, 2.0, 1.8, 1.05, C.teal, { fill: "E8F5F4", titleSize: 12, bodySize: 7.7, align: "center" });
+  node(s, "Dataset Snapshot", "按任务冻结：样本、标签准入、task_label_map、训练配置。", 7.25, 2.0, 1.95, 1.05, C.green, { fill: C.greenSoft, titleSize: 11.5, bodySize: 7.7, align: "center" });
+  arrow(s, 4.15, 2.53, 4.78, 2.53, C.teal);
+  arrow(s, 6.58, 2.53, 7.25, 2.53, C.green);
+  tag(s, "不放 task_label_maps.yaml", 5.0, 3.68, 2.5, C.red, C.redSoft);
+  text(s, "否则同一病例会被某个训练任务的编号锁死。", 5.04, 4.03, 2.55, 0.26, { size: 8.5, color: C.muted, margin: 0, align: "center" });
+  footer(s, 7);
+}
 
-// ============================================================
-// S9: Adapter Architecture
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "Adapter 架构 — 可扩展性核心");
-
-  // Dataset Snapshot
-  s.addShape(pres.shapes.RECTANGLE, { x: 3.5, y: 1.15, w: 3, h: 0.55, fill: { color: C.dkText } });
-  s.addText("Dataset Snapshot  冻结的数据视图", { x: 3.5, y: 1.15, w: 3, h: 0.55, fontSize: 12, fontFace: F.title, bold: true, color: C.white, align: "center", valign: "middle", margin: 0 });
-
-  // 4 parallel adapters
-  const adapters = [
-    { name: "nnUNet\nAdapter", sub: "全监督\n生产级", x: 0.25, col: C.tGreen, tag: "已完成" },
-    { name: "FewShot\nAdapter", sub: "预训练+微调\n少样本", x: 2.6, col: C.tBlue, tag: "架构已定" },
-    { name: "MONAI\nAdapter", sub: "Transformer\n模型", x: 4.95, col: C.tAmber, tag: "预留" },
-    { name: "其他\nAdapter", sub: "SAM / 新框架\n...", x: 7.3, col: C.muted, tag: "可扩展" },
+function slide8() {
+  const s = pptx.addSlide();
+  bg(s);
+  title(s, "ADAPTERS", "工具适配层让平台不绑定 Mimics 或 nnUNet", "稳定对象在中间，工具只通过 Adapter 读写对象。");
+  node(s, "Platform Contract", "Case / ImageArtifact / LabelArtifact\nDatasetSnapshot / ModelRecord\nlabel_policy / provenance", 3.35, 1.88, 3.0, 1.25, C.teal, { fill: "E8F5F4", titleSize: 14, bodySize: 8.4, align: "center" });
+  const ports = [
+    ["Mimics Adapter", "导入/导出 review package", 0.72, 1.16, C.blue, C.blueSoft],
+    ["nnUNet Adapter", "现有训练管线的第一落点", 6.95, 1.16, C.green, C.greenSoft],
+    ["label_generation Adapter", "离线推理与 candidate 回流", 0.72, 3.65, C.amber, C.amberSoft],
+    ["FewShot Adapter", "实验验证后再生产化", 6.95, 3.65, C.violet, C.violetSoft],
   ];
-
-  adapters.forEach((a) => {
-    const y = 2.05;
-    s.addShape(pres.shapes.RECTANGLE, { x: a.x, y, w: 2.2, h: 1.15, fill: { color: C.white }, shadow: { type: "outer", blur: 4, offset: 1, angle: 135, color: "000000", opacity: 0.06 }, line: { color: a.col, width: 1.5 } });
-    s.addText(a.name, { x: a.x, y, w: 2.2, h: 0.6, fontSize: 11, fontFace: F.title, bold: true, color: C.dkText, align: "center", valign: "middle", margin: 0 });
-    s.addText(a.sub, { x: a.x, y: y + 0.6, w: 2.2, h: 0.45, fontSize: 9, fontFace: F.body, color: C.dkSub, align: "center", valign: "middle", margin: 0 });
-    s.addShape(pres.shapes.RECTANGLE, { x: a.x + 1.1, y: y + 0.05, w: 0.95, h: 0.22, fill: { color: a.col, transparency: 85 } });
-    s.addText(a.tag, { x: a.x + 1.1, y: y + 0.05, w: 0.95, h: 0.22, fontSize: 8, fontFace: F.body, color: a.col, align: "center", valign: "middle", margin: 0 });
-
-    // Each → Model Record
-    s.addShape(pres.shapes.RECTANGLE, { x: a.x + 0.2, y: 3.6, w: 1.8, h: 0.42, fill: { color: C.tableBg }, line: { color: C.border, width: 0.5 } });
-    s.addText("Model Record", { x: a.x + 0.2, y: 3.6, w: 1.8, h: 0.42, fontSize: 10, fontFace: F.title, bold: true, color: C.tGreen, align: "center", valign: "middle", margin: 0 });
+  ports.forEach(([h, b, x, y, c, fill]) => {
+    node(s, h, b, x, y, 2.2, 0.85, c, { fill, titleSize: 10.5, bodySize: 7.8 });
+    arrow(s, x < 3 ? x + 2.2 : x, y + 0.42, x < 3 ? 3.35 : 6.35, 2.5, c);
   });
+  text(s, "新工具 = 新 Adapter；平台数据契约不变。", 3.05, 4.45, 3.6, 0.24, { size: 12, bold: true, color: C.tealDark, align: "center", margin: 0 });
+  footer(s, 8);
+}
 
-  // Key message
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.4, y: 4.3, w: 9.2, h: 1.1, fill: { color: C.tableBg } });
-  s.addText([
-    { text: "不变层（数据契约）", options: { bold: true, breakLine: true, fontSize: 14 } },
-    { text: "Case / Image Artifact / Label Artifact / Dataset Snapshot / label_policy", options: { breakLine: true, fontSize: 11 } },
-    { text: "可变层（Adapter 封装）：nnUNet / MONAI / FewShot / SAM / ...", options: { breakLine: true, fontSize: 11 } },
-    { text: "新框架 = 新 Adapter，不动数据契约。就像 USB 协议：设备可换，接口不变。", options: { breakLine: true, fontSize: 10, italic: true, color: C.dkSub } },
-  ], { x: 0.6, y: 4.4, w: 8.8, h: 0.9, color: C.dkText, margin: 0, valign: "top" });
-})();
+function slide9() {
+  const s = pptx.addSlide();
+  bg(s);
+  title(s, "MATURITY", "Mimics 和 FewShot 是两种不同成熟度的工作", "一个是标注工具集成 POC，一个是研究能力到生产 Adapter 的验证路线。");
+  rect(s, 0.72, 1.35, 4.05, 3.62, C.blueSoft, C.blue, 0.1);
+  text(s, "Mimics POC", 1.0, 1.72, 2.2, 0.28, { size: 17, bold: true, color: C.blue, margin: 0 });
+  text(s, "目标：证明导入、人工修正、导出、几何一致，能登记为 verified_label。", 1.0, 2.28, 3.35, 0.38, { size: 9.2, color: C.ink, margin: 0, valign: "top" });
+  miniTable(
+    s,
+    [
+      ["检查", "判断"],
+      ["shape mismatch", "硬失败"],
+      ["affine / spacing", "可检测，条件满足时修复"],
+      ["API / license", "启动 POC 前确认"],
+    ],
+    1.0,
+    3.05,
+    [1.65, 2.35],
+    0.35,
+    C.blue
+  );
+  rect(s, 5.23, 1.35, 4.05, 3.62, C.violetSoft, C.violet, 0.1);
+  text(s, "FewShot path", 5.52, 1.72, 2.2, 0.28, { size: 17, bold: true, color: C.violet, margin: 0 });
+  text(s, "目标：验证少样本是否能成为 training 域的新 Adapter，而不是现在就承诺生产可用。", 5.52, 2.28, 3.35, 0.38, { size: 9.2, color: C.ink, margin: 0, valign: "top" });
+  miniTable(
+    s,
+    [
+      ["实验", "要求"],
+      ["N-shot", "1 / 3 / 5 / 10 / 20"],
+      ["对照", "全监督 / 同数据量 / 微调"],
+      ["准入", "Dice >= 90% full baseline"],
+    ],
+    5.52,
+    3.05,
+    [1.55, 2.45],
+    0.35,
+    C.violet
+  );
+  footer(s, 9);
+}
 
-// ============================================================
-// S10: FewShot Learning
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "少样本学习 — FewShot Adapter");
-
-  // Left: architecture position
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.4, y: 1.2, w: 3.3, h: 0.5, fill: { color: C.dkText } });
-  s.addText("Dataset Snapshot", { x: 0.4, y: 1.2, w: 3.3, h: 0.5, fontSize: 12, fontFace: F.title, bold: true, color: C.white, align: "center", valign: "middle", margin: 0 });
-
-  // nnUNet
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.4, y: 2.1, w: 3.3, h: 1.2, fill: { color: C.white }, shadow: { type: "outer", blur: 4, offset: 1, angle: 135, color: "000000", opacity: 0.06 }, line: { color: C.tGreen, width: 1.5 } });
-  s.addText("nnUNet Adapter\n全监督训练", { x: 0.4, y: 2.2, w: 3.3, h: 0.55, fontSize: 11, fontFace: F.title, bold: true, color: C.dkText, align: "center", margin: 0 });
-  s.addText("生产级 · 已完成", { x: 0.4, y: 2.8, w: 3.3, h: 0.3, fontSize: 9, fontFace: F.body, color: C.tGreen, align: "center", margin: 0 });
-
-  // FewShot
-  s.addShape(pres.shapes.RECTANGLE, { x: 0.4, y: 3.65, w: 3.3, h: 1.2, fill: { color: C.white }, shadow: { type: "outer", blur: 4, offset: 1, angle: 135, color: "000000", opacity: 0.06 }, line: { color: C.tBlue, width: 1.5 } });
-  s.addText("FewShot Adapter\n少样本训练", { x: 0.4, y: 3.75, w: 3.3, h: 0.55, fontSize: 11, fontFace: F.title, bold: true, color: C.dkText, align: "center", margin: 0 });
-  s.addText("架构已定 · 待生产级验证", { x: 0.4, y: 4.35, w: 3.3, h: 0.3, fontSize: 9, fontFace: F.body, color: C.tBlue, align: "center", margin: 0 });
-
-  // Right: experiment protocol
-  s.addText("生产级实验协议", { x: 4.2, y: 1.2, w: 5.4, h: 0.35, fontSize: 15, fontFace: F.title, bold: true, color: C.dkText, margin: 0 });
+function slide10() {
+  const s = pptx.addSlide();
+  bg(s, C.dark);
+  text(s, "FIRST MILESTONE", 0.7, 0.54, 2.0, 0.16, { size: 7.5, bold: true, color: "8EDAD5", margin: 0 });
+  text(s, "第一阶段只做一件事：离线文件包闭环", 0.7, 0.9, 7.5, 0.45, { size: 25, bold: true, color: C.white, margin: 0 });
+  text(s, "从 candidate_label 到人工确认，再到 Dataset Snapshot 和 nnUNet 训练。先让链路真实跑通，再补 Registry、Web UI 和统一调度。", 0.72, 1.48, 7.6, 0.38, {
+    size: 10.2,
+    color: "C8D3DC",
+    margin: 0,
+    valign: "top",
+  });
   const steps = [
-    "选定器官 → verified 病例 → 患者级别冻结划分",
-    "构建 N-shot Snapshot（N=1, 3, 5, 10, 20）",
-    "三对照组：A.全监督上界 / B.同数据量基线 / C.微调实验组",
-    "冻结测试集上计算 Dice, Surface Dice, Hausdorff",
-    "结果登记 Model Registry → 达准入标准 → 升级为 Adapter",
+    ["1", "package_case", "生成可审阅病例包"],
+    ["2", "Mimics review", "导入、保存、导回"],
+    ["3", "check_geometry", "shape/affine 证据"],
+    ["4", "snapshot", "冻结任务级标签视图"],
+    ["5", "nnUNet train", "跑通训练与模型记录"],
   ];
-  steps.forEach((st, i) => {
-    s.addShape(pres.shapes.OVAL, { x: 4.2, y: 1.75 + i * 0.5, w: 0.3, h: 0.3, fill: { color: C.tBlue } });
-    s.addText(String(i + 1), { x: 4.2, y: 1.75 + i * 0.5, w: 0.3, h: 0.3, fontSize: 10, fontFace: F.title, bold: true, color: C.white, align: "center", valign: "middle", margin: 0 });
-    s.addText(st, { x: 4.6, y: 1.75 + i * 0.5, w: 5.0, h: 0.3, fontSize: 10, fontFace: F.body, color: C.dkText, valign: "middle", margin: 0 });
+  steps.forEach(([n, h, b], i) => {
+    const x = 0.72 + i * 1.78;
+    slideNumberBlob(s, n, x, 2.65, [C.teal, C.blue, C.amber, C.green, C.violet][i]);
+    text(s, h, x, 3.22, 1.28, 0.2, { size: 9.5, bold: true, color: C.white, align: "center", margin: 0 });
+    text(s, b, x - 0.12, 3.56, 1.55, 0.28, { size: 7.5, color: "AEBBC5", align: "center", margin: 0 });
+    if (i < steps.length - 1) arrow(s, x + 0.5, 2.86, x + 1.55, 2.86, "6F7D88", 1.0);
   });
-
-  // Criteria table
-  s.addText("准入标准", { x: 4.2, y: 4.35, w: 5.4, h: 0.3, fontSize: 14, fontFace: F.title, bold: true, color: C.dkText, margin: 0 });
-  const criteria = [
-    [{ text: "条件", options: tableHeader(C.dkText) }, { text: "阈值", options: tableHeader(C.dkText) }],
-    ["独立复现", "每器官 ≥ 3 次"],
-    ["Dice vs 全监督", "≥ 全监督的 90%"],
-    ["跨扫描协议差距", "≤ 0.05 Dice"],
-    ["失败率 (Dice<0.3)", "< 5%"],
-  ].map((r, ri) => r.map((c, ci) => typeof c === "string" ? ({
-    text: c,
-    options: { fontSize: 10, fontFace: F.body, bold: ri === 0, fill: { color: ri === 0 ? C.dkText : (ri % 2 === 1 ? C.tableBg : C.white) }, color: ri === 0 ? C.white : C.dkText },
-  }) : c));
-
-  s.addTable(criteria, { x: 4.2, y: 4.7, w: 5.4, colW: [2.4, 3.0], border: { pt: 0.5, color: C.border }, fontFace: F.body, rowH: [0.3, 0.25, 0.25, 0.25, 0.25] });
-})();
-
-// ============================================================
-// S11: Mimics Integration
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "Mimics 集成方案");
-
-  // Flow: Platform → Mimics → Platform
-  const flowSteps = [
-    { label: "平台\nsplit / merge", x: 0.2 },
-    { label: "Case\nPackage", x: 2.4 },
-    { label: "Mimics\n导入 masks", x: 4.6 },
-    { label: "人工\n修正", x: 6.8 },
-    { label: "Mimics\n导出 masks", x: 8.5 },
-  ];
-  flowSteps.forEach((f) => {
-    s.addShape(pres.shapes.RECTANGLE, { x: f.x, y: 1.15, w: 1.55, h: 0.75, fill: { color: C.white }, shadow: { type: "outer", blur: 3, offset: 1, angle: 135, color: "000000", opacity: 0.06 }, line: { color: C.tBlue, width: 1 } });
-    s.addText(f.label, { x: f.x, y: 1.15, w: 1.55, h: 0.75, fontSize: 10, fontFace: F.title, bold: true, color: C.dkText, align: "center", valign: "middle", margin: 0 });
+  rect(s, 1.15, 4.55, 7.7, 0.55, "172633", "42515E", 0.08);
+  text(s, "开发落点：adapters/mimics、adapters/label_generation、adapters/nnunet、pipelines/nnunet、scripts", 1.3, 4.75, 7.4, 0.16, {
+    size: 8.5,
+    color: "DCE6EC",
+    align: "center",
+    margin: 0,
   });
-  [1.75, 3.95, 6.15, 8.35].forEach((x) => { s.addText("→", { x, y: 1.3, w: 0.4, h: 0.4, fontSize: 16, fontFace: F.body, color: C.tBlue, align: "center", valign: "middle", margin: 0 }); });
+}
 
-  // Key APIs table
-  s.addText("关键 API（已确认存在）", { x: 0.4, y: 2.2, w: 9.2, h: 0.35, fontSize: 14, fontFace: F.title, bold: true, color: C.dkText, margin: 0 });
-  const apiTable = [
-    [{ text: "API", options: tableHeader(C.dkText) }, { text: "用途", options: tableHeader(C.dkText) }, { text: "来源", options: tableHeader(C.dkText) }],
-    [{ text: "mimics.data.masks.find(name=...)", options: { fontFace: F.mono } }, "查找指定名称 Mask", "社区代码"],
-    [{ text: "mask.get_voxel_buffer()", options: { fontFace: F.mono } }, "获取 Mask 体素（numpy 数组）", "社区代码"],
-    [{ text: "mask.set_voxel_buffer(arr)", options: { fontFace: F.mono } }, "导入 numpy 数组到 Mask", "官方员工确认"],
-    [{ text: "NIfTI 导入导出 (2025 GUI)", options: { fontFace: F.mono } }, "官方原生功能，替代手工 affine", "产品更新页"],
-    [{ text: "Help → Scripting Guide", options: { fontFace: F.mono } }, "完整 API 文档，内置在 Mimics 中", "随软件安装"],
-  ].map((r, ri) => r.map((c, ci) => typeof c === "string" ? ({
-    text: c,
-    options: { fontSize: 9, fontFace: ci === 0 ? F.mono : F.body, bold: ri === 0, fill: { color: ri === 0 ? C.dkText : (ri % 2 === 1 ? C.tableBg : C.white) }, color: ri === 0 ? C.white : C.dkText },
-  }) : c));
+[
+  slide1,
+  slide2,
+  slide3,
+  slide4,
+  slide5,
+  slide6,
+  slide7,
+  slide8,
+  slide9,
+  slide10,
+].forEach((fn) => fn());
 
-  s.addTable(apiTable, { x: 0.4, y: 2.6, w: 9.2, colW: [3.2, 3.6, 2.4], border: { pt: 0.5, color: C.border }, fontFace: F.body, rowH: [0.32, 0.3, 0.3, 0.3, 0.3, 0.3] });
+fs.mkdirSync(path.dirname(OUT_WORKSPACE), { recursive: true });
 
-  // Risk
-  s.addText("风险与应对", { x: 0.4, y: 4.45, w: 9.2, h: 0.3, fontSize: 14, fontFace: F.title, bold: true, color: C.dkText, margin: 0 });
-  const riskTable = [
-    [{ text: "风险", options: tableHeader(C.dkText) }, { text: "影响", options: tableHeader(C.dkText) }, { text: "应对", options: tableHeader(C.dkText) }],
-    ["set_voxel_buffer 空间对齐", "标签与 CT 错位", "check_geometry.py 检测 + 修复"],
-    ["Scripting API 不足以覆盖所有步骤", "自动化降低", "GUI 手动 + 平台脚本补偿"],
-    ["Mimics 完全不可用", "阻塞标注流程", "切换 3D Slicer / ITK-SNAP"],
-  ].map((r, ri) => r.map((c, ci) => typeof c === "string" ? ({
-    text: c,
-    options: { fontSize: 10, fontFace: F.body, bold: ri === 0, fill: { color: ri === 0 ? C.dkText : (ri % 2 === 1 ? C.tableBg : C.white) }, color: ri === 0 ? C.white : C.dkText },
-  }) : c));
-
-  s.addTable(riskTable, { x: 0.4, y: 4.8, w: 9.2, colW: [3.0, 2.4, 3.8], border: { pt: 0.5, color: C.border }, fontFace: F.body, rowH: [0.3, 0.28, 0.28, 0.28] });
-})();
-
-// ============================================================
-// S12: Phased Implementation
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "分阶段实施路线");
-
-  const phases = [
-    { phase: "A", title: "文件包闭环", desc: "一个病例从候选标签到人工保存，再进入训练快照", status: "👈 当前", fill: true, col: C.tGreen },
-    { phase: "B", title: "注册中心 + 快照", desc: "Data Registry、Dataset Snapshot → 多任务复用、训练可复现", status: "设计已定", fill: false },
-    { phase: "C", title: "Adapter 稳定", desc: "nnUNet Adapter 跑通，预留 MONAI / FewShot 接口", status: "设计已定", fill: false },
-    { phase: "D", title: "离线批量推理", desc: "模型版本 + 批量任务 + candidate_label 回流", status: "后期", fill: false },
-    { phase: "E", title: "统一调度", desc: "Web UI、任务队列、权限、审计 → 数据契约稳定后", status: "后期", fill: false },
-  ];
-
-  const phaseData = [
-    [{ text: "", options: tableHeader(C.dkText) }, { text: "阶段", options: tableHeader(C.dkText) }, { text: "目标", options: tableHeader(C.dkText) }, { text: "状态", options: tableHeader(C.dkText) }],
-    ...phases.map((p) => [
-      { text: p.phase, options: { fontSize: 16, bold: true, color: p.col, align: "center", fill: { color: p.fill ? "ECFDF5" : C.white } } },
-      { text: p.title, options: { fontSize: 11, bold: true, fill: { color: p.fill ? "ECFDF5" : C.white } } },
-      { text: p.desc, options: { fontSize: 10, fill: { color: p.fill ? "ECFDF5" : C.white } } },
-      { text: p.status, options: { fontSize: 10, bold: true, color: p.col, fill: { color: p.fill ? "ECFDF5" : C.white } } },
-    ]),
-  ];
-  s.addTable(phaseData, { x: 0.4, y: 1.15, w: 9.2, colW: [0.5, 2.0, 4.5, 2.2], border: { pt: 0.5, color: C.border }, fontFace: F.body, color: C.dkText, rowH: [0.4, 0.6, 0.55, 0.55, 0.55, 0.55] });
-})();
-
-// ============================================================
-// S13: Key Decisions
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "已确认的关键决策");
-
-  const decisions = [
-    { label: "伪标签准入", desc: "默认允许，取决于器官/任务/模型。默认允许 + 特定排除，provenance 永不造假", col: C.tBlue },
-    { label: "器官范围", desc: "v500 全部模型（CT1-16、MR1-8），涵盖全身多处器官", col: C.tGreen },
-    { label: "全身模型方案", desc: "保持多模型组合（已验证），后期有条件再实验统一模型", col: C.tAmber },
-    { label: "Mimics POC", desc: "先做调研准备（确认 Scripting Guide API），再启动 POC", col: C.tBlue },
-    { label: "少样本学习", desc: "training 域新 Adapter，与 nnUNet 平级，需先过生产级实验协议", col: C.tGreen },
-    { label: "label_policy", desc: "candidate_label 可通过 allow_status 直接纳入训练", col: C.tAmber },
-    { label: "Data Registry", desc: "先不实现但必记——可追溯和可插拔的前提，闭环跑通后补", col: C.muted },
-  ];
-
-  decisions.forEach((d, i) => {
-    row(s, 1.3 + i * 0.58, d.label, d.desc, d.col);
-  });
-})();
-
-// ============================================================
-// S14: Pre-implementation Checklist
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.lightBg };
-  slideTitle(s, "实现前待确认清单");
-
-  s.addText("阻塞项（必须确认）", { x: 0.4, y: 1.1, w: 9.2, h: 0.35, fontSize: 14, fontFace: F.title, bold: true, color: C.red, margin: 0 });
-  const blocking = [
-    [{ text: "#", options: tableHeader(C.red) }, { text: "事项", options: tableHeader(C.red) }, { text: "状态", options: tableHeader(C.red) }],
-    ["A1", "Mimics 版本 + 许可证类型", "未确认"],
-    ["A2", "Scripting Guide 中 mask 相关 API 清单", "需在 Mimics Help 中查看"],
-    ["A3", "Mimics 能否运行 Python 脚本", "取决于许可证"],
-    ["A4", "第一批 3-5 个病例", "数据不是瓶颈"],
-    ["A5", "训练服务器环境（GPU、路径）", "未确认"],
-  ].map((r, ri) => r.map((c, ci) => typeof c === "string" ? ({
-    text: c,
-    options: { fontSize: 10, fontFace: F.body, bold: ri === 0 || ci === 0, fill: { color: ri === 0 ? C.red : (ri % 2 === 1 ? C.tableBg : C.white) }, color: ri === 0 ? C.white : C.dkText },
-  }) : c));
-
-  s.addTable(blocking, { x: 0.4, y: 1.5, w: 9.2, colW: [0.5, 5.7, 3.0], border: { pt: 0.5, color: C.border }, fontFace: F.body, rowH: [0.3, 0.28, 0.28, 0.28, 0.28, 0.28] });
-
-  s.addText("非阻塞项（可立即实现）", { x: 0.4, y: 3.4, w: 9.2, h: 0.35, fontSize: 14, fontFace: F.title, bold: true, color: C.tGreen, margin: 0 });
-  const nonBlock = [
-    [{ text: "#", options: tableHeader(C.tGreen) }, { text: "模块", options: tableHeader(C.tGreen) }, { text: "用途", options: tableHeader(C.tGreen) }],
-    ["B1", "split_multilabel_to_masks.py", "多标签 NIfTI → 逐器官二值 mask"],
-    ["B2", "merge_masks_to_multilabel.py", "逐器官 mask → 多标签 NIfTI"],
-    ["B3", "check_geometry.py", "shape/spacing/affine 校验 + 自动修复"],
-    ["B4", "package_case.py", "生成 Case Package 目录"],
-    ["B5", "import_case_package.py", "读 masks → numpy → set_voxel_buffer"],
-    ["B6", "export_review_package.py", "get_voxel_buffer → numpy → 保存 masks"],
-  ].map((r, ri) => r.map((c, ci) => typeof c === "string" ? ({
-    text: c,
-    options: { fontSize: 10, fontFace: ci === 1 ? F.mono : F.body, bold: ri === 0 || ci === 0, fill: { color: ri === 0 ? C.tGreen : (ri % 2 === 1 ? C.tableBg : C.white) }, color: ri === 0 ? C.white : C.dkText },
-  }) : c));
-
-  s.addTable(nonBlock, { x: 0.4, y: 3.8, w: 9.2, colW: [0.5, 4.0, 4.7], border: { pt: 0.5, color: C.border }, fontFace: F.body, rowH: [0.3, 0.28, 0.28, 0.28, 0.28, 0.28, 0.28] });
-})();
-
-// ============================================================
-// S15: Time Estimate
-// ============================================================
-(() => {
-  const s = pres.addSlide();
-  s.background = { color: C.bg };
-  s.addShape(pres.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 0.06, fill: { color: C.teal } });
-  s.addText("时间估算", { x: 0.6, y: 0.25, w: 8.8, h: 0.55, fontSize: 26, fontFace: F.title, bold: true, color: C.white, margin: 0 });
-
-  // 3 scenario cards
-  const scenarios = [
-    { title: "顺利", time: "3-4 周", desc: "A1-A3 秒确认\nAPI 全有，几何无问题", col: C.green },
-    { title: "正常", time: "5-6 周", desc: "1-2 个 Mimics 弯路\n1-2 轮几何调试", col: C.amber },
-    { title: "Mimics 受限", time: "+2-3 周", desc: "降级 GUI 手动\n或切 3D Slicer", col: C.red },
-  ];
-
-  scenarios.forEach((sc, i) => {
-    const x = 0.4 + i * 3.2;
-    s.addShape(pres.shapes.RECTANGLE, { x, y: 1.2, w: 2.9, h: 2.5, fill: { color: C.card } });
-    s.addText(sc.title, { x, y: 1.35, w: 2.9, h: 0.4, fontSize: 14, fontFace: F.title, bold: true, color: sc.col, align: "center", margin: 0 });
-    s.addText(sc.time, { x, y: 1.85, w: 2.9, h: 0.7, fontSize: 34, fontFace: F.title, bold: true, color: C.white, align: "center", valign: "middle", margin: 0 });
-    s.addShape(pres.shapes.RECTANGLE, { x: x + 0.6, y: 2.6, w: 1.7, h: 0.03, fill: { color: sc.col } });
-    s.addText(sc.desc, { x, y: 2.8, w: 2.9, h: 0.7, fontSize: 10, fontFace: F.body, color: C.sub, align: "center", valign: "top", margin: 0 });
-  });
-
-  // Breakdown
-  const breakdown = [
-    [{ text: "模块", options: tableHeader(C.card) }, { text: "工时", options: tableHeader(C.card) }, { text: "信心", options: tableHeader(C.card) }],
-    ["平台脚本 B1-B4", "4-5 天", "高"],
-    ["Mimics Adapter B5-B6", "乐观 2 天 / 悲观 2 周", "中低（依赖 A1-A3）"],
-    ["闭环测试 + 调试", "1-2 周", "—"],
-    ["3-5 病例验证", "1 周", "—"],
-  ].map((r, ri) => r.map((c, ci) => typeof c === "string" ? ({
-    text: c,
-    options: { fontSize: 10, fontFace: F.body, bold: ri === 0, fill: { color: ri === 0 ? C.card : C.bg }, color: ri === 0 ? C.white : C.text },
-  }) : c));
-
-  s.addTable(breakdown, { x: 0.4, y: 3.95, w: 9.2, colW: [3.5, 3.5, 2.2], border: { pt: 0.5, color: "334155" }, fontFace: F.body, rowH: [0.32, 0.28, 0.28, 0.28, 0.28] });
-
-  s.addText("最大减速带不是代码量，是 Mimics 确认和几何对齐调试", { x: 0.6, y: 5.35, w: 8.8, h: 0.2, fontSize: 10, fontFace: F.body, italic: true, color: C.muted, margin: 0 });
-})();
-
-// Write
-pres.writeFile({ fileName: "/Users/ruanshijian/SegmentationPlatform/SegmentationPlatform_Architecture.pptx" })
-  .then(() => console.log("PPT saved"))
-  .catch(err => console.error(err));
+pptx.writeFile({ fileName: OUT_ROOT }).then(() => {
+  fs.copyFileSync(OUT_ROOT, OUT_WORKSPACE);
+});

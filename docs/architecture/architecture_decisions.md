@@ -22,6 +22,10 @@
 | ADR-009 | 部署管线先按离线批量推理设计 | 当前目标是数据闭环，不是在线服务 | 推理结果作为候选标签回流 |
 | ADR-010 | Orchestrator 后置 | 调度层依赖稳定的数据契约 | 不在主蓝图里过早指定 FastAPI、Celery 等实现 |
 | ADR-011 | 文档和后续实现按 `labeling`、`training`、`label_generation` 三大域组织 | 既保留平台全局视角，也让后续代码和文档更容易定位 | 不再把第三个域硬叫 `pseudo_labeling` |
+| ADR-012 | QC 是检查层，不是标签状态 | 标签状态记录来源和生命周期，QC 记录是否满足几何、内容和准入规则 | `candidate_label` 可按策略进入训练，但来源和状态不能被改写 |
+| ADR-013 | Case Package 自包含，但不携带任务级 label map | 标注包服务人工 review，训练编号属于 Dataset Snapshot | `anatomy_vocabulary.yaml` 和 `review_label_map.yaml` 放入包内，`task_label_maps.yaml` 后置到训练快照 |
+| ADR-014 | FewShot 是 training 域的实验型 Adapter | 少样本学习消费 Dataset Snapshot 并产出 Model Record，和 nnUNet Adapter 平行 | 先定义实验协议，生产级验证后再实现正式 Adapter |
+| ADR-015 | label_generation 不负责许可裁决 | 候选标签域关注生成、映射、QC 和回流；数据许可是平台治理问题 | CADS/公开算法文档只记录许可需求，不把许可判断写进本域准入逻辑 |
 
 ## 3. 标签决策的解释
 
@@ -56,7 +60,7 @@ Mimics 的调研要以“现在就要使用是否可行”为前提。当前结�
 1. DICOM/NIfTI 图像能否稳定导入。
 2. 草稿标签能否以可编辑 mask 的形式导入。
 3. 人工修改后能否导出逐器官 mask 或单多标签文件。
-4. 导出标签与原始 CT 的 shape、spacing、origin、direction、affine 是否一致。
+4. 导出标签与原始 CT 的 shape 是否一致；spacing、origin、direction、affine 不一致时能否被平台侧检测和修复。
 5. Python scripting 能否覆盖必要的批量步骤。
 
 如果 POC 失败，平台仍然可以使用 Mimics 做人工修正，但导入导出需要更保守的中间格式，或改用 3D Slicer/ITK-SNAP/MONAI Label 等工具作为补充。
@@ -65,10 +69,9 @@ Mimics 的调研要以“现在就要使用是否可行”为前提。当前结�
 
 | 问题 | 为什么还不能定 |
 | --- | --- |
-| 哪些器官允许伪标签直接训练 | 需要按器官、模型来源、质量报告和任务风险判断 |
-| 是否只用 verified 标签做正式评估 | 这会影响模型指标可信度和数据规模 |
+| 哪些具体器官或任务排除伪标签直接训练 | 默认允许 `accepted_pseudo_label`，但排除规则需要按任务沉淀 |
+| 是否只用 verified 标签做正式评估 | 会议判断第一阶段考虑太早，后续评估设计再收敛 |
 | Mimics 是否能作为主要标注工具 | 需要本机版本和真实病例 POC |
-| 全身模型最终是一个大模型还是多个模型组合 | 取决于数据量、显存、器官覆盖和任务表现 |
 | 数据许可如何落地 | 公开数据、公开算法、内部产品训练的边界需要单独确认 |
 
 ## 7. 文档维护规则

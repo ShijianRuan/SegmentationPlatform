@@ -31,13 +31,13 @@ flowchart TB
     accTitle: Training Adapter Architecture
     accDescr: Dataset snapshots feed multiple parallel adapters — nnUNet for full supervision and FewShot for few-shot learning — both producing Model Records.
 
-    snapshot[“Dataset Snapshot”]
-    nnunet[“nnUNet Adapter<br/>全监督训练”]
-    fewshot[“FewShot Adapter<br/>少样本训练”]
-    pipeline[“现有 nnUNet 管线<br/>Action1-5”]
-    fewshot_impl[“少样本实验协议<br/>预训练 + 微调”]
-    model[“Model Record”]
-    model2[“Model Record”]
+    snapshot["Dataset Snapshot"]
+    nnunet["nnUNet Adapter<br/>全监督训练"]
+    fewshot["FewShot Adapter<br/>少样本训练"]
+    pipeline["现有 nnUNet 管线<br/>Action1-5"]
+    fewshot_impl["少样本实验协议<br/>预训练 + 微调"]
+    model["Model Record"]
+    model2["Model Record"]
 
     snapshot --> nnunet
     snapshot --> fewshot
@@ -50,12 +50,14 @@ flowchart TB
 **Adapter 层级结构**：nnUNet Adapter 和 FewShot Adapter 是 training 域下的两个平行 Adapter，共享同一个 Dataset Snapshot 数据契约，各自产出 Model Record。
 
 ```
-训练域/
-  adapters/
-    nnunet/                      ← 全监督（已有，生产级）
-    fewshot/                      ← 少样本（设计已确认，待实现）
-      experiment_protocol.py      ← 离线实验协议
-      finetune_adapter.py         ← 预训练 + 微调
+adapters/
+  nnunet/                         ← nnUNet Adapter 边界说明
+  fewshot/                         ← 少样本 Adapter（设计已确认，待实现）
+    experiment_protocol.py         ← 离线实验协议
+    finetune_adapter.py            ← 预训练 + 微调
+
+pipelines/
+  nnunet/                          ← 当前可复用训练核心
 ```
 
 后续接 MONAI、Transformer 时同样新增 Adapter，不改变数据契约。

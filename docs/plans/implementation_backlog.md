@@ -8,6 +8,10 @@
 > `labeling` 负责病例包、导入导出、人工 review；
 > `training` 负责 nnUNet 小闭环；
 > `label_generation` 负责候选标签和下一轮草稿回流。
+>
+> 2026-10-30 前的总体节奏、里程碑和验收清单见
+> `docs/plans/platform_implementation_plan_2026-10-30.md`。
+> 本文主要服务该计划中的 M0-M3 近期落地任务。
 
 ---
 
@@ -18,7 +22,7 @@
 1. 不先做完整 Web UI。
 2. 不先做复杂 Orchestrator。
 3. 不先把 nnUNet、MONAI、Mimics 强行统一到一个大包里。
-4. 不把所有伪标签默认混入训练；只有任务策略显式允许的 `accepted_pseudo_label` 才能进入训练。
+4. 不在 provenance 上造假；`candidate_label`、`accepted_pseudo_label` 是否进入训练由 `label_policy.allow_status` 显式控制。
 5. 不直接认定 Mimics 是最终标注工具。
 
 近期目标只有一个：用 3-5 个病例跑通 `Case Package -> Review -> Review Export -> Registry Import -> nnUNet Training Snapshot -> Predict Draft` 的手动闭环。
@@ -56,8 +60,8 @@
 
 | 状态 | 脚本 | 说明 |
 |---|---|---|
-| 已完成 | `scripts/hash_package.py` | 无额外依赖，已通过临时病例包 smoke test |
-| 已完成 | `scripts/check_case_package.py` | 无额外依赖，已通过临时病例包 smoke test |
+| 已存在 | `scripts/hash_package.py` | 无额外依赖，生成 package checksum |
+| 已存在 | `scripts/check_case_package.py` | 无额外依赖，已按当前 Case Package 契约检查 `anatomy_vocabulary.yaml` 和 `review_label_map.yaml` |
 | 待实现 | `scripts/split_multilabel_to_masks.py` | 需要 `numpy`, `nibabel`, `PyYAML` |
 | 待实现 | `scripts/merge_masks_to_multilabel.py` | 需要 `numpy`, `nibabel`, `PyYAML` |
 | 待实现 | `scripts/check_geometry.py` | 需要 `numpy`, `nibabel` 或 `SimpleITK` |
@@ -70,7 +74,17 @@
 | 导出 Review 包 | `adapters/mimics/export_review_package.py` | 当前已建立占位入口；后续补齐导出逻辑 |
 | 标注员说明 | `adapters/mimics/README_for_annotators.md` | 当前已建立第一阶段手动闭环说明 |
 
-### 3.3 暂缓脚本
+### 3.3 label_generation 侧脚本
+
+| 任务 | 文件 | 所属里程碑 | 说明 |
+|---|---|---|---|
+| 批量推理入口 | `adapters/label_generation/run_batch_inference.py` | M6 | 对病例列表生成 candidate_label |
+| QC routing | `adapters/label_generation/route_candidates.py` | M6 | 根据 QC 报告和 label_policy 决定输出到 draft/accepted_pseudo/rejected |
+| candidate → draft | `adapters/label_generation/candidate_to_draft.py` | M6 | 将 candidate_label 转成下一轮 review 的 draft_label |
+
+当前状态：目录 `adapters/label_generation/` 已建立；所有脚本待实现。M6 之前不必启动，但 backlog 需要条目占位以保证计划可追溯。
+
+### 3.4 暂缓脚本
 
 | 脚本 | 暂缓原因 |
 |---|---|
@@ -78,6 +92,7 @@
 | Web UI | 需求和数据状态还在变 |
 | 自动主动学习策略 | 先用简单筛选和人工选择病例 |
 | MONAI Adapter | nnUNet 小闭环和 Mimics POC 先跑通 |
+| FewShot Adapter | 架构位置已确认，但需要 Data Registry、Dataset Snapshot 和冻结评估集后再生产级验证 |
 
 ---
 
@@ -123,9 +138,10 @@ hash_package.py
 
 | 风险 | 优先级 | 当前处理 |
 |---|---|---|
-| Mimics NIfTI affine 往返不稳定 | P0 | POC 必测；不通过就改 DICOM 或换工具 |
+| Mimics 导出 shape 不一致 | P0 | shape 不一致是硬故障；需切换导出方式或工具 |
+| Mimics affine/origin/direction 不一致 | P1 | shape 一致时由 `check_geometry.py` 检测并修复几何头，再抽检 |
 | 多标签与 Mimics 多 mask 映射复杂 | P0 | 统一用 `review_label_map.yaml` 和 mask name 映射 |
-| 伪标签误入训练 | P0 | `label_policy.allow_draft=false` 硬规则 |
+| 伪标签误入训练 | P0 | `label_policy.allow_status` 显式控制；状态和来源不改写 |
 | Windows 与远程路径不同 | P1 | manifest 中只用相对路径 |
 | 训练框架扩展过早 | P2 | 先只实现 nnUNet 小闭环 |
 | 标注员负担过重 | P1 | 不做逐器官 checklist，只要求保存导出 |
@@ -138,9 +154,9 @@ hash_package.py
 
 1. Mimics 当前可用版本和许可证类型是什么？是否能运行 Python 脚本？
 2. 第一批 POC 病例在哪里？是否已有可公开给脚本处理的 3-5 个样例？
-3. 第一阶段目标器官选哪些？建议先选 3-5 个大器官，不要直接 167 个结构。
+3. 第一阶段目标范围已按会议确定为 v500 现有 CT1-16、MR1-8 多模型组合；POC 可从其中挑 3-5 个病例验证闭环。
 4. 训练服务器能否访问病例包输出目录？还是必须 zip 手动传输？
-5. 哪些第一阶段任务允许 `accepted_pseudo_label` 进入训练，哪些任务必须只用 `verified_label`？
+5. 哪些任务或来源应从默认伪标签准入中排除？
 
 ---
 

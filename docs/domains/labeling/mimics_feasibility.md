@@ -70,11 +70,11 @@ flowchart LR
 | M2 | 草稿标签导入 | 至少一种方式能把平台草稿标签变成 Mimics 可编辑 mask |
 | M3 | 人工修正 | 修正后的 mask 名称、颜色、结构关系可管理 |
 | M4 | 标签导出 | 能导出逐器官 mask 或单个多标签文件 |
-| M5 | 空间一致性 | 导出标签与原图 shape、spacing、origin、direction、affine 一致 |
+| M5 | 空间一致性 | 导出标签与原图 shape 一致；spacing/origin/direction/affine 不一致时必须能被平台检测和修复 |
 | M6 | label 映射 | 导出的 mask 能按平台器官名称映射回统一名称 |
 | M7 | 批量可重复 | 至少能用脚本或稳定操作步骤处理多个病例 |
 
-其中 M5 是最关键的门槛。训练管线对图像和标签对齐非常敏感，哪怕界面上看起来正确，只要 affine 或方向不一致，训练数据就可能被污染。
+其中 M5 是最关键的门槛，但要分清硬故障和可修复问题。shape 不一致通常说明标签和图像已经不是同一体素网格，不能直接进入闭环；spacing/origin/direction/affine 不一致仍然危险，但第一阶段可以由平台侧 `check_geometry.py` 检测，并在确认 shape 一致时把图像几何头信息同步给 mask。
 
 ## 6. 如果现在就要使用 Mimics
 
@@ -97,7 +97,7 @@ flowchart LR
 | NIfTI 图像导入方向不稳定 | 标签与训练图像可能错位 | 改用 DICOM 作为 review package 主格式 |
 | 草稿标签不能稳定导入 | 无法模型辅助标注 | 用截图/参考标签辅助人工，或换 3D Slicer/ITK-SNAP |
 | 导出只能逐器官 mask | 文件多，但可接受 | 平台合并为多标签 mask |
-| 导出 affine 不一致 | 不能直接入库 | 用 SimpleITK/nibabel 重采样和人工抽检，或停用该路径 |
+| 导出 affine 不一致 | 不能直接入库 | shape 一致时可由平台复制图像几何头信息并抽检；shape 不一致时停用该路径 |
 | Python API 不足 | 自动化程度下降 | 保留手动步骤，先跑通小闭环 |
 
 ## 8. 与其他工具的关系

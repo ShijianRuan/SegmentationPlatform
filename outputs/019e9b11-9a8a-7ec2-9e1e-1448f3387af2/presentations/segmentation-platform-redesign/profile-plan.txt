@@ -1,0 +1,33 @@
+Task mode: create
+Primary deck profile: engineering-platform
+
+Claim spine:
+1. The platform is not three pipelines; it is a governed label lifecycle.
+2. The three domains exist because responsibility boundaries differ.
+3. The label-space design lets one dataset serve many training tasks.
+4. Case Package is a file-stage review contract, not a training dataset.
+5. nnUNet remains the first training engine, but adapters prevent lock-in.
+6. label_generation is candidate-label governance, not a pseudo-label script.
+7. Mimics is feasible only after API and geometry proof.
+8. FewShot is an experimental adapter path, not a first-stage production promise.
+9. Developers should be able to locate implementation work from the deck.
+10. The first milestone is an offline file-package loop.
+
+Design system:
+- Editorial architecture deck, not SaaS dashboard.
+- Large claims, fewer tables, more system maps and lifecycle diagrams.
+- Light medical-imaging palette: bone, ink, teal, vascular red, scanner blue.
+- Avoid repeated equal cards. Use one dominant proof object per slide.
+
+Required proof objects:
+- Object relationship map.
+- Domain boundary diagram.
+- Label lifecycle.
+- Three-layer label-space diagram.
+- Case Package containment diagram.
+- Adapter map.
+- First-stage roadmap.
+
+Known limitations:
+- No real CT screenshots are included; all visuals are editable vector diagrams.
+- Output is an editable PPTX generated from repository source.
