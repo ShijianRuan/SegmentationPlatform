@@ -62,14 +62,26 @@ pipelines/
 
 后续接 MONAI、Transformer 时同样新增 Adapter，不改变数据契约。
 
-## 4. 当前实现落点
+## 4. 训练框架接入标准
+
+不同于 nnUNet 的训练框架或算法可以加入 `training` 域，但标准不是“能训练模型”这么宽，而是必须服从平台数据契约：
+
+1. 输入必须是 Dataset Snapshot，不能绕过 Registry 直接读散落文件。
+2. 必须声明如何解释 TaskLabelMap，以及是否需要额外 task 配置。
+3. 必须记录实际预处理和训练配置，例如 resample spacing、patch size、fold、随机种子。
+4. 必须产出 Model Record，记录 Snapshot、代码版本、权重路径、指标和使用边界。
+5. 如果只是用已有模型批量推理生成标签，默认归入 `label_generation`，不是 `training`。
+
+因此 nnUNet、MONAI、FewShot 都可以作为 training Adapter；TotalSegmentator 这类直接生成候选标签的工具，通常先作为 label_generation Adapter。
+
+## 5. 当前实现落点
 
 - 当前主代码在 `pipelines/nnunet/`（nnUNet Adapter 的实际实现）
 - FewShot Adapter 已确认架构位置，但实现后置——需等 Data Registry、Dataset Snapshot 和冻结评估集建好后才能做生产级验证
 - `docs/research/digests/few_shot_learning_digest.md` 记录了少样本学习与平台的集成边界
 - 训练域只关心”如何把任务快照变成模型”，不负责人工标注和候选标签治理
 
-## 5. 为什么 research 不再放这里
+## 6. 为什么 research 不再放这里
 
 像 TTA、持续学习、小样本学习这类研究，会同时影响训练、标签生成、病例选择和标签治理。
 

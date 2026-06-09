@@ -258,6 +258,22 @@ review_export_{case_id}_{review_id}/
 
 ## 7. 需要准备的脚本
 
+拿到 Mimics 软件和 license 后，不要马上开发完整 Adapter。先分两类验证：
+
+| 类别 | 要验证什么 | 结论用途 |
+|---|---|---|
+| Mimics 本身功能 | 图像导入、草稿显示、人工编辑、标签导出、空间往返 | 判断 Mimics 能否作为 review 工具 |
+| 脚本联动能力 | Python scripting 权限、批量创建 mask、自动命名/配色、读取/导出 mask buffer | 判断 Mimics 能否成为自动化 Adapter |
+
+建议顺序：
+
+1. 确认 license 是否包含 Python scripting。
+2. 在 Help 中打开 Scripting Guide，记录 mask、import、export 相关 API。
+3. 用一个病例手动完成 DICOM/NIfTI 图像导入。
+4. 用一个病例测试逐器官 mask 导入、编辑、导出。
+5. 导出后立刻跑 `check_geometry.py`，不要等多个病例后再查。
+6. 手动路径通过后，再写 `import_case_package.py` 和 `export_review_package.py`。
+
 ### 7.1 平台侧脚本
 
 ```text
@@ -283,6 +299,18 @@ Mimics 侧脚本第一版只要求：
 2. 导入逐器官 mask。
 3. 设置 mask 名称和颜色。
 4. 提供一键导出当前 mask 集合。
+
+### 7.3 为什么先用逐器官 mask
+
+逐器官 mask 是 POC 阶段的保守交换格式，不是平台最终唯一格式。
+
+原因：
+
+1. Mimics 内部更自然的对象通常是一个结构一个 mask。
+2. 单个多标签 NIfTI 依赖工具正确解释 label id、名称、颜色和多类别编辑。
+3. 逐器官 mask 的命名可以直接绑定 `anatomy_vocabulary` 或 `review_label_map.yaml`。
+4. 导出后哪个器官错位、丢失或为空，更容易定位。
+5. 平台可以在导回时再用 `merge_masks_to_multilabel.py` 合成训练需要的多标签文件。
 
 ---
 

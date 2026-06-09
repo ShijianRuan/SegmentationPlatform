@@ -26,14 +26,15 @@
 | --- | --- | --- |
 | 1 | `docs/architecture/platform_blueprint.md` | 平台主蓝图，先看全局闭环和三大域边界 |
 | 2 | `docs/architecture/architecture_decisions.md` | 架构决策记录，解释为什么这样定 |
-| 3 | `docs/meeting_minutes_2026-06-07.md` | 会议纪要，记录最新讨论和领导决策 |
-| 4 | `docs/domains/labeling/README.md` | 标注域入口，说明 Case Package、Mimics 和标签导回怎么挂在一起 |
-| 5 | `docs/domains/training/README.md` | 训练域入口，说明当前 nnUNet 管线在平台里的位置 |
-| 6 | `docs/domains/label_generation/README.md` | 标签生成域入口，说明伪标签和候选标签如何回流 |
-| 7 | `docs/research/README.md` | 跨域研究材料入口，供后续能力扩展参考 |
-| 8 | `docs/plans/platform_implementation_plan_2026-10-30.md` | 2026-10-30 前的平台实施总计划、里程碑和验收清单 |
-| 9 | `docs/plans/implementation_backlog.md` | 近期执行草案，方便后面落具体工作 |
-| 10 | `docs/archive/annotation_workflow_early_design.md` | 早期标注设计，作为历史参考 |
+| 3 | `docs/architecture/platform_operational_model.md` | 平台操作模型，说明 Registry、Snapshot、Model Record、Adapter 和用户工作流 |
+| 4 | `docs/meeting_minutes_2026-06-07.md` | 会议纪要，记录最新讨论和领导决策 |
+| 5 | `docs/domains/labeling/README.md` | 标注域入口，说明 Case Package、Mimics 和标签导回怎么挂在一起 |
+| 6 | `docs/domains/training/README.md` | 训练域入口，说明当前 nnUNet 管线在平台里的位置 |
+| 7 | `docs/domains/label_generation/README.md` | 标签生成域入口，说明伪标签和候选标签如何回流 |
+| 8 | `docs/research/README.md` | 跨域研究材料入口，供后续能力扩展参考 |
+| 9 | `docs/plans/platform_implementation_plan_2026-10-30.md` | 2026-10-30 前的平台实施总计划、里程碑和验收清单 |
+| 10 | `docs/plans/implementation_backlog.md` | 近期执行草案，方便后面落具体工作 |
+| 11 | `docs/archive/annotation_workflow_early_design.md` | 早期标注设计，作为历史参考 |
 
 ## 3. 当前文档分层
 

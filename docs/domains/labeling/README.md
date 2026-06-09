@@ -31,7 +31,21 @@
 - 和 `training` 的边界：标注域负责产出可注册的标签，不负责定义任务级训练 label id。
 - 和 `label_generation` 的边界：候选标签可以进入标注域做人工修正，但候选标签是否被接受、如何抽检，属于标签生成域和主蓝图中的准入策略。
 
-## 4. 当前实现落点
+## 4. 数据集接入标准
+
+任意来源的数据集不能直接等同于 `labeling` 域。它应先经过平台 ingest/import，登记为 Image Artifact 和 Label Artifact。只有当它需要人工 review、修正或工具交换时，才进入标注域。
+
+最低接入标准：
+
+1. 图像能登记为 Image Artifact，并记录 shape、spacing、origin/direction 或 affine、hash、来源。
+2. 标签能登记为 Label Artifact；如果是多器官标签，应能按 segment 记录器官、来源和状态。
+3. 外部器官名称能映射到 `anatomy_vocabulary`。
+4. 如果要进入 review 工具，必须能生成 Case Package，并携带 `review_label_map.yaml`。
+5. 导回后必须通过几何、label id 和 provenance 校验。
+
+这保证了后续 Web UI 里“导入数据集”“生成 review 任务”“提交标注结果”都是平台动作，而不是临时脚本拼接。
+
+## 5. 当前实现落点
 
 当前仓库里，这个域的代码还没有独立成模块，但它已经有明确落点：
 

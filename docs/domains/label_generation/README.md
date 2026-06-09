@@ -33,28 +33,53 @@
 ## 4. 标准流程
 
 ```mermaid
-flowchart LR
+flowchart TB
     accTitle: Label Generation Flow
-    accDescr: Label generation turns model or public algorithm outputs into candidate labels, then routes them to review, accepted pseudo labels, or rejection.
+    accDescr: Label generation turns internal models or external algorithms into candidate labels, checks them, and routes them to review, accepted pseudo labels, or rejection.
 
-    image["Image Artifact"]
-    source["内部模型或公开算法"]
-    candidate["candidate_label"]
-    mapping["名称映射<br/>label mapping"]
-    geometry["空间/几何 QC"]
-    content["标签内容 QC"]
-    draft["draft_label"]
-    accepted["accepted_pseudo_label"]
-    rejected["rejected_label"]
+    subgraph Inputs["输入"]
+        image["Image Artifact"]
+        model["Model Record"]
+        ext["公开算法 / 既有算法"]
+    end
 
-    image --> source
-    source --> candidate
+    subgraph Adapter["生成 Adapter"]
+        internal["内部模型批量推理"]
+        external["外部算法适配"]
+    end
+
+    subgraph Candidate["候选标签登记"]
+        candidate["candidate_label"]
+        provenance["provenance<br/>来源、版本、参数"]
+        mapping["label mapping<br/>统一器官名称"]
+    end
+
+    subgraph Gates["QC + Routing"]
+        geometry["空间/几何 QC"]
+        content["标签内容 QC"]
+        policy["routing policy<br/>任务准入策略"]
+    end
+
+    subgraph Outputs["输出"]
+        draft["draft_label<br/>送 labeling review"]
+        accepted["accepted_pseudo_label<br/>可进入 training Snapshot"]
+        rejected["rejected_label<br/>仅记录报告"]
+    end
+
+    image --> internal
+    model --> internal
+    image --> external
+    ext --> external
+    internal --> candidate
+    external --> candidate
+    candidate --> provenance
     candidate --> mapping
     mapping --> geometry
     geometry --> content
-    content --> draft
-    content --> accepted
-    content --> rejected
+    content --> policy
+    policy --> draft
+    policy --> accepted
+    policy --> rejected
 ```
 
 输出分三类：
@@ -83,6 +108,7 @@ QC 只负责给出证据和路由建议，不负责把标签状态改成更“�
 - 批量推理生成候选标签
 - 伪标签质量报告
 - `candidate_label -> draft_label / accepted_pseudo_label` 的规则脚本
+- 不同伪标签生成策略或 routing policy 的替换
   
 可以先从这些文件开始：
 
@@ -94,3 +120,12 @@ adapters/label_generation/
 ```
 
 这样以后你想找“伪标签到底在哪里实现”，不会再被迫在标注和训练之间来回猜。
+
+## 7. 接入标准
+
+label_generation 可以接入已有算法，也可以替换伪标签生成策略，但必须满足四个标准：
+
+1. 输入来自 Image Artifact 或 Model Record。
+2. 输出先登记为 `candidate_label`，不能直接伪装成 `verified_label`。
+3. 必须提供来源、参数、版本、label mapping 和 QC 报告。
+4. 最终去向由 routing policy 决定，而不是由算法自己决定。
