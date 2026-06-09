@@ -1,12 +1,6 @@
 # Few-Shot Learning, In-Context Learning, TTA and Continual Learning for Medical Image Segmentation
 
-> 本文由 `docs/research/originals/` 下三份原始调研文档合并优化而来：
->
-> - `few_shot_learning_original.md`
-> - `in_context_and_continual_learning_original.md`
-> - `test_time_adaptation_continual_interactive_original.md`
->
-> 写作目标：先形成一份便于快速理解的技术综述，再单独讨论这些技术如何进入当前分割平台。本文不把调研记录里的性能排名、GitHub star、会议状态等不稳定信息写成确定事实；涉及开源可尝试性时，以 2026-06-09 可核查结果或原文给出的代码链接为准。
+> 本文先综述少样本学习、视觉上下文学习、测试时自适应、持续学习和交互式分割的主要技术路线，再单独讨论这些能力如何进入当前分割平台。文中不把性能排名、GitHub star、会议状态等易变化信息写成稳定事实；涉及开源可尝试性时，以 2026-06-09 可核查结果为准，未完成核查的条目会明确标注。
 
 ## Key Points
 
@@ -21,7 +15,7 @@
 | 你想快速了解什么 | 建议阅读 |
 | --- | --- |
 | 少样本学习有哪些主流路线 | 第 1 到 3 节 |
-| 三份原始文档里提到的权威论文和技术 | 第 3、4、5、10 节 |
+| 代表性论文、技术路线和工具 | 第 3、4、5、10 节 |
 | 哪些方法有代码可以尝试 | 第 6 节 |
 | 哪些内容适合当前平台先做 | 第 7 到 9 节 |
 | 实现时如何设计 Dataset Snapshot / Adapter / Model Record | 第 8、9 节 |
@@ -67,13 +61,13 @@ Pachetti and Colantonio 的医学影像 few-shot systematic review 总结了 few
 
 ## 3. 经典 Few-Shot Learning 技术谱系
 
-第一份 original 文档覆盖了大量经典 few-shot 文献。它们可以整理为四条主线：生成/增强、度量学习、元学习、迁移学习。下面按“技术理解 + 代表论文 + 对医学分割的价值”归纳。
+经典 few-shot learning 文献大致可以整理为四条主线：生成/增强、度量学习、元学习、迁移学习。下面按“技术理解 + 代表论文 + 对医学分割的价值”归纳。
 
 ### 3.1 早期生成式和样本合成方法
 
 早期 one-shot / low-shot 研究常通过显式建模、共享变换、部件组合或特征生成来弥补样本不足。这些方法对当前 3D 医学分割不是直接可用工具，但它们奠定了两个思想：少样本学习需要可迁移的变形/变异知识；生成样本时不能只复制原图，而要学习类别内变化。
 
-| 代表工作 | 原始文档记录的要点 | 对当前理解的价值 |
+| 代表工作 | 核心思想 | 对当前理解的价值 |
 | --- | --- | --- |
 | Learning from one example through shared densities on transforms | 利用变换共享密度从单样本学习 | 早期 one-shot 思路，强调变换先验 |
 | Fei-Fei et al., Learning Generative Visual Models from Few Training Examples | 用概率生成模型估计少样本类别 | 代表早期生成式 few-shot |
@@ -91,7 +85,7 @@ Pachetti and Colantonio 的医学影像 few-shot systematic review 总结了 few
 
 ### 3.2 数据增强与特征增强
 
-数据增强是 few-shot 里最朴素、也最容易先落地的方向。原始文档区分了监督增强和无监督/生成增强，代表方法包括 FFT、AGA、Dual TriNet、ABS-Net、Hariharan 的 feature hallucination、Delta-encoder、DAGAN、IDeMe-Net 等。
+数据增强是 few-shot 里最朴素、也最容易先落地的方向。常见做法包括监督增强、无监督增强、生成式增强和特征级增强，代表方法包括 FFT、AGA、Dual TriNet、ABS-Net、Hariharan 的 feature hallucination、Delta-encoder、DAGAN、IDeMe-Net 等。
 
 | 代表工作 | 核心思想 | 是否适合医学分割第一阶段 |
 | --- | --- | --- |
@@ -121,7 +115,7 @@ Pachetti and Colantonio 的医学影像 few-shot systematic review 总结了 few
 
 ### 3.4 元学习
 
-元学习希望模型在大量训练任务上学到“如何快速学习”。原始文档按 L2M、L2F、L2P、L2A、L2R 做了归类。
+元学习希望模型在大量训练任务上学到“如何快速学习”。常见归类包括 L2M、L2F、L2P、L2A、L2R。
 
 | 类别 | 含义 | 代表工作 | 当前判断 |
 | --- | --- | --- | --- |
@@ -142,17 +136,17 @@ MAML 是 L2F 的代表：它学习一个适合快速微调的初始化，使模�
 - 冻结 backbone，只训练 decoder/head/adapter/LoRA。
 - 使用 nnU-Net 这类强 baseline，在少样本条件下建立可复现上界/下界。
 
-参数高效微调在基础模型时代更重要。Adapter、prompt tuning、LoRA 通过少量可训练参数适配新任务，降低显存和训练成本。原始文档提到 Adapter-Enhanced Semantic Prompting、Dual-Modality Guided Prompt、CL-LoRA、EWC-LoRA 等方向。需要注意：许多 PEFT/continual 方法来自分类或多模态任务，不能直接推断到 3D 医学分割。
+参数高效微调在基础模型时代更重要。Adapter、prompt tuning、LoRA 通过少量可训练参数适配新任务，降低显存和训练成本。相关方向包括 Adapter-Enhanced Semantic Prompting、Dual-Modality Guided Prompt、CL-LoRA、EWC-LoRA 等。需要注意：许多 PEFT/continual 方法来自分类或多模态任务，不能直接推断到 3D 医学分割。
 
 ## 4. Foundation Model 与 In-Context Visual Learning
 
-第二份 original 文档的重点是基础模型时代的少样本：模型不一定在目标任务上重新训练，而是通过上下文示例、文本指令或多模态 prompt 完成分割。
+基础模型时代的少样本分割不再局限于重新训练模型：模型可以通过上下文示例、文本指令或多模态 prompt 完成分割。
 
 Zhou et al. 的 *Image Segmentation in Foundation Model Era: A Survey* 可作为这部分的综述入口。它把 segmentation foundation models 放在更大的框架里讨论：通用分割、promptable segmentation、open-vocabulary segmentation、in-context segmentation 和医学影像适配。
 
 ### 4.1 Agent + SAM / VLM
 
-原文记录了 “Few-Shot Classification & Segmentation Using Large Language Models Agent”。这类路线通常让 GPT-4V 或多模态大模型观察 support/query，再调用 SAM 或其他分割工具。它的价值在于工作流：LLM 负责推理和工具编排，分割模型负责 mask。
+“Few-Shot Classification & Segmentation Using Large Language Models Agent” 这类路线通常让 GPT-4V 或多模态大模型观察 support/query，再调用 SAM 或其他分割工具。它的价值在于工作流：LLM 负责推理和工具编排，分割模型负责 mask。
 
 局限也很明确：
 
@@ -188,11 +182,11 @@ Painter (*Images Speak in Images*) 是视觉 in-context learning 的代表工作
 
 开源状态：检索到 BAAI 的 [Painter / SegGPT series repository](https://github.com/baaivision/Painter)。可用于研究 2D ICL 分割范式，不应直接推断到 3D 全身分割可生产。
 
-与 MAE 路线并行，Bai et al.（CVPR 2024）探索了一条更接近 LLM 的自回归视觉建模路线：用预训练 VQGAN 将图像离散化为视觉 token 序列，再用 decoder-only Transformer 做 next-token prediction。原始文档指出该方向仍处前沿，模型规模远小于 LLM，且任意粒度分割、对象幻觉和部署效率是未解决的挑战。
+与 MAE 路线并行，Bai et al.（CVPR 2024）探索了一条更接近 LLM 的自回归视觉建模路线：用预训练 VQGAN 将图像离散化为视觉 token 序列，再用 decoder-only Transformer 做 next-token prediction。这类方法仍处前沿，模型规模远小于语言大模型，任意粒度分割、对象幻觉和部署效率仍是未解决的挑战。
 
 ### 4.4 Medical Vision Generalist / Medical MIM
 
-Medical Vision Generalist (*Unifying Medical Imaging Tasks in Context*) 将医学图像任务放入 in-context 统一框架。原始文档记录其使用 Medical MIM，即在医学图像数据上通过 MAE 思路预训练的 ViT，再把示例、查询和输出组织成统一任务。
+Medical Vision Generalist (*Unifying Medical Imaging Tasks in Context*) 将医学图像任务放入 in-context 统一框架。其相关技术路线包括 Medical MIM，即在医学图像数据上通过 MAE 思路预训练的 ViT，再把示例、查询和输出组织成统一任务。
 
 事实边界：已核查到 [arXiv:2406.05565](https://arxiv.org/abs/2406.05565)。OpenReview 检索结果显示其 ICLR 2025 submission 状态不适合在本文中写成稳定接收事实，因此本文仅按 arXiv 候选方法记录。
 
@@ -204,7 +198,7 @@ Medical Vision Generalist (*Unifying Medical Imaging Tasks in Context*) 将医�
 
 ### 4.5 SegICL：医学分割 in-context learning
 
-SegICL 直接面向医学图像分割，原文记录其支持 text-guided segmentation 和 image-mask pair in-context learning。已核查到 [arXiv:2403.16578](https://arxiv.org/abs/2403.16578)。
+SegICL 直接面向医学图像分割，支持 text-guided segmentation 和 image-mask pair in-context learning。已核查到 [arXiv:2403.16578](https://arxiv.org/abs/2403.16578)。
 
 当前判断：
 
@@ -214,7 +208,7 @@ SegICL 直接面向医学图像分割，原文记录其支持 text-guided segmen
 
 ### 4.6 Diffusion-based In-Context Learning 与 DiffSS
 
-原文记录了 diffusion in-context learning 和 DiffSS。扩散模型可以把条件生成、样本合成和分割掩膜生成连接起来。它的潜力在于：通过 support 示例和随机生成过程补充少样本下的分布覆盖。
+Diffusion in-context learning 和 DiffSS 代表了生成式少样本分割的一条路线。扩散模型可以把条件生成、样本合成和分割掩膜生成连接起来。它的潜力在于：通过 support 示例和随机生成过程补充少样本下的分布覆盖。
 
 当前不建议优先实现，原因是：
 
@@ -224,7 +218,7 @@ SegICL 直接面向医学图像分割，原文记录其支持 text-guided segmen
 
 ### 4.7 FM-FSOD：目标检测方向的基础模型少样本
 
-FM-FSOD 是少样本目标检测方向的基础模型方法。原文把它作为 few-shot object detection 的代表，强调视觉语言模型和 foundation model 在新类检测上的优势。
+FM-FSOD 是少样本目标检测方向的基础模型方法，强调视觉语言模型和 foundation model 在新类检测上的优势。
 
 它对器官分割平台不是直接方法，但有两点参考价值：
 
@@ -237,7 +231,7 @@ FM-FSOD 是少样本目标检测方向的基础模型方法。原文把它作为
 
 M3D (*Advancing 3D Medical Image Analysis with Multi-Modal Large Language Models*) 面向 3D 医学多模态分析，包含 M3D-Data 和 M3D-LaMed 等工作。已核查到 [arXiv:2404.00578](https://arxiv.org/abs/2404.00578) 和 [BAAI-DCAI/M3D](https://github.com/BAAI-DCAI/M3D) 仓库。
 
-MedVerse 面向全分辨率 3D 医学图像任务，原文强调它和 SegGPT 一样采用“上下文示例 + 查询图像”的 ICL 思路，但目标是 3D segmentation、transformation、enhancement 等任务。已核查到 [arXiv:2509.09232](https://arxiv.org/abs/2509.09232)、AAAI/OJS 论文页面和 [jiesihu/Medverse](https://github.com/jiesihu/Medverse) 仓库。
+MedVerse 面向全分辨率 3D 医学图像任务，采用“上下文示例 + 查询图像”的 ICL 思路，但目标是 3D segmentation、transformation、enhancement 等任务。已核查到 [arXiv:2509.09232](https://arxiv.org/abs/2509.09232)、AAAI/OJS 论文页面和 [jiesihu/Medverse](https://github.com/jiesihu/Medverse) 仓库。
 
 这两个方向比 2D ICL 更接近当前平台，但仍应按研究验证处理：
 
@@ -248,7 +242,7 @@ MedVerse 面向全分辨率 3D 医学图像任务，原文强调它和 SegGPT �
 
 ## 5. TTA、Continual Learning 与 Interactive Learning
 
-第三份 original 文档覆盖模型部署后的适应问题。它们和 few-shot 的关系是：当模型面对少量新域数据、新任务标签或用户交互时，如何在不大规模重训的情况下变得更适合当前场景。
+TTA、continual learning 和 interactive learning 主要处理模型部署后的适应问题。它们和 few-shot 的关系是：当模型面对少量新域数据、新任务标签或用户交互时，如何在不大规模重训的情况下变得更适合当前场景。
 
 ### 5.1 Test-Time Adaptation
 
@@ -256,11 +250,11 @@ TTA 在测试阶段使用目标域数据调整模型或特征。代表思想包�
 
 - **AdaBN**：用目标域 batch/volume 的 BN 统计量替换或更新源域统计量，缓解特征分布偏移。已核查到 *Revisiting Batch Normalization For Practical Domain Adaptation*。
 - **TENT**：测试时最小化预测熵，通常更新 BN affine 参数。已核查到 OpenReview 和 [DequanWang/TENT](https://github.com/DequanWang/TENT)。
-- **On-the-Fly TTA for Medical Image Segmentation**：原文记录其通过 domain code 调整分割网络归一化层，给出 [On-The-Fly-Adaptation](https://github.com/jeya-maria-jose/On-The-Fly-Adaptation) 代码链接。
+- **On-the-Fly TTA for Medical Image Segmentation**：通过 domain code 调整分割网络归一化层；可参考 [On-The-Fly-Adaptation](https://github.com/jeya-maria-jose/On-The-Fly-Adaptation) 代码仓库。
 - **SicTTA**：单图像持续 TTA，用于医学图像分割，已核查到 ScienceDirect 页面和 [HiLab-git/SicTTA](https://github.com/HiLab-git/SicTTA)。
-- **Progressive Test Time Energy Adaptation / PTTEA**：原文记录为能量模型 TTA，并给出代码链接。
-- **Buffer TTA**：原文记录通过轻量 buffer layers 增加测试时可更新容量。
-- **PBTTA**：原型库驱动的医学超声分割 TTA，原文记录为 Medical Physics 论文，代码未给出。
+- **Progressive Test Time Energy Adaptation / PTTEA**：能量模型 TTA 路线，实施前需要复核论文、代码和任务适配范围。
+- **Buffer TTA**：通过轻量 buffer layers 增加测试时可更新容量，偏通用 TTA。
+- **PBTTA**：原型库驱动的医学超声分割 TTA，代码可用性需实施前复核。
 
 TTA 适合解决跨中心、跨协议、跨设备的推理域偏移。但 TTA 的风险是模型在没有标签监督时发生错误自适应。医学平台使用 TTA 时必须记录：
 
@@ -272,7 +266,7 @@ TTA 适合解决跨中心、跨协议、跨设备的推理域偏移。但 TTA �
 
 ### 5.2 nnSAM：SAM 先验增强 nnU-Net
 
-nnSAM 把 SAM 的视觉特征提取能力嵌入 nnU-Net，同时保留 nnU-Net 的数据中心自动配置能力。原始文档记录其在少样本训练下更突出，并描述了双编码器结构：nnU-Net encoder 与 SAM encoder 特征连接后进入 nnU-Net decoder；SAM encoder 可冻结，实际可用 Mobile-SAM 降低计算量。
+nnSAM 把 SAM 的视觉特征提取能力嵌入 nnU-Net，同时保留 nnU-Net 的数据中心自动配置能力。其双编码器结构由 nnU-Net encoder 与 SAM encoder 组成，二者特征连接后进入 nnU-Net decoder；SAM encoder 可冻结，实际可用 Mobile-SAM 降低计算量。
 
 已核查来源：
 
@@ -283,7 +277,7 @@ nnSAM 把 SAM 的视觉特征提取能力嵌入 nnU-Net，同时保留 nnU-Net �
 
 ### 5.3 Continual / Lifelong Learning
 
-持续学习处理模型不断接收新任务、新域或新类别时的灾难性遗忘。原文把方法分为：
+持续学习处理模型不断接收新任务、新域或新类别时的灾难性遗忘。常见方法可以分为：
 
 - **Regularization**：EWC、LWF 等，在 loss 中约束重要参数。
 - **Replay**：保存旧样本、特征或生成样本，训练新任务时回放。
@@ -293,39 +287,39 @@ nnSAM 把 SAM 的视觉特征提取能力嵌入 nnU-Net，同时保留 nnU-Net �
 
 | 方法 | 来源状态 | 核心思想 | 当前判断 |
 | --- | --- | --- | --- |
-| Lifelong nnU-Net | 已核查 Scientific Reports / PubMed，原文给出代码 | 标准化医学持续分割框架，包含 fine-tuning、EWC、MiB 等基线 | 值得后续作为 continual learning 基线 |
-| CLMS | 原文给出 MIA DOI 和代码链接；搜索只间接确认引用 | source-free continual learning 处理医学分割域差异 | 实施前需复核一手页面 |
-| CLMU-Net | 原文给出 arXiv 和代码链接 | 脑病灶分割的模态无关持续域增量 | 研究候选 |
+| Lifelong nnU-Net | 已核查 Scientific Reports / PubMed | 标准化医学持续分割框架，包含 fine-tuning、EWC、MiB 等基线 | 值得后续作为 continual learning 基线 |
+| CLMS | 待复核一手论文和代码 | source-free continual learning 处理医学分割域差异 | 实施前需复核一手页面 |
+| CLMU-Net | 待复核代码可运行性 | 脑病灶分割的模态无关持续域增量 | 研究候选 |
 | CL-LoRA | 已核查 CVPR 2025 和官方代码 | 用双 LoRA 结构处理类别增量学习 | 思路可借鉴，不是医学分割专用 |
-| Foundation model + LoRA | 原文记录 | 冻结预训练骨干，为每个任务训练 LoRA 插件 | 适合未来多任务模型治理 |
-| EWC-LoRA | 原文给出 arXiv 和代码链接 | 低秩持续学习中的权重正则 | 研究候选 |
+| Foundation model + LoRA | 研究方向 | 冻结预训练骨干，为每个任务训练 LoRA 插件 | 适合未来多任务模型治理 |
+| EWC-LoRA | 待复核任务适配性 | 低秩持续学习中的权重正则 | 研究候选 |
 
 持续学习进入平台前必须先有 Model Registry、评估基准、回滚机制和旧任务保留集。否则“持续更新”会变成不可审计的模型漂移。
 
 ### 5.4 Interactive Learning 与主动标注
 
-Interactive learning 关注人机协同。原文涉及 MONAI Label、SPA、VerSe、多标注者个性化等方向。
+Interactive learning 关注人机协同，典型方向包括 MONAI Label、SPA、VerSe 和多标注者个性化建模。
 
 | 方法/工具 | 来源状态 | 作用 |
 | --- | --- | --- |
 | MONAI Label | 已核查官方仓库和 PubMed | AI-assisted interactive labeling，适合连接 3D Slicer 等标注工具 |
 | SPA | 已核查 ICCV 2025 Open Access 和代码仓库 | 针对医学分割不确定性做用户偏好对齐 |
-| VerSe | 原文给出代码链接 | 多 query prompt 的心脏 MRI 分割 |
-| D-Persona | 原文记录 CVPR 2024 和代码 | 多标注者差异和个性化分割 |
-| ProSeg / ProSona | 原文记录 arXiv/代码 | 多专家或 prompt-guided personalization |
+| VerSe | 待复核代码和任务范围 | 多 query prompt 的心脏 MRI 分割 |
+| D-Persona | 待复核任务范围 | 多标注者差异和个性化分割 |
+| ProSeg / ProSona | 待复核论文和代码 | 多专家或 prompt-guided personalization |
 
 对平台而言，interactive learning 更接近 labeling 域，而不是 training 域。它的价值是减少人工标注成本，让模型输出先被人修正，再回流为高质量标签。
 
 ### 5.5 分布外检测与安全保障
 
-原始文档指出 OOD 检测贯穿 TTA、持续学习和交互式学习三层：模型应对未知输入保持判断能力，避免对分布外数据给出错误且过度自信的预测。平台在设计任何自适应或持续更新机制时，都应考虑 OOD 门控（例如基于预测熵、特征距离或解剖合理性），在不确定时回退到安全模式而非静默输出错误结果。
+OOD 检测贯穿 TTA、持续学习和交互式学习三层：模型应对未知输入保持判断能力，避免对分布外数据给出错误且过度自信的预测。平台在设计任何自适应或持续更新机制时，都应考虑 OOD 门控（例如基于预测熵、特征距离或解剖合理性），在不确定时回退到安全模式而非静默输出错误结果。
 
 ## 6. 开源可尝试性与优先级
 
-下表把三份 original 里出现的主要技术按“是否能尝试”和“当前优先级”整理。开源状态分三类：
+下表按“是否能尝试”和“当前优先级”整理主要技术。开源状态分三类：
 
 - **已核查**：本次已通过论文页、官方仓库、PubMed 或出版社页面核对。
-- **原文给出**：原始文档提供代码链接，但本文未逐一打开复核。
+- **待复核**：已有论文或代码线索，但实施前需要确认仓库、license、依赖和任务范围。
 - **未确认**：未稳定检索到官方代码或状态不清。
 
 | 技术/方法 | 类型 | 代码状态 | 当前可尝试性 | 优先级 |
@@ -333,7 +327,7 @@ Interactive learning 关注人机协同。原文涉及 MONAI Label、SPA、VerSe
 | nnU-Net | 医学分割强 baseline | 已核查论文；代码生态成熟 | 立即用于 low-shot baseline | P0 |
 | MONAI Label | 交互式标注框架 | 已核查 | 可调研标注工具链 | P1 |
 | nnSAM | SAM + nnU-Net | 已核查 | 可作为第二阶段 low-shot 增强 | P1 |
-| Lifelong nnU-Net | 持续学习医学分割 | 已核查论文；原文给出代码 | 有模型治理后再试 | P2 |
+| Lifelong nnU-Net | 持续学习医学分割 | 已核查论文；代码需实施前复核 | 有模型治理后再试 | P2 |
 | TENT | 通用 TTA | 已核查 | 可作为 TTA 基础理解和实验参考 | P2 |
 | SicTTA | 医学分割 TTA | 已核查 | 可用于后续域偏移实验 | P2 |
 | Painter / SegGPT | 视觉 ICL 分割 | 已核查代码线索 | 可研究 2D ICL，不作为 3D 主线 | P2 |
@@ -342,12 +336,12 @@ Interactive learning 关注人机协同。原文涉及 MONAI Label、SPA、VerSe
 | MedVerse | 3D 医学 ICL | 已核查 | 可做研究复现，需查 license/显存 | P2 |
 | Medical Vision Generalist | 医学 ICL | 已核查 arXiv；会议状态不写死 | 候选研究 | P3 |
 | SegICL | 医学 ICL 分割 | 论文已核查；代码未确认 | 先读论文，再决定复现 | P3 |
-| On-the-Fly TTA | 医学分割 TTA | 原文给出代码 | 后续域适应实验 | P3 |
-| PTTEA | TTA | 原文给出代码 | 实施前复核 | P3 |
-| Buffer TTA | TTA | 原文给出代码 | 偏通用分类/TTA，暂缓 | P3 |
-| PBTTA | 医学超声 TTA | 原文记录代码不可用 | 暂缓 | P4 |
-| CLMS / CLMU-Net / EWC-LoRA | 持续学习 | 原文给出线索 | 实施前复核 | P4 |
-| DiffSS / diffusion ICL | 生成式 few-shot 分割 | 原文记录 | 暂缓 | P4 |
+| On-the-Fly TTA | 医学分割 TTA | 待复核代码和依赖 | 后续域适应实验 | P3 |
+| PTTEA | TTA | 待复核代码和任务范围 | 实施前复核 | P3 |
+| Buffer TTA | TTA | 待复核代码和任务范围 | 偏通用分类/TTA，暂缓 | P3 |
+| PBTTA | 医学超声 TTA | 代码可用性未确认 | 暂缓 | P4 |
+| CLMS / CLMU-Net / EWC-LoRA | 持续学习 | 待复核 | 实施前复核 | P4 |
+| DiffSS / diffusion ICL | 生成式 few-shot 分割 | 待复核 | 暂缓 | P4 |
 | FM-FSOD | 少样本检测 | 方向相关但非分割 | 仅作为 detection 参考 | P4 |
 
 ---
@@ -639,9 +633,9 @@ TTA、continual learning、interactive learning 可以在这个闭环之后逐�
 | MONAI Label | [GitHub](https://github.com/project-monai/monailabel), [PubMed](https://pubmed.ncbi.nlm.nih.gov/38776843/) |
 | SPA | [ICCV Open Access](https://openaccess.thecvf.com/content/ICCV2025/html/Zhu_SPA_Efficient_User-Preference_Alignment_against_Uncertainty_in_Medical_Image_Segmentation_ICCV_2025_paper.html), [GitHub](https://github.com/SuperMedIntel/SPA) |
 
-## 14. 原始文档吸收的经典 Few-Shot 论文
+## 14. 经典 Few-Shot 论文索引
 
-这些论文来自第一份 original 的系统整理。本文按技术脉络吸收其思想；若要在正式论文或报告中精确引用页码、会议和年份，应再查原始出版信息。
+本节集中列出经典 few-shot learning 论文，便于进一步追溯方法源头。若要在正式论文或报告中精确引用页码、会议和年份，应再查正式出版信息。
 
 | 类别 | 代表论文 |
 | --- | --- |
@@ -654,72 +648,72 @@ TTA、continual learning、interactive learning 可以在这个闭环之后逐�
 | 参数生成 / 动态权重 | [Learning feed-forward one-shot learners](https://arxiv.org/pdf/1606.05233); [LGM-Net](https://arxiv.org/pdf/1905.06331); [Learning to learn: Model regression networks for easy small sample learning](https://link.springer.com/content/pdf/10.1007/978-3-319-46466-4_37.pdf); [Meta Networks](https://arxiv.org/pdf/1703.00837); [Rapid Adaptation with Conditionally Shifted Neurons](https://arxiv.org/pdf/1712.09926) |
 | 记忆增强 | [Meta-Learning with Memory-Augmented Neural Networks](https://proceedings.mlr.press/v48/santoro16.pdf); [Attentive Recurrent Comparators](https://arxiv.org/pdf/1703.00767) |
 
-## 15. 原始文档吸收的 Foundation / TTA / Continual / Interactive 论文
+## 15. Foundation / TTA / Continual / Interactive 文献索引
 
-这些条目来自第二、三份 original。本文已在正文中吸收其技术含义；下表用于保留文献线索和可尝试性判断。标注“原文记录”的条目不表示本文已经逐条复现实验或核查 license。
+本节集中列出 foundation model、TTA、continual learning 和 interactive learning 相关文献线索，并给出简要技术含义和核查状态。标注“待复核”的条目不表示不可用，只表示在进入实现前需要确认论文来源、代码仓库、license、依赖和任务适配范围。
 
-| 方向 | 文献/工具 | 原文要点 | 本文处理 |
+| 方向 | 文献/工具 | 技术要点 | 核查状态 |
 | --- | --- | --- | --- |
 | Foundation model survey | [Image Segmentation in Foundation Model Era: A Survey](https://arxiv.org/abs/2408.12957) | 基础模型时代图像分割综述 | 已核查，作为综述入口 |
-| LLM agent + segmentation | [Few-Shot Classification & Segmentation Using Large Language Models Agent](https://arxiv.org/abs/2311.12065) | LLM agent 调用视觉/分割工具完成少样本任务 | 原文记录，作为工具编排参考 |
+| LLM agent + segmentation | [Few-Shot Classification & Segmentation Using Large Language Models Agent](https://arxiv.org/abs/2311.12065) | LLM agent 调用视觉/分割工具完成少样本任务 | 待复核实现可用性，作为工具编排参考 |
 | Reasoning segmentation | [LISA: Reasoning Segmentation via Large Language Model](https://arxiv.org/abs/2308.00692) | 用语言推理定位并输出 mask | 已核查，研究候选 |
 | Visual ICL | [Images Speak in Images: A Generalist Painter for In-Context Visual Learning](https://arxiv.org/abs/2212.02499) | image-in image-out 的视觉上下文学习 | 已核查，理解 ICL 范式 |
 | Visual ICL segmentation | [SegGPT: Segmenting Everything In Context](https://arxiv.org/abs/2304.03284) | 用上下文示例做通用分割 | 已核查，2D ICL 参考 |
-| Scalable visual modeling | Sequential modeling enables scalable learning for large vision models | 原文记录为 CVPR 2024 视觉序列建模方向 | 原文记录，作为基础模型训练范式参考 |
-| Unified visual understanding | Towards More Unified In-context Visual Understanding | 原文记录为统一上下文视觉理解 | 原文记录，作为 ICL 扩展参考 |
+| Scalable visual modeling | Sequential modeling enables scalable learning for large vision models | 视觉序列建模方向 | 待复核，作为基础模型训练范式参考 |
+| Unified visual understanding | Towards More Unified In-context Visual Understanding | 统一上下文视觉理解 | 待复核，作为 ICL 扩展参考 |
 | Medical ICL | [Medical Vision Generalist](https://arxiv.org/abs/2406.05565) | 医学图像任务 in-context 统一建模 | 已核查 arXiv；会议状态不写死 |
 | Medical ICL segmentation | [SegICL](https://arxiv.org/abs/2403.16578) | 医学分割的多模态 in-context learning | 已核查论文；代码未确认 |
-| Diffusion ICL | In-context learning unlocked for diffusion models | 原文记录为 NeurIPS 2023 diffusion ICL | 原文记录，暂不作为平台首选 |
-| Few-shot semantic segmentation | [DiffSS](https://arxiv.org/abs/2307.00773) | diffusion model for few-shot semantic segmentation | 原文记录，暂缓 |
-| Few-shot object detection survey | Beyond few-shot object detection: A detailed survey | 原文记录为 FSOD 综述 | 仅作检测方向参考 |
+| Diffusion ICL | In-context learning unlocked for diffusion models | diffusion ICL | 待复核，暂不作为平台首选 |
+| Few-shot semantic segmentation | [DiffSS](https://arxiv.org/abs/2307.00773) | diffusion model for few-shot semantic segmentation | 待复核，暂缓 |
+| Few-shot object detection survey | Beyond few-shot object detection: A detailed survey | FSOD 综述 | 待复核，作为检测方向参考 |
 | Foundation FSOD | FM-FSOD | foundation model for few-shot object detection | 非分割主线，作为 vision-language/prototype 参考 |
 | 3D medical MLLM | [M3D](https://arxiv.org/abs/2404.00578) | 3D 医学多模态大模型和数据集 | 已核查，研究复现候选 |
 | 3D medical ICL | [MedVerse](https://arxiv.org/abs/2509.09232) | 全分辨率 3D 医学 ICL 模型 | 已核查，研究复现候选 |
 | Interactive labeling | [MONAI Label](https://github.com/project-monai/monailabel) | AI-assisted 3D medical image labeling | 已核查，labeling 域工具参考 |
-| Continual prompting | [Adapter-Enhanced Semantic Prompting for Continual Learning](https://arxiv.org/abs/2412.11074) | adapter + semantic prompt 持续学习 | 原文记录，PEFT 思路参考 |
-| Multimodal continual learning | Dual-Modality Guided Prompt for Continual Learning | 原文记录为 ICLR 2025 方向 | 原文记录，实施前复核 |
-| TTA index | [awesome-test-time-adaptation](https://github.com/tim-learn/awesome-test-time-adaptation/tree/main) | TTA 研究索引 | 原文记录，查方法入口 |
+| Continual prompting | [Adapter-Enhanced Semantic Prompting for Continual Learning](https://arxiv.org/abs/2412.11074) | adapter + semantic prompt 持续学习 | 待复核任务适配性，PEFT 思路参考 |
+| Multimodal continual learning | Dual-Modality Guided Prompt for Continual Learning | 多模态持续学习 prompt 方法 | 待复核 |
+| TTA index | [awesome-test-time-adaptation](https://github.com/tim-learn/awesome-test-time-adaptation/tree/main) | TTA 研究索引 | 工具索引，可作为查方法入口 |
 | AdaBN | [Revisiting Batch Normalization For Practical Domain Adaptation](https://arxiv.org/abs/1603.04779) | 用目标域 BN 统计量做域适应 | 已核查，TTA 基础 |
 | TENT | [Tent: Fully Test-Time Adaptation by Entropy Minimization](https://openreview.net/forum?id=uXl3bZLkr3c) | 测试时最小化预测熵 | 已核查，TTA 基础 |
-| Medical TTA | [On-the-Fly Test-time Adaptation for Medical Image Segmentation](https://arxiv.org/abs/2203.05574) | 用 domain code 调整归一化层 | 已核查论文；代码为原文给出 |
-| Foundation-model TTA | Test-time Adaptation for Foundation Medical Segmentation Model without Parametric Updates | 原文记录为 ICCV 2025，无代码 | 原文记录，实施前复核 |
+| Medical TTA | [On-the-Fly Test-time Adaptation for Medical Image Segmentation](https://arxiv.org/abs/2203.05574) | 用 domain code 调整归一化层 | 已核查论文；代码和依赖需实施前复核 |
+| Foundation-model TTA | Test-time Adaptation for Foundation Medical Segmentation Model without Parametric Updates | 面向医学分割基础模型的非参数更新 TTA | 待复核 |
 | Continual TTA | [SicTTA](https://www.sciencedirect.com/science/article/abs/pii/S1361841525004050) | 单图像持续 TTA，用于医学分割 | 已核查，后续域偏移候选 |
-| Energy-based TTA | Progressive Test Time Energy Adaptation | 原文记录 PTTEA 和代码 | 原文记录，实施前复核 |
-| Buffer TTA | [Buffer layers for Test-Time Adaptation](https://arxiv.org/abs/2510.21271) | 测试时插入轻量 buffer layers | 原文记录，偏通用 TTA |
-| Prototype-bank TTA | Prototype bank-driven TTA for medical ultrasound segmentation | 原文记录 Medical Physics 论文，代码不可用 | 原文记录，超声方向参考 |
+| Energy-based TTA | Progressive Test Time Energy Adaptation | PTTEA / energy-based TTA | 待复核 |
+| Buffer TTA | [Buffer layers for Test-Time Adaptation](https://arxiv.org/abs/2510.21271) | 测试时插入轻量 buffer layers | 待复核，偏通用 TTA |
+| Prototype-bank TTA | Prototype bank-driven TTA for medical ultrasound segmentation | 原型库驱动的医学超声分割 TTA | 待复核，超声方向参考 |
 | SAM + nnU-Net | [nnSAM](https://github.com/Kent0n-Li/nnSAM) | SAM encoder + nnU-Net，小样本分割增强 | 已核查，第二阶段候选 |
-| Continual survey | [Continual Learning in Medical Imaging: A Survey and Practical Analysis](https://doi.org/10.1145/3785663) | 医学影像持续学习综述 | 原文记录，背景参考 |
-| Continual medicine review | [Continual Learning in Medicine: A Systematic Literature Review](https://doi.org/10.1007/s11063-024-11709-7) | 医学持续学习系统综述 | 原文记录，背景参考 |
+| Continual survey | [Continual Learning in Medical Imaging: A Survey and Practical Analysis](https://doi.org/10.1145/3785663) | 医学影像持续学习综述 | 待复核全文，背景参考 |
+| Continual medicine review | [Continual Learning in Medicine: A Systematic Literature Review](https://doi.org/10.1007/s11063-024-11709-7) | 医学持续学习系统综述 | 待复核全文，背景参考 |
 | Lifelong segmentation | [Lifelong nnU-Net](https://www.nature.com/articles/s41598-023-34484-2) | 医学持续分割标准化框架 | 已核查，后续基线 |
-| Source-free continual segmentation | CLMS | 医学分割 source-free continual learning | 原文记录，需复核一手页面 |
-| Modality-incremental segmentation | [CLMU-Net](https://arxiv.org/abs/2601.13927) | 脑病灶分割的模态无关持续域增量 | 原文记录，研究候选 |
+| Source-free continual segmentation | CLMS | 医学分割 source-free continual learning | 待复核一手页面 |
+| Modality-incremental segmentation | [CLMU-Net](https://arxiv.org/abs/2601.13927) | 脑病灶分割的模态无关持续域增量 | 待复核，研究候选 |
 | Continual LoRA | [CL-LoRA](https://openaccess.thecvf.com/content/CVPR2025/papers/He_CL-LoRA_Continual_Low-Rank_Adaptation_for_Rehearsal-Free_Class-Incremental_Learning_CVPR_2025_paper.pdf) | 双 LoRA 结构处理类别增量学习 | 已核查，非医学分割专用 |
-| Frozen FM + LoRA | Few-Shot Continual Learning for 3D Brain MRI with Frozen Foundation Models | 冻结基础模型并训练 LoRA 插件 | 原文记录，需复核 |
-| Continual learning critique | [What is Wrong with Continual Learning in Medical Image Segmentation?](https://doi.org/10.1145/3746259.3760435) | 对医学分割持续学习设置的反思 | 原文记录，治理参考 |
-| EWC-LoRA | [Revisiting Weight Regularization for Low-Rank Continual Learning](https://arxiv.org/abs/2602.17559) | 低秩持续学习中的权重正则 | 原文记录，研究候选 |
+| Frozen FM + LoRA | Few-Shot Continual Learning for 3D Brain MRI with Frozen Foundation Models | 冻结基础模型并训练 LoRA 插件 | 待复核 |
+| Continual learning critique | [What is Wrong with Continual Learning in Medical Image Segmentation?](https://doi.org/10.1145/3746259.3760435) | 对医学分割持续学习设置的反思 | 待复核全文，治理参考 |
+| EWC-LoRA | [Revisiting Weight Regularization for Low-Rank Continual Learning](https://arxiv.org/abs/2602.17559) | 低秩持续学习中的权重正则 | 待复核，研究候选 |
 | Preference alignment | [SPA](https://openaccess.thecvf.com/content/ICCV2025/html/Zhu_SPA_Efficient_User-Preference_Alignment_against_Uncertainty_in_Medical_Image_Segmentation_ICCV_2025_paper.html) | 医学分割用户偏好对齐 | 已核查，interactive 候选 |
-| Prompted cardiac segmentation | VerSe | 多 query prompt 的心脏 MRI 分割 | 原文记录，需复核 |
-| Multi-rater personalization | D-Persona | 多标注者医学分割差异建模 | 原文记录，个性化参考 |
-| Probabilistic multi-rater | ProSeg | 多标注者概率建模 | 原文记录，个性化参考 |
-| Prompt-guided personalization | ProSona | 多专家 prompt-guided personalization | 原文记录，个性化参考 |
+| Prompted cardiac segmentation | VerSe | 多 query prompt 的心脏 MRI 分割 | 待复核 |
+| Multi-rater personalization | D-Persona | 多标注者医学分割差异建模 | 待复核，个性化参考 |
+| Probabilistic multi-rater | ProSeg | 多标注者概率建模 | 待复核，个性化参考 |
+| Prompt-guided personalization | ProSona | 多专家 prompt-guided personalization | 待复核，个性化参考 |
 
 ## 16. 实施前仍需二次复核的条目
 
 | 条目 | 复核原因 |
 | --- | --- |
-| CLMS | 本次搜索未稳定返回一手 ScienceDirect/DOI 页面和官方仓库；原文给出 DOI 与代码线索 |
-| CLMU-Net | 原文给出 arXiv 和代码，实施前需确认代码可运行性 |
-| PTTEA | 原文给出代码，实施前需确认论文页、任务范围和 license |
-| Buffer TTA | 原文给出 NeurIPS 2025/代码线索，实施前需确认是否适用于医学分割 |
-| PBTTA | 原文记录代码不可用，若用于超声任务需先查一手论文 |
-| EWC-LoRA | 原文给出 arXiv/代码，属于低秩持续学习，需确认和分割任务的关系 |
-| VerSe / ProSeg / ProSona | 原文给出代码或 arXiv 线索，属于交互/个性化方向，实施前需确认任务、数据和 license |
+| CLMS | 本次搜索未稳定返回一手 ScienceDirect/DOI 页面和官方仓库；实施前需重新核查 |
+| CLMU-Net | 实施前需确认代码可运行性、数据假设和 license |
+| PTTEA | 实施前需确认论文页、任务范围、代码和 license |
+| Buffer TTA | 实施前需确认是否适用于医学分割 |
+| PBTTA | 若用于超声任务，需先查一手论文和代码可用性 |
+| EWC-LoRA | 属于低秩持续学习，需确认和医学分割任务的关系 |
+| VerSe / ProSeg / ProSona | 属于交互/个性化方向，实施前需确认任务、数据、代码和 license |
 | PapersWithCode leaderboard/SOTA | 排名会变化，不应写入稳定架构文档；实现当天重新查 |
 
 ## 17. 文档维护规则
 
 1. 新增论文必须附一手来源，优先 arXiv、OpenReview、CVF、PubMed、出版社页面或官方 GitHub。
 2. 引用性能数字时必须同时写数据集、shot 设置、评价指标、是否复现。
-3. 开源状态必须区分“已核查”“原文给出”“未确认”。
+3. 开源状态必须区分“已核查”“待复核”“未确认”。
 4. 研究综述和平台实现建议分开写，避免读者误以为所有方法都要立即实现。
 5. 与平台架构冲突时，以 `docs/architecture/platform_blueprint.md` 和各实现域文档为准。
