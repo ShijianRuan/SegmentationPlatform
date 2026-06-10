@@ -1,8 +1,8 @@
 # Mimics 标注工具 POC 验证方案
 
-> 版本：v0.1
-> 日期：2026-06-06
-> 状态：执行草案；事实边界以 `docs/domains/labeling/mimics_feasibility.md` 为准
+> 版本：v0.2
+> 日期：2026-06-10
+> 状态：执行草案；API 参考以 `docs/domains/labeling/mimics_reference.md` 为准；事实边界以 `docs/domains/labeling/mimics_feasibility.md` 为准
 
 ---
 
@@ -268,7 +268,8 @@ review_export_{case_id}_{review_id}/
 建议顺序：
 
 1. 确认 license 是否包含 Python scripting。
-2. 在 Help 中打开 Scripting Guide，记录 mask、import、export 相关 API。
+2. 在 Help 中打开 Scripting Guide，**对照 `mimics_reference.md` §5 的关键 API 清单逐项确认**。
+3. **优先验证 M5（空间往返）**，因为 DICOM↔NIfTI affine 转换是已知社区问题（详见 `mimics_reference.md` §4-M5）。
 3. 用一个病例手动完成 DICOM/NIfTI 图像导入。
 4. 用一个病例测试逐器官 mask 导入、编辑、导出。
 5. 导出后立刻跑 `check_geometry.py`，不要等多个病例后再查。
