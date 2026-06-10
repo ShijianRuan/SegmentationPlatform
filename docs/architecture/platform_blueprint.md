@@ -123,6 +123,8 @@ flowchart LR
 
 这些概念的最小记录形式见 `docs/architecture/platform_operational_model.md`。第一阶段可以先用 JSON/YAML manifest 和文件系统实现，后续再迁移到数据库和 Web UI。
 
+第一阶段不必建立完整 Patient 表，但 Case manifest 必须保留 `patient_id_hash` 或 `leakage_group_id`。这样可以先解决同一患者多次检查跨 split 泄漏的问题；后续服务化时再把 Patient/Subject 提升为独立实体。
+
 ## 6. 标签设计
 
 ### 6.1 统一器官名称不是统一训练编号
@@ -171,6 +173,22 @@ combine_map:
 
 `combine_map` 的用途要单独说明：它不是训练 label map。现有 v500 方案由多个局部模型组合形成全身结果，每个模型训练时都可以从 1 开始编号，因此不同模型的 label id 会重复。若要把肺、肝胆、椎体等多个模型输出合成一个全身 mask，就需要一个全局展示编号。训练时 `liver = 2`，全身合并展示时 `liver = 37`，这不是冲突，因为它们服务不同阶段。
 
+`combine_map` 只定义“结构 -> 全局展示编号”，不负责解决多个模型在同一体素上的冲突。冲突解决必须放在单独的 `combine_policy` 或后处理配置中，例如：
+
+```yaml
+combine_policy:
+  policy_id: CT_Combine_Default
+  conflict_strategy: priority_then_confidence
+  priority:
+    gallbladder: 90
+    liver: 80
+  tie_breaker: higher_probability
+  on_unresolved_conflict: mark_conflict_and_keep_empty
+  log_conflict_voxels: true
+```
+
+默认原则是确定性合并、显式记录冲突，不允许静默覆盖。若没有概率图，使用器官优先级；若有概率图，优先级相同才用置信度。
+
 ### 6.3 同一套数据能服务多个任务
 
 同一个病例的图像和标签只在 Data Registry 中注册一次。不同训练任务通过 Dataset Snapshot 选择它们需要的病例、器官和标签状态。
@@ -192,6 +210,8 @@ flowchart TB
 
 需要注意：同一病例可以进入多个任务，但训练/验证/测试拆分必须按病例或患者级别冻结，不能让同一个患者在一个任务里训练、另一个相近评估任务里泄漏。
 
+Split 的归属是 Dataset Snapshot。可以有全局 `SplitPlan` 作为模板，但每个 Snapshot 必须保存或引用当时使用的 split 版本、`leakage_group_id` 和生成参数。同一病例可以进入多个任务；问题不在“跨任务复用”，而在“用 A 任务训练出的模型评估 B 任务时是否发生同患者泄漏”。第一阶段用训练 Snapshot 与评估 Snapshot 的 `leakage_group_id` 交集做检查即可，复杂模型 lineage 分析后续再做。
+
 ### 6.4 缺失标签不等于器官不存在
 
 医学分割里常见三种情况：
@@ -209,6 +229,14 @@ flowchart TB
 1. 数据导入 Registry 时，记录扫描范围和器官标签覆盖状态。
 2. Dataset Snapshot 创建时，决定某个 case 的某个器官是否能作为当前任务监督，不能把 `missing_label` 自动导出成背景。
 
+训练导出默认采用保守策略：
+
+- 对单器官或逐器官任务：某 case 对某器官是 `missing_label` 时，该 case 不参与该器官监督。
+- 对 nnUNet 标准多类任务：如果缺失的是当前任务目标器官，默认排除整个 case，不导入 `labelsTr`，避免把缺失器官写成背景。
+- 只有当某个 Adapter 明确支持 ignore mask / partial-label loss，并在 Model Record 中记录实现方式时，才允许对缺失器官体素做 loss mask。
+
+因此第一阶段 nnUNet Adapter 的默认实现不是“给 missing_label 体素做 loss mask”，而是“在 Snapshot/export 阶段排除不完整监督”。这会牺牲部分数据量，但能避免把未标注器官误当负样本。
+
 ## 7. 标签状态和训练准入
 
 用户定义的“金标准”是最终用于训练的标签，这可以来自人工确认，也可以来自高质量伪标签。为了避免混淆，文档里建议使用“训练准入标签”表达最终进入训练的标签，同时保留来源状态。
@@ -225,6 +253,8 @@ flowchart TB
 注意：
 - `allow_status` 可以包含任意标签状态，平台只为每个状态提供建议的默认值。
 - 如果信任某个特定算法来源（如 TotalSegmentator），任务策略可以显式将 `candidate_label` 纳入 `allow_status`，同时用 `trusted_sources` 限定来源范围。
+- 对 BTCV、AMOS 等公认公开数据集，平台不要求必须人工重审后改成 `verified_label`。更合理的做法是保留 `source_label` 状态，同时在 `label_policy` 中显式允许可信数据集版本进入训练，例如 `allow_status: [source_label, verified_label]` 加 `trusted_sources: [BTCV:v1]`。
+- `source_label` 与 `accepted_pseudo_label` 的区别是 provenance：前者来自外部数据集自带标注，后者来自模型/算法输出并经平台规则接受。二者都可以进训练，但不能混淆来源。
 - 核心原则是 **provenance（来源追溯）永不造假**：标签的真实状态永远保留，通过训练准入策略来灵活控制"谁可以进训练"，而不是在状态流转中造假。
 
 训练任务必须显式声明标签准入策略。平台默认允许 `accepted_pseudo_label` 进入训练，特定任务可通过 `label_policy` 排除。例如：
@@ -265,6 +295,17 @@ segments:
 
 训练者通常只选择 `label_policy`，例如允许哪些状态和来源进入 Snapshot；平台负责按 segment 过滤。
 
+Label Artifact 的整体状态不参与训练准入，训练准入只看 segment 级状态。Artifact 层只维护生命周期状态，例如 `active`、`superseded`、`rejected_file`。如果一个多标签文件里肝是 `verified_label`、肾是 `accepted_pseudo_label`，该 Artifact 可以显示为 `mixed_segments`，但这只是 UI 摘要，不是训练判断依据。
+
+物理文件格式允许两种：
+
+1. 单个多标签 NIfTI：segment 通过 `value` 指向 label id。
+2. 逐器官独立 mask 组：segment 通过 `path` 指向该器官二值 mask。
+
+平台内部不强制二选一；Adapter 必须声明自己接受哪种格式，必要时由导出层转换。Mimics POC 阶段优先逐器官 mask 是工具交换策略，不是平台唯一数据模型。
+
+标签采用追加式管理。`draft_label -> verified_label`、人工修正、QC 修复都创建新的 `label_id` 或新文件 hash，并记录 `parent_label_id` 和操作人；旧文件保留，可标记为 `superseded`，但不能覆盖写。第一阶段不做完整版本图，只保证不可覆盖和可追溯。Snapshot 引用的是具体 `label_id/hash`，因此已有 Snapshot 不受后续修正影响。
+
 ### 7.1 QC 不是一个单独标签状态
 
 QC（Quality Control，质量控制）是标签进入后续流程前的检查，不是一个新的标签状态。第一阶段把 QC 分成三层：
@@ -304,6 +345,10 @@ Data Registry、Dataset Snapshot 和 Model Record 都是抽象概念，但不能
 
 coarse 任务的低分辨率配置应记录在 Dataset Snapshot 或它引用的 preprocess profile 中，例如目标 spacing、插值方式和导出 profile。真正的 resample 应在 training Adapter 或 nnUNet preprocessing 阶段执行，执行后的实际参数和模型指标写回 Model Record。
 
+Dataset Snapshot 的冻结语义是：冻结引用列表、hash、split、label_policy 和预处理意图；默认不复制实际影像数据。Snapshot 是 immutable manifest，一旦创建不再修改。如果某个 Label Artifact 后续被修正或重新验证，会生成新的 `label_id/hash`；旧 Snapshot 仍指向旧标签。若要使用新标签，必须创建新 Snapshot。第一阶段可以额外 materialize 一份导出目录作为缓存，但缓存不是 Snapshot 的真相来源。
+
+FewShot Adapter 共享 Dataset Snapshot 数据契约，但第一阶段不把 few-shot episode 写进主 Snapshot schema。更轻量的做法是：Snapshot 冻结 eligible pool、validation/test；实验性的 `fewshot_protocol.yaml` 作为 sidecar 记录 support/query episode、shot 数、重复次数和随机种子，并随 Model Record 保存。这样 FewShot 不需要绕过 Snapshot，也不会污染传统 train/val/test 定义。
+
 ### 8.3 Adapter 接入标准
 
 Adapter 的目标不是把所有工具抽象成同一种内部实现，而是保证输入输出契约稳定。
@@ -312,9 +357,11 @@ Adapter 的目标不是把所有工具抽象成同一种内部实现，而是保
 | --- | --- |
 | 数据导入 / labeling | 任意来源数据集必须先转成 Image Artifact 和 Label Artifact；如果进入人工 review，再生成 Case Package |
 | training | 输入必须是 Dataset Snapshot；必须解释 TaskLabelMap；必须记录实际预处理和训练配置；必须产出 Model Record |
-| label_generation | 输入来自 Image Artifact 或 Model Record；输出先登记为 `candidate_label`；必须提供来源、label mapping 和 QC 报告 |
+| label_generation | 输入来自 Image Artifact 和 `generator metadata`；输出先登记为 `candidate_label`；必须提供来源、label mapping 和 QC 报告 |
 
 因此，一个不同于 nnUNet 的训练框架可以加入 `training` 域，但它必须消费 Snapshot 并产出 Model Record。一个已有分割算法或伪标签策略也可以加入 `label_generation`，但它不能直接把输出伪装成 `verified_label`。
+
+第一阶段不需要把外部算法建成完整核心表，但必须有轻量 `generator metadata`，可以是 Label Artifact 的 `source.generator` 字段或一个 `generator.yaml`。它记录算法/模型名称、版本、参数、权重或镜像、license 状态、适用范围和调用方式。平台自己训练出的模型用 Model Record 作为来源；TotalSegmentator、CADS、脚本规则、外部 Docker/CLI 算法用 `generator metadata` 作为来源。`label_generation` 不应存在“无来源记录”的特殊路径。
 
 ### 8.4 标签生成与回流治理
 
@@ -327,8 +374,7 @@ flowchart TB
 
     subgraph Inputs["输入"]
         image["Image Artifact"]
-        model["Model Record"]
-        public["公开算法或既有算法"]
+        generator["generator metadata<br/>Model Record / 外部算法 / 规则脚本"]
     end
 
     subgraph Generation["生成 Adapter"]
@@ -355,9 +401,9 @@ flowchart TB
     end
 
     image --> infer
-    model --> infer
+    generator --> infer
     image --> external
-    public --> external
+    generator --> external
     infer --> candidate
     external --> candidate
     candidate --> mapping
@@ -370,7 +416,7 @@ flowchart TB
     policy --> rejected
 ```
 
-公开算法的输出不能直接当作平台真值。它先是 `candidate_label`，经过 label mapping、空间校验、质量规则或抽检后，有三个出口：进入人工修正的 `draft_label`、按任务策略接收的 `accepted_pseudo_label`、或被丢弃的 `rejected_label`。
+公开算法的输出不能直接当作平台真值。它先是 `candidate_label`，经过 label mapping、空间校验、质量规则或抽检后，有三个出口：进入人工修正的 `draft_label`、按任务策略接收的 `accepted_pseudo_label`、或被丢弃的 `rejected_label`。公开算法必须写入 `generator metadata`；平台自己训练出的模型则通过 Model Record 作为来源进入此流程。
 
 ### 8.5 标注和审核
 
@@ -416,7 +462,7 @@ nnUNet Adapter 的职责是：
 - 生成或引用当前训练配置。
 - 训练完成后登记模型版本、指标、数据快照和配置。
 
-这样以后加入 MONAI、Transformer 模型或少样本方法时，只需要增加新的 Adapter，不必改变病例和标签管理方式。**已确认：少样本学习（FewShot）为 training 域下与 nnUNet Adapter 平行的新 Adapter，共享同一个 Dataset Snapshot 数据契约，各自产出 Model Record。** 少样本方法需要先通过生产级实验协议验证（冻结评估集、多 N 值系统对比、跨扫描协议一致性），通过后才能从实验层升级为正式 Adapter。
+这样以后加入 MONAI、Transformer 模型或少样本方法时，只需要增加新的 Adapter，不必改变病例和标签管理方式。**少样本学习（FewShot）先作为 training 域下的实验 Adapter：共享 Dataset Snapshot 的 eligible pool 和评估集，用 sidecar `fewshot_protocol.yaml` 记录 support/query episode，并产出 Model Record。** 少样本方法需要先通过生产级实验协议验证（冻结评估集、多 N 值系统对比、跨扫描协议一致性），通过后才能从实验层升级为正式 Adapter。
 
 ### 8.7 离线批量推理
 
@@ -428,14 +474,14 @@ flowchart LR
     accDescr: Offline inference uses a model record and image set to produce prediction artifacts and QC reports that can re-enter the label sourcing flow.
 
     images["待处理图像集"]
-    model["Model Record"]
+    generator["generator metadata<br/>Model Record 或外部算法来源"]
     batch["Batch Inference Job"]
     pred["Prediction Label Artifacts"]
     qc["QC Report"]
     source["label_generation<br/>标签生成与回流治理"]
 
     images --> batch
-    model --> batch
+    generator --> batch
     batch --> pred
     batch --> qc
     pred --> source
@@ -511,6 +557,16 @@ Mimics 当前最合理的定位是“优先 POC 的人工标注/修正工具”�
 
 不建议一开始就以 Orchestrator、FastAPI、Celery 或 Web UI 作为主轴。它们是后期的调度和交互层，不是平台成立的前提。
 
+A 阶段到 B 阶段不是推倒重来。A 阶段的 manifest 应按 Registry/Snapshot/Model Record 的字段设计，B 阶段数据库只是把这些 manifest ingest 成可查询索引：
+
+1. A 阶段每个 Case、Image Artifact、Label Artifact、QC Report、Snapshot、Model Record 都生成稳定 id 和 hash。
+2. B 阶段提供 `import_manifest` 迁移脚本，把 A 阶段 manifest 写入 SQLite/PostgreSQL。
+3. 影像和标签文件不必复制，DB 记录 storage URI、hash 和版本。
+4. 迁移后生成 migration report，列出缺字段、hash 不匹配、重复 id 和无法解析的来源。
+5. A 阶段导出的 nnUNet 目录只作为 materialized export，可复现依据仍然是 Snapshot manifest。
+
+因此 A 阶段产物可以继续在 B 阶段使用，前提是 A 阶段就避免只写临时路径和手工说明。
+
 ## 12. 已决定和仍待讨论的问题
 
 以下问题中，部分已经过讨论形成方向，部分仍需后续确认。
@@ -524,12 +580,14 @@ Mimics 当前最合理的定位是“优先 POC 的人工标注/修正工具”�
 | 模型拆分 | 第一阶段保持多模型组合（现有 CT1-16、MR1-8 方案），后期再实验统一模型 | 多模型方案已验证可行 |
 | 第一阶段器官范围 | 第一阶段就是 v500 训练的所有模型，涵盖全身多处器官 | 不需要缩小范围，现有 ModelMap 就是起点 |
 | Mimics POC | 先做好 Mimics 使用方式和集成方案的调研准备，再启动 POC | 见 `docs/domains/labeling/mimics_feasibility.md` |
+| Snapshot 不可变 | Snapshot 冻结引用、版本、hash、split 和策略；标签修正后创建新 Snapshot | 保证训练可复现 |
+| Case 防泄漏 | Case manifest 必须有 `patient_id_hash` 或 `leakage_group_id` | 防止同一患者多次检查跨训练/评估 |
+| label_generation 来源 | 外部算法也要写入 `generator metadata` | 不允许无来源候选标签 |
 
 ### 12.2 仍待讨论
 
 | 问题 | 影响哪一步 | 为什么还不能定 |
 |------|----------------|----------------|
-| 扫描范围 | Registry 导入、Dataset Snapshot 创建 | 平台如何记录器官不在扫描范围内，避免误当背景？ |
 | 数据许可 | 数据导入、Model Record、模型发布 | 公开算法或公开数据生成的标签是否允许用于产品训练或对外发布模型？ |
 | 正式评估准入 | 评估集冻结、Model Record 指标 | 正式评估是否只允许 `verified_label`，以及内部迭代评估是否允许 `accepted_pseudo_label`？ |
 | `accepted_pseudo_label` 排除规则 | Dataset Snapshot 创建 | 默认允许伪标签进入训练，但仍需沉淀哪些来源、器官或任务应排除 |
