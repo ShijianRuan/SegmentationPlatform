@@ -1,6 +1,6 @@
 # 平台操作模型
 
-> 日期：2026-06-09  
+> 日期：2026-06-10  
 > 状态：架构补充文档；回答“平台搭好后，操作者如何不关心底层代码也能走完整流程”。  
 > 主设计仍以 `docs/architecture/platform_blueprint.md` 为准。
 
@@ -45,7 +45,9 @@ flowchart TB
 | 评估者 | 选择模型、选择评估集、查看指标和失败病例 | 模型权重路径、推理临时目录、评估脚本参数 |
 | 平台管理员 | 配置数据源、任务规则、Adapter、准入策略 | 单个病例的手工路径 |
 
-这意味着当前架构还需要补齐四类对象的设计形式：Data Registry、Dataset Snapshot、Model Record、Workflow Action。
+标注者不应该看到或维护 `candidate_label`、`verified_label`、admission decision、hash、affine 这类底层字段。训练者也不应该逐个挑 mask 文件。状态机和策略判断留给平台，用户只执行角色相关动作。
+
+这意味着当前架构还需要补齐几类对象的设计形式：Data Registry、TaskDefinition、Dataset Snapshot、Model Record、Workflow Action。
 
 ## 2. 操作内化目标
 
@@ -85,7 +87,7 @@ Create Review Task
 Create Training Snapshot
   -> select task
   -> query eligible labels
-  -> apply label_policy
+  -> resolve and freeze label_policy
   -> freeze split
   -> export through training adapter
 
@@ -94,7 +96,7 @@ Run Batch Inference
   -> select Image Artifact set
   -> run inference adapter
   -> register candidate labels
-  -> route by QC/policy
+  -> attach QC evidence and optional review route
 ```
 
 ## 3. Data Registry 设计
@@ -108,7 +110,8 @@ Data Registry 是平台的资产目录。它不是一开始必须做成数据库
 | 资产登记 | 登记 Case、Image Artifact、Label Artifact、Model Record；第一阶段用 `generator metadata` 追踪外部算法来源 |
 | 去重和一致性 | 用 hash、shape、spacing、origin、direction、affine 识别重复或不一致 |
 | 来源追溯 | 记录数据集来源、人工来源、模型来源、导入批次、工具版本 |
-| 标签状态维护 | 记录标签状态、每个结构的来源和训练准入证据 |
+| 标签状态维护 | 记录标签生命周期状态、每个结构的来源、QC 证据和训练准入决策 |
+| 使用限制传播 | 记录并传递 `usage_constraints`，防止 license 和用途限制在回流链中丢失 |
 | 查询 | 支持按任务、器官、状态、来源、扫描范围查找可用数据 |
 | 版本和审计 | 记录谁在什么时候导入、修改、接受、拒绝、用于训练；Label Artifact 追加版本，不覆盖旧文件 |
 | 导出 | 为 Case Package、Dataset Snapshot、评估集和批量推理提供稳定输入 |
@@ -119,6 +122,8 @@ Data Registry 是平台的资产目录。它不是一开始必须做成数据库
 
 ```text
 registry/
+  schemas/
+    manifest_schema_v1.yaml
   cases/
     case_001.json
   generators/
@@ -131,6 +136,10 @@ registry/
     model_001.json
   qc_reports/
     qc_001.json
+  task_definitions/
+    CT5_Liver.yaml
+  snapshots/
+    snap_CT5_Liver_001.yaml
 ```
 
 后续再迁移到 SQLite/PostgreSQL。只要字段稳定，存储后端可以换。
@@ -141,6 +150,7 @@ registry/
 
 ```json
 {
+  "schema_version": "case_manifest.v1",
   "case_id": "case_001",
   "patient_id_hash": "sha256:...",
   "leakage_group_id": "hash_subject_001",
@@ -154,6 +164,7 @@ registry/
 
 ```json
 {
+  "schema_version": "image_artifact.v1",
   "image_id": "img_001",
   "case_id": "case_001",
   "modality": "CT",
@@ -163,10 +174,21 @@ registry/
   "spacing": [0.8, 0.8, 1.0],
   "origin": [0.0, 0.0, 0.0],
   "direction": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+  "geometry_contract": {
+    "space": "image_native",
+    "orientation_checked": true,
+    "resampled_from": null
+  },
   "source": {
     "type": "imported_dataset",
     "name": "internal_abdomen_set",
     "import_batch": "2026-06-15"
+  },
+  "usage_constraints": {
+    "model_training": "allowed",
+    "commercial_use": "unknown",
+    "redistribution": "forbidden",
+    "derivative_model_release": "unknown"
   }
 }
 ```
@@ -177,6 +199,7 @@ Label Artifact 可以是单个多标签文件，也可以是一组逐器官 mask
 
 ```json
 {
+  "schema_version": "label_artifact.v1",
   "label_id": "lbl_001",
   "case_id": "case_001",
   "image_id": "img_001",
@@ -190,7 +213,7 @@ Label Artifact 可以是单个多标签文件，也可以是一组逐器官 mask
     {
       "organ": "liver",
       "value": 2,
-      "status": "verified_label",
+      "lifecycle_status": "verified_label",
       "source": "manual_review",
       "review_tool": "Mimics",
       "qc_report": "qc_001"
@@ -198,17 +221,31 @@ Label Artifact 可以是单个多标签文件，也可以是一组逐器官 mask
     {
       "organ": "kidney_left",
       "value": 3,
-      "status": "accepted_pseudo_label",
+      "lifecycle_status": "candidate_label",
       "source": "TotalSegmentator",
-      "qc_report": "qc_002"
+      "qc_report": "qc_002",
+      "admission_decisions": [
+        {
+          "task_id": "CT_Kidney",
+          "policy_id": "CT_Kidney_v1",
+          "result": "accepted",
+          "decided_at_snapshot": "snap_CT_Kidney_001"
+        }
+      ]
     }
-  ]
+  ],
+  "usage_constraints": {
+    "model_training": "allowed_with_policy",
+    "commercial_use": "needs_review",
+    "redistribution": "forbidden",
+    "derivative_model_release": "unknown"
+  }
 }
 ```
 
-这回答了一个关键问题：**不需要为每个器官都单独保存一个庞大的状态文件**。可以一个 Label Artifact 里按 segment 记录状态。腹部数据集中肝来自人工、肾来自算法，是允许的；训练准入时按 segment 级状态和 task policy 过滤。
+这回答了一个关键问题：**不需要为每个器官都单独保存一个庞大的状态文件**。可以一个 Label Artifact 里按 segment 记录生命周期状态、来源、QC 和准入决策。腹部数据集中肝来自人工、肾来自算法，是允许的；训练准入时按 segment 级证据和 Snapshot policy 过滤。
 
-Artifact 层不承担训练准入状态。训练准入状态属于 `segments[]`，例如一个 artifact 中 liver 是 `verified_label`、kidney_left 是 `accepted_pseudo_label`。如果 UI 需要显示整体状态，可以显示派生摘要 `mixed_segments`；真正进入训练时仍按 segment 过滤。
+Artifact 层不承担训练准入状态。segment 的 `lifecycle_status` 只描述标签来源和生命周期，例如 liver 是 `verified_label`、kidney_left 是 `candidate_label`。某个 candidate 是否能训练由 `admission_decisions` 和 Snapshot 内冻结的 `resolved_label_policy` 判断。如果 UI 需要显示整体状态，可以显示派生摘要 `mixed_segments`；真正进入训练时仍按 segment 过滤。
 
 物理文件支持两种形式：
 
@@ -219,9 +256,36 @@ Artifact 层不承担训练准入状态。训练准入状态属于 `segments[]`�
 
 标签修改采用追加版本：人工修正、QC 修复、状态提升都创建新的 `label_id` 或 `version`，并记录 `parent_label_id`。旧 artifact 保留，可标记为 `superseded`，但不能覆盖写。Snapshot 引用具体 `label_id/version/hash`，所以旧 Snapshot 不会因为标签修正而变化。
 
+### 3.6 TaskDefinition 示例
+
+TaskDefinition 是训练任务模板，不是一次训练事实。它维护默认任务规则；真正用于复现的是 Snapshot 内冻结后的 resolved copy。
+
+```yaml
+schema_version: task_definition.v1
+task_id: CT5_Liver
+modality: CT
+target_anatomy:
+  - gallbladder
+  - liver
+task_label_map:
+  background: 0
+  gallbladder: 1
+  liver: 2
+default_label_policy:
+  policy_id: CT5_Liver_v1
+  allow_lifecycle_status: [verified_label, source_label, candidate_label]
+  candidate_label_requires:
+    trusted_generators: [TotalSegmentator:v2]
+    qc:
+      geometry: pass
+      min_confidence: 0.85
+preprocess_profile:
+  name: default_ct_abdomen
+```
+
 ## 4. Dataset Snapshot 设计
 
-Dataset Snapshot 是一次训练视图的冻结结果。它不等于原始数据拷贝，也不等于 nnUNet 导出目录。默认语义是 immutable manifest：冻结 case/image/label segment 的引用、版本、hash、split、label_policy 和预处理意图。
+Dataset Snapshot 是一次训练视图的冻结结果。它不等于原始数据拷贝，也不等于 nnUNet 导出目录。默认语义是 immutable manifest：冻结 case/image/label segment 的引用、版本、hash、split、resolved `label_policy`、准入决策、usage constraints 和预处理意图。
 
 ### 4.1 它负责什么
 
@@ -230,8 +294,9 @@ Dataset Snapshot 是一次训练视图的冻结结果。它不等于原始数据
 | 固定任务 | 记录 task_id、目标器官、TaskLabelMap |
 | 固定样本 | 记录纳入哪些 case/image/label segment |
 | 固定 split | 记录 train/val/test 或 fold 划分 |
-| 固定准入策略 | 记录 `allow_status`、`trusted_sources`、排除规则 |
+| 固定准入策略 | 记录从 TaskDefinition 解析出的 resolved `label_policy` 和准入决策 |
 | 固定输入版本 | 记录每个 image/label 的 hash 和 registry id |
+| 固定使用限制 | 记录输入链路继承而来的 `usage_constraints` |
 | 固定导出意图 | 记录希望导出给哪个 Adapter，例如 nnUNet |
 | 固定预处理配置引用 | 记录 spacing、patch size、低分辨率 coarse 任务等配置的来源 |
 
@@ -269,17 +334,26 @@ Snapshot 关心的是“这次训练视图承诺用低分辨率 coarse 配置”
 
 ```yaml
 snapshot_id: snap_CT5_Liver_20260720_001
+schema_version: dataset_snapshot.v1
 task_id: CT5_Liver
 created_by: trainer_a
 created_at: "2026-07-20T10:00:00+08:00"
 
-label_policy:
-  allow_status:
+resolved_label_policy:
+  source_policy: task_definitions/CT5_Liver.yaml#label_policy
+  policy_id: CT5_Liver_v1
+  allow_lifecycle_status:
     - verified_label
-    - accepted_pseudo_label
-  trusted_sources:
-    - manual_review
-    - TotalSegmentator:liver
+    - source_label
+    - candidate_label
+  source_label_requires:
+    trusted_datasets: [BTCV:v1, AMOS:v2]
+  candidate_label_requires:
+    trusted_generators:
+      - TotalSegmentator:v2
+    qc:
+      geometry: pass
+      min_confidence: 0.85
 
 task_label_map:
   background: 0
@@ -301,7 +375,10 @@ cases:
           segment_status: verified_label
         - organ: gallbladder
           label_id: lbl_001
-          segment_status: accepted_pseudo_label
+          segment_status: candidate_label
+          admission_decision:
+            result: accepted
+            policy_id: CT5_Liver_v1
   val:
     - case_id: case_010
       image_id: img_010
@@ -309,9 +386,14 @@ cases:
         - organ: liver
           label_id: lbl_010
           segment_status: verified_label
+
+usage_constraints:
+  model_training: allowed_with_policy
+  commercial_use: needs_review
+  redistribution: forbidden
 ```
 
-Snapshot 创建后不可修改。如果某个 Label Artifact 在 Snapshot 创建后被修正，Registry 会新增 `label_id/hash`；旧 Snapshot 继续引用旧标签。要使用修正后的标签，必须创建新 Snapshot。导出的 nnUNet 目录、低分辨率缓存或 NIfTI 副本只是 materialized export，不是 Snapshot 的真相来源。
+Snapshot 创建后不可修改。如果某个 Label Artifact 在 Snapshot 创建后被修正，Registry 会新增 `label_id/hash`；旧 Snapshot 继续引用旧标签。如果 TaskDefinition 的默认 `label_policy` 之后改变，旧 Snapshot 也不受影响。要使用修正后的标签或新策略，必须创建新 Snapshot。导出的 nnUNet 目录、低分辨率缓存或 NIfTI 副本只是 materialized export，不是 Snapshot 的真相来源。
 
 Split 默认存储在 Snapshot 内，也可以引用全局 `SplitPlan`。即使引用全局计划，Snapshot 也要记录当时解析出来的 case 列表和 leakage key。不同任务可以有不同 split；若一个模型使用 A 任务训练后在 B 任务评估，评估动作必须用 Model Record 的训练 Snapshot 和 B 的评估 Snapshot 做 `leakage_group_id` 交集检查，交集非空则判为泄漏或要求显式豁免。
 
@@ -343,13 +425,14 @@ Model Record 是训练结果的登记表。它让评估者和下一轮 label_gen
 | 训练追溯 | 记录 Snapshot、训练框架、代码版本、配置 |
 | 权重登记 | 记录模型权重、fold、ensemble、checkpoint |
 | 指标登记 | 记录 Dice、Surface Dice、失败病例、评估集 |
-| 使用边界 | 记录适用模态、器官、扫描范围、禁止用途 |
+| 使用边界 | 记录适用模态、器官、扫描范围、禁止用途和继承的 usage constraints |
 | 回流入口 | 作为 label_generation 批量推理的输入模型 |
 
 ### 5.2 示例
 
 ```yaml
 model_id: model_CT5_Liver_001
+schema_version: model_record.v1
 task_id: CT5_Liver
 framework: nnUNet
 adapter: adapters/nnunet
@@ -367,6 +450,11 @@ metrics:
 usage:
   allowed_for_candidate_generation: true
   allowed_for_formal_evaluation: false
+usage_constraints:
+  model_training: allowed_with_policy
+  commercial_use: needs_review
+  redistribution: forbidden
+  derivative_model_release: unknown
 limitations:
   - "只验证过 CT 腹部任务"
 ```
@@ -376,6 +464,7 @@ limitations:
 `generator metadata` 是第一阶段对外部标签生成来源的轻量记录。它不是必须先做成数据库表；可以是 `generators/*.yaml`，也可以内嵌在 Label Artifact 的 `source.generator` 字段。它记录外部算法、公开工具、规则脚本或 Docker/CLI 工作流的来源。
 
 ```yaml
+schema_version: generator_metadata.v1
 generator_id: totalsegmentator_v2
 type: external_algorithm
 name: TotalSegmentator
@@ -385,6 +474,11 @@ runtime:
   command_template: "TotalSegmentator -i {image} -o {output}"
 license:
   status: needs_review
+usage_constraints:
+  model_training: needs_policy
+  commercial_use: needs_review
+  redistribution: forbidden
+  derivative_model_release: unknown
 inputs:
   modality: CT
 outputs:
@@ -434,9 +528,9 @@ label_generation 可以自定义接入已有算法，也可以替换伪标签生
 2. 输出必须登记为 `candidate_label`，不能直接伪装成 `verified_label`。
 3. 必须提供 label mapping。
 4. 必须提供 QC 报告。
-5. 必须交给 routing policy 决定进入 `draft_label`、`accepted_pseudo_label` 或 `rejected_label`。
+5. 可以提供 admission evidence 或送审建议，但最终是否进入训练由 Snapshot 的 `resolved_label_policy` 决定。
 
-平台训练得到的模型用 Model Record 作为来源；外部算法用 `generator metadata` 作为来源，不能绕过来源记录直接写 Label Artifact。
+平台训练得到的模型用 Model Record 作为来源；外部算法用 `generator metadata` 作为来源，不能绕过来源记录直接写 Label Artifact，也不能直接生成全局可训练标签。
 
 ## 7. QC 在哪里发生
 
@@ -447,14 +541,16 @@ QC 不是单个域独占，而是每个关键边界上的 gate。
 | 数据导入 Registry | 新数据进入平台 | 文件可读、hash、空间元数据、label value 合法 | 自动脚本；异常由平台管理员处理 | 生成 QC Report，修复后重新导入或创建新 `label_id/hash` |
 | Case Package 生成前 | 发给标注者前 | 包完整性、配置 hash、草稿标签几何 | 自动脚本 | 阻断导出，修复 package 后重跑 |
 | Review 导回 | 标注者提交后 | shape、spacing、origin、direction、label id、空标签 | 自动脚本；异常由标注者或管理员裁决 | 不覆盖旧标签，修复后提交新 `label_id/hash` |
-| Snapshot 创建 | 训练前 | 标签状态、来源、扫描范围、任务 label map、split 泄漏 | 平台自动检查；训练者选择策略 | Snapshot 创建失败，调整策略或数据后重建 |
-| 训练导出 | Adapter materialize 数据时 | 导出 mask label id、缺失标签策略、ignore/exclude 策略 | training Adapter | 导出失败，不启动训练 |
+| Snapshot 创建 | 训练前 | 生命周期状态、来源、QC 证据、usage constraints、扫描范围、任务 label map、split 泄漏 | 平台自动检查；训练者选择策略 | Snapshot 创建失败，调整策略或数据后重建 |
+| 训练导出 | Adapter materialize 数据时 | 导出 mask label id、缺失标签策略、ignore/exclude 策略、空类别、label 连续性 | training Adapter | 导出失败，不启动训练 |
 | 批量推理后 | candidate 生成后 | 几何、内容、置信度/规则、异常体积 | 自动脚本；低置信进入人工 review | 进入 `draft_label` / `rejected_label` / 重新推理 |
 | 评估前 | 评估集冻结前 | 评估标签状态、来源、是否泄漏 | 自动脚本；评估者确认策略 | 阻断正式评估或要求显式豁免 |
 
 目标是让人工只处理“医学判断”和“异常裁决”，不要人工做 hash、路径、label id、几何头这类机械检查。
 
 QC Report 是追加记录，不是标签状态本身。失败标签修复后应生成新 `label_id/hash`，并重新运行对应 QC 脚本；平台不应修改旧 QC Report。
+
+空间一致性是平台级 gate。Label Artifact 的 `geometry_ref` 必须指向 Image Artifact；导入、review 导回、推理回流、Snapshot 创建、训练导出都要验证 shape、spacing、origin、direction 和 affine。shape 相同但 affine 或方向不一致时，默认阻断，不允许静默进入训练。
 
 ## 8. 缺失标签在哪里区分
 
@@ -482,42 +578,94 @@ nnUNet Adapter 第一阶段采用保守规则：如果某 case 缺失当前任�
 
 1. 平台自动生成大多数状态。
 2. 人只在少数节点做确认。
-3. 状态按 segment 记录，但 UI 聚合展示。
+3. 生命周期状态按 segment 记录，但 UI 聚合展示。
+4. 训练准入不是手工状态，而是 Snapshot 创建时的 policy 结果。
 
 例如：
 
-| 场景 | 状态如何生成 |
+| 场景 | 平台如何记录 |
 | --- | --- |
 | 外部数据集导入 | 默认 `source_label`，来源为 dataset import |
 | 模型推理输出 | 默认 `candidate_label`，来源为 Model Record 或 `generator metadata` |
 | 生成给人修的草稿 | 平台从 candidate 转成 `draft_label` |
 | 标注者保存并提交 | 第一阶段自动登记为 `verified_label` |
-| 规则接受高质量伪标签 | routing policy 自动登记为 `accepted_pseudo_label` |
+| 规则认为高质量伪标签可用 | 保持 `candidate_label`，追加 QC evidence 或 admission decision |
 | QC 明确失败 | 自动登记为 `rejected_label` |
 
-BTCV、AMOS 等公认公开数据集可以保持 `source_label` 状态，并由任务级 `label_policy` 显式允许进入训练；不需要为了训练而伪装成 `verified_label`。`source_label` 表示外部数据集自带标注，`accepted_pseudo_label` 表示平台内模型/算法输出经规则接受，二者可以都被允许训练，但来源含义不同。
+BTCV、AMOS 等公认公开数据集可以保持 `source_label` 状态，并由 Snapshot 的 `resolved_label_policy` 显式允许进入训练；不需要为了训练而伪装成 `verified_label`。模型或算法输出保持 `candidate_label`，即使某个任务接受它训练，也只是该任务下的 admission decision。
 
 腹部数据集中肝来自人工、肾来自算法时，平台只需要在同一个 Label Artifact 的 segments 里分别记录：
 
 ```yaml
 segments:
   liver:
-    status: verified_label
+    lifecycle_status: verified_label
     source: manual_review
   kidney_left:
-    status: accepted_pseudo_label
+    lifecycle_status: candidate_label
     source: TotalSegmentator
+    admission_decisions:
+      - task_id: CT_Kidney
+        policy_id: CT_Kidney_v1
+        result: accepted
 ```
 
 训练者在 UI 里不需要逐条编辑这些状态，只需要选择任务策略：
 
 ```yaml
-allow_status: [verified_label, accepted_pseudo_label]
-exclude_sources:
-  - low_quality_public_dataset_x
+resolved_label_policy:
+  allow_lifecycle_status: [verified_label, source_label, candidate_label]
+  candidate_label_requires:
+    trusted_generators: [TotalSegmentator:v2]
+    qc:
+      geometry: pass
+      min_confidence: 0.85
 ```
 
-## 10. combine map 的含义
+## 10. validate 命令和最小 walkthrough
+
+第一阶段即使是文件包和离线脚本，也要有统一 `validate` 入口。它不替代业务流程，但负责在训练、导入 Mimics、生成 Snapshot 之前阻断结构性错误。
+
+```bash
+sp validate vocabulary anatomy_vocabulary.yaml
+sp validate registry registry/
+sp validate task-map task_label_maps/CT5_Liver.yaml
+sp validate snapshot snapshots/snap_CT5_Liver_001.yaml
+sp validate export nnunet_exports/CT5_Liver_001/
+```
+
+最低检查项：
+
+| 对象 | 检查 |
+| --- | --- |
+| Vocabulary | 器官 key 唯一、aliases 不冲突、parent 存在、laterality 合法、global id 不重复 |
+| TaskLabelMap | label 从 0 开始、整数连续、无重复、器官都在 Vocabulary 中 |
+| Registry | manifest 有 `schema_version`、id/hash 可解析、usage constraints 不缺失 |
+| Label Artifact | `geometry_ref` 存在、shape/spacing/origin/direction/affine 与 Image Artifact 一致 |
+| Snapshot | split 无 leakage、resolved policy 已冻结、candidate 准入有 QC evidence |
+| nnUNet export | 类别不全空、导出 label 值合法、dataset.json 与 TaskLabelMap 一致 |
+
+最小可用 walkthrough 应该长这样：
+
+```text
+导入肝胆 CT 数据
+  -> validate registry
+  -> 生成 review package
+  -> 标注者打开、修正、提交
+  -> 导回并 validate geometry
+  -> 创建 CT5_Liver Snapshot
+  -> validate snapshot
+  -> nnUNet Adapter materialize export
+  -> validate export
+  -> 启动训练
+  -> 写入 Model Record
+  -> 批量推理生成 candidate_label
+  -> candidate 回流为下一轮 Snapshot 的可选输入
+```
+
+这个 walkthrough 后续可以展开成命令文档；架构层只固定动作边界。
+
+## 11. combine map 的含义
 
 `combine_map` 不是训练 label map。它用于把多个模型输出合成一个全身展示或导出结果。
 
@@ -539,12 +687,15 @@ task_label_map:
 
 combine_map:
   map_id: CT_Combine
+  source: anatomy_vocabulary.global_label_id
   labels:
     liver: 37
     gallbladder: 38
 ```
 
 训练时 liver 可以是 2；全身合并展示时 liver 可以是 37。这不是冲突，因为两者服务不同目的。
+
+长期维护上，`combine_map` 不应手工给所有器官编号。Anatomy Vocabulary 应维护稳定 `global_label_id`；`combine_map` 默认只声明包含哪些器官。现有 v500 编号可以作为 legacy override 保留，以兼容历史输出。
 
 体素冲突不由 `combine_map` 解决，而由 `combine_policy` 或后处理逻辑解决：
 
@@ -561,11 +712,11 @@ combine_policy:
 
 默认不允许静默覆盖。多个模型在同一体素给出不同结构时，必须按优先级、概率图或任务规则决定；无法决定时记录 conflict mask 或 QC Report。
 
-## 11. Mimics 拿到软件和 license 后做什么
+## 12. Mimics 拿到软件和 license 后做什么
 
 拿到 Mimics 后，不要先写完整 Adapter。先做 8 个验证。
 
-### 11.1 验证 Mimics 本身功能
+### 12.1 验证 Mimics 本身功能
 
 | 验证 | 要回答的问题 |
 | --- | --- |
@@ -575,7 +726,7 @@ combine_policy:
 | 标签导出 | 能导出单个多标签 NIfTI，还是只能导出逐器官 mask？ |
 | 空间往返 | 导出标签和原图 shape 是否一致？affine/spacing 是否可解释？ |
 
-### 11.2 验证脚本联动能力
+### 12.2 验证脚本联动能力
 
 | 验证 | 要回答的问题 |
 | --- | --- |
@@ -585,7 +736,7 @@ combine_policy:
 | 读取 mask buffer | 脚本能否把 Mimics mask 转成数组或导出文件？ |
 | 无 GUI 批量 | 是否能减少人工导入导出，还是必须人工点选？ |
 
-### 11.3 为什么必要时拆成逐器官 mask
+### 12.3 为什么必要时拆成逐器官 mask
 
 拆成逐器官 mask 是为了降低工具解释风险。
 
@@ -598,14 +749,14 @@ combine_policy:
 
 这不是平台最终必须永远使用的格式，而是 POC 阶段更稳的交换策略。
 
-## 12. 仍待讨论问题的影响
+## 13. 仍待讨论问题的影响
 
 | 问题 | 影响哪一步 | 如果不解决会怎样 |
 | --- | --- | --- |
 | 扫描范围如何记录 | Registry 导入、Snapshot 创建 | 可能把扫描范围外器官误当背景训练 |
-| 数据许可如何记录 | 数据导入、Model Record、模型发布 | 可能训练出不能对外使用的模型 |
+| 具体 license 裁决 | 数据导入、Model Record、模型发布 | usage constraints 必须记录和传播，但每个来源是否允许商业训练/发布仍要逐项确认 |
 | 正式评估准入 | 评估集冻结、Model Record 指标 | 内部迭代指标和正式验收指标可能混在一起 |
-| `accepted_pseudo_label` 默认排除规则 | Snapshot 创建 | 高质量伪标签能训练，但排除边界不清 |
+| candidate admission 阈值 | Snapshot 创建 | 高质量候选标签能训练，但不同器官和生成器的阈值还要实验沉淀 |
 | Mimics 是否主工具 | labeling Adapter | 影响自动化程度和标注员工作方式 |
 
 这些问题不阻塞第一阶段文件闭环，但会影响 8-10 月的平台加固和验收标准。
