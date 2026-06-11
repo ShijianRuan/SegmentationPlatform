@@ -1,7 +1,7 @@
-# Case Package 契约草案 v0.1
+# Case Package 契约草案 v0.2
 
-> 日期：2026-06-06  
-> 状态：草案；用于标注工具和平台之间的离线文件交换  
+> 日期：2026-06-11
+> 状态：草案；用于标注工具和平台之间的离线文件交换
 > 关键原则：包内 label id 服务人工 review 和文件交换，不等同于 nnUNet 训练 label id。
 
 ## 1. 这个契约解决什么
@@ -31,8 +31,8 @@ dataset_package/
         image.nii.gz
         dicom/
       labels/
+        candidate_label.nii.gz
         draft_label.nii.gz
-        accepted_pseudo_label.nii.gz
         verified_label.nii.gz
         masks/
           liver.nii.gz
@@ -51,7 +51,8 @@ dataset_package/
 
 ```json
 {
-  "config_ref": "../config/"
+  "schema_version": "case_package.v0.2",
+  "config_ref": "../../config/"
 }
 ```
 
@@ -92,9 +93,15 @@ review_label_map:
 
 ```json
 {
+  "schema_version": "case_package.v0.2",
   "package_id": "pkg_20260606_case001",
   "case_id": "case001",
   "created_at": "2026-06-06T10:00:00+08:00",
+  "config_ref": "../../config/",
+  "config_sha256": {
+    "anatomy_vocabulary.yaml": "TO_BE_FILLED",
+    "review_label_map.yaml": "TO_BE_FILLED"
+  },
   "modality": "CT",
   "image": {
     "primary_path": "images/image.nii.gz",
@@ -104,10 +111,6 @@ review_label_map:
     "spacing": [0.8, 0.8, 1.0],
     "orientation_note": "recorded by exporter"
   },
-  "label_policy": {
-    "allow_status": ["verified_label", "accepted_pseudo_label"],
-    "trusted_sources": []
-  },
   "review": {
     "tool": "mimics",
     "single_user_save_as_verified": true
@@ -115,7 +118,7 @@ review_label_map:
 }
 ```
 
-`shape`、`spacing` 和方向信息必须由导出脚本写入，导回时用于校验。
+`shape`、`spacing`、方向信息和共享配置 hash 必须由导出脚本写入，导回时用于校验。Case Package 不携带训练 `label_policy`；训练准入属于 Dataset Snapshot。
 
 ## 5. 标签状态
 
@@ -123,11 +126,12 @@ review_label_map:
 | --- | --- | --- | --- |
 | `candidate_label` | `labels/candidate_label.nii.gz` | 模型或公开算法输出 | 否 |
 | `draft_label` | `labels/draft_label.nii.gz` | 给人工修正的初始标签 | 否 |
-| `accepted_pseudo_label` | `labels/accepted_pseudo_label.nii.gz` | 经策略接受的伪标签 | 由策略决定 |
 | `verified_label` | `labels/verified_label.nii.gz` | 人工保存确认标签 | 是 |
 | `rejected_label` | 可只记录在报告中 | 已判定不可用 | 否 |
 
 第一阶段单人保存即可记为 `verified_label`。后续如果要双人审核，可以在 `review_report.json` 中增加 reviewer 和 arbitration 字段，不需要改变目录结构。
+
+候选标签即使被某次训练接受，文件名和生命周期状态仍保持 `candidate_label`；准入结果只写 Dataset Snapshot，不回写 Case Package。
 
 ## 6. 导入标注工具
 
@@ -209,10 +213,10 @@ dataset_package/
     review_label_map.yaml          ← 全数据集共享，一份
   cases/
     case_001/
-      manifest.json                ← config_ref: "../config/"
+      manifest.json                ← config_ref: "../../config/"
       images/... labels/... reports/... provenance/...
     case_002/
-      manifest.json                ← config_ref: "../config/"
+      manifest.json                ← config_ref: "../../config/"
       ...
 ```
 
@@ -237,6 +241,6 @@ dataset_package/
 | 问题 | 暂定处理 |
 | --- | --- |
 | 是否强制包含 DICOM | Mimics POC 后决定；建议 POC 阶段同时保留 DICOM 和 NIfTI |
-| `accepted_pseudo_label` 是否放入同一个包 | 可以放，但必须有来源记录和 QC 报告 |
+| candidate 是否可作为 review 输入 | 可以；必须保留 generator provenance 和 QC 报告，进入包时通常转成 `draft_label` |
 | 多人审核如何表示 | 后期扩展 `review_report.json` |
 | 是否支持多个图像序列 | 后期扩展 `images[]`，当前先单主图像 |
