@@ -65,11 +65,11 @@ Mimics Research 21.0 的安装包通常以**分卷压缩包**形式分发，需�
 
 **第一步：安装 Python**
 
-Mimics 21.0 对应的推荐 Python 版本为 **Python 3.8**（64位）[5]。安装时需勾选"Add Python to PATH"选项，确保环境变量正确配置。
+Mimics 21.0 对应的推荐 Python 版本为 **Python 3.5.2**（64位）。Mimics 安装向导会自动将其安装到 `C:\Program Files\Common Files\Materialise\Python\3.5.2`。也可手动指定其他 Python 3.5 解释器（如 Anaconda），但必须确保主版本号为 3.5 [3]。
 
 **第二步：在 Mimics 中关联 Python 解释器**
 
-启动 Mimics 后，进入 Script 菜单 → Settings，指定 Python 解释器路径（通常为 `C:\Python38\python.exe` 或虚拟环境路径）。
+启动 Mimics 后，进入 Script 菜单 → Settings，指定 Python 解释器路径。若使用 Mimics 自带的 Python，路径为 `C:\Program Files\Common Files\Materialise\Python\3.5.2\python.exe`；若使用外部 Python 3.5，需手动指定对应路径。
 
 **第三步：验证安装**
 
