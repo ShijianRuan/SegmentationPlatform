@@ -1,98 +1,95 @@
-# 文档入口
+# 分割平台文档入口
 
-> 日期：2026-06-08  
-> 用途：说明当前文档层级、推荐阅读顺序，以及“平台架构”和“三大实现域”之间的关系。
+> 日期：2026-06-13
+> 用途：告诉读者先看什么、各目录放什么，以及哪些文档代表当前设计。
 
-## 1. 先理解这一版怎么读
+## 1. 先看什么
 
-当前文档改成了双重视角：
+如果你第一次接触这个项目，按下面顺序阅读：
 
-1. `docs/architecture/` 负责回答“平台整体为什么这样设计”。
-2. `docs/domains/` 负责回答“后续代码和实现工作主要落在哪三个域里”。
-3. `docs/research/` 负责保存跨域研究材料，包括原始调研文档和架构摘要版，不直接归属某一个实现域。
-4. `docs/plans/`、`docs/archive/` 只提供执行草案或历史参考，不替代主设计。
+1. [平台蓝图](architecture/platform_blueprint.md)：先理解平台为什么存在、完整流程是什么、三大实现域怎样协作。
+2. [常用词说明](glossary.md)：遇到不熟悉的英文名称或缩写时查阅，不需要提前背诵。
+3. [核心数据与操作模型](architecture/platform_data_model.md)：准备实现时，再查看各种记录的字段、创建时机和相互关系。
+4. 处理 DICOM、NIfTI、MHD+RAW、纯 RAW 或缺失元数据时阅读[数据导入与规范化契约](architecture/data_ingestion_contract.md)。
+5. 根据当前工作进入对应实现域：
+   - [人工标注与复查](domains/labeling/README.md)
+   - [模型训练](domains/training/README.md)
+   - [候选标签生成](domains/label_generation/README.md)
+6. 准备开发时先阅读[阶段 A 开发执行说明](plans/development_execution_guide.md)，再对照[实施计划](plans/platform_implementation_plan_2026-10-30.md)和[近期任务清单](plans/implementation_backlog.md)。
 
-三大实现域现在固定为：
+[架构决策记录](architecture/architecture_decisions.md)解释重要选择的理由，不要求首次通读。[多角色设计审查](architecture/platform_quality_review.md)记录发现过的问题和整改依据，也不属于首次阅读主线。
 
-- `labeling`：标注、review、工具适配、Case Package、标签导回。
-- `training`：任务定义、Dataset Snapshot、训练适配器、模型产出。
-- `label_generation`：候选标签生成、伪标签筛选、QC、回流治理。
+### 按角色快速进入
 
-其中第三个域不用 `pseudo_labeling` 命名，是因为它不只是“生成一个伪标签”，还负责候选标签到 `draft_label` / `accepted_pseudo_label` 的治理过程。
+| 你现在要做什么 | 先看哪份文档 |
+| --- | --- |
+| 理解平台整体设计 | [平台蓝图](architecture/platform_blueprint.md) |
+| 导入不同格式或信息不完整的数据 | [数据导入与规范化契约](architecture/data_ingestion_contract.md) |
+| 准备一批病例给标注者 | [标注工作流](domains/labeling/labeling_workflow.md) |
+| 定义标注工具交换文件 | [病例包契约](domains/labeling/case_package_contract.md) |
+| 开发或试用 Mimics 接入 | [Mimics 适配器设计与开发流程](domains/labeling/mimics_adapter_design.md) |
+| 接入或修改 nnUNet 训练 | [训练域入口](domains/training/README.md) |
+| 运行模型生成候选标签 | [候选标签生成域入口](domains/label_generation/README.md) |
+| 查看截至 2026-10-30 的交付安排 | [实施计划](plans/platform_implementation_plan_2026-10-30.md) |
+| 确认要写哪些代码、工作量和执行顺序 | [阶段 A 开发执行说明](plans/development_execution_guide.md) |
 
-## 2. 推荐阅读顺序
+## 2. 哪份文档说了算
 
-| 顺序 | 文档 | 用途 |
-| --- | --- | --- |
-| 1 | `docs/architecture/platform_blueprint.md` | 平台主蓝图，先看全局闭环和三大域边界 |
-| 2 | `docs/architecture/architecture_decisions.md` | 架构决策记录，解释为什么这样定 |
-| 3 | `docs/architecture/platform_operational_model.md` | 平台操作模型，说明 Registry、Snapshot、Model Record、Adapter 和用户工作流 |
-| 4 | `docs/meeting_minutes_2026-06-07.md` | 会议纪要，记录最新讨论和领导决策 |
-| 5 | `docs/domains/labeling/README.md` | 标注域入口，说明 Case Package、Mimics 和标签导回怎么挂在一起 |
-| 6 | `docs/domains/training/README.md` | 训练域入口，说明当前 nnUNet 管线在平台里的位置 |
-| 7 | `docs/domains/label_generation/README.md` | 标签生成域入口，说明伪标签和候选标签如何回流 |
-| 8 | `docs/research/README.md` | 跨域研究材料入口，供后续能力扩展参考 |
-| 9 | `docs/plans/platform_implementation_plan_2026-10-30.md` | 2026-10-30 前的平台实施总计划、里程碑和验收清单 |
-| 10 | `docs/plans/implementation_backlog.md` | 近期执行草案，方便后面落具体工作 |
-| 11 | `docs/archive/annotation_workflow_early_design.md` | 早期标注设计，作为历史参考 |
+如果两份文档说法不一致，按以下顺序判断当前设计：
 
-## 3. 当前文档分层
+| 优先级 | 文档类型 | 作用 |
+| ---: | --- | --- |
+| 1 | `architecture/platform_blueprint.md` | 当前平台目标、边界和原则 |
+| 2 | `architecture/platform_data_model.md`、各域现行契约 | 字段、操作和工具接入的具体规则 |
+| 3 | `architecture/architecture_decisions.md` | 记录重要决定及其理由 |
+| 4 | `plans/` | 当前执行安排，会随进度调整 |
+| 5 | `research/` | 研究综述和实验候选，不自动成为平台能力 |
+| 6 | `references/` | 原始手册和外部资料，不直接定义平台行为 |
+| 7 | `archive/` | 历史记录，不作为当前实现依据 |
 
-```mermaid
-flowchart TB
-    accTitle: Documentation Layers
-    accDescr: The documentation is organized into architecture, three implementation domains, plans, and archive materials.
+## 3. 目录结构
 
-    main["平台主蓝图<br/>architecture"]
-    adr["决策记录<br/>architecture_decisions"]
-    labeling["实现域<br/>labeling"]
-    training["实现域<br/>training"]
-    generation["实现域<br/>label_generation"]
-    research["跨域研究<br/>research"]
-    plans["执行草案<br/>plans"]
-    archive["历史归档<br/>archive"]
-
-    main --> adr
-    main --> labeling
-    main --> training
-    main --> generation
-    main --> research
-    main --> plans
-    main --> archive
+```text
+docs/
+  architecture/       当前平台架构、数据模型和决策
+  domains/
+    labeling/         人工标注、复查、病例包和 Mimics 适配
+    training/         训练数据快照到训练框架和模型记录
+    label_generation/ 模型或算法生成候选标签并回流
+  plans/              实施计划和近期任务清单
+  research/           跨域研究综述和研究源笔记
+  references/         实现时需要查阅的外部手册
+  archive/            初始需求和历史会议记录
 ```
 
-## 4. 目录说明
+三大实现域只是为了让代码和文档容易定位，不是三个互相独立的平台：
 
-| 目录 | 作用 |
+| 域 | 负责 | 不负责 |
+| --- | --- | --- |
+| `labeling`（人工标注与复查） | 准备标注任务、人工修正、工具交换、标签导回 | 决定训练编号和哪些标签进入训练 |
+| `training`（模型训练） | 固定训练数据、导出训练目录、运行训练和登记模型 | 人工标注流程和候选标签来源管理 |
+| `label_generation`（候选标签生成） | 用模型或算法生成候选标签、检查结果并回流 | 把算法输出直接改成已确认真值 |
+
+## 4. 当前实现状态
+
+| 位置 | 当前状态 |
 | --- | --- |
-| `docs/architecture/` | 平台级蓝图、架构决策、事实边界 |
-| `docs/domains/labeling/` | 标注域文档，围绕人工 review 和工具适配 |
-| `docs/domains/training/` | 训练域文档，围绕任务、快照、训练适配器 |
-| `docs/domains/label_generation/` | 标签生成域文档，围绕候选标签、伪标签和回流 |
-| `docs/research/` | 跨域研究材料，包含原始调研和摘要版，不直接归属于某一个实现域 |
-| `docs/plans/` | 执行草案和近期 backlog |
-| `docs/archive/` | 历史设计稿，不作为当前方案依据 |
-| `docs/meeting_minutes_2026-06-07.md` | 会议纪要，作为设计调整的来源记录 |
+| `pipelines/nnunet/` | 已有可复用的转换、预处理、训练、预测和评估管线 |
+| `scripts/check_case_package.py` | 已支持病例包 v0.5 的提交前检查 |
+| `scripts/hash_package.py` | 可选的目录传输校验值工具 |
+| `src/segplatform/adapters/mimics/`、`adapters/mimics/` | 双运行时代码边界已定义，诊断、探针和生产脚本尚未实现 |
+| `adapters/label_generation/` | 只有输入输出边界，尚未实现 |
+| 数据登记册和训练数据快照 | 已完成设计，尚未形成服务或数据库 |
 
-## 5. 代码和实现入口
+计划中提到但仓库尚不存在的脚本必须写明“待实现”，不能让读者误以为已经可以运行。
 
-| 目录 | 当前角色 |
-| --- | --- |
-| `pipelines/nnunet/` | 当前可复用的 nnUNet 训练、推理、评估代码 |
-| `adapters/mimics/` | Mimics 导入导出适配器落点，目前是 POC 骨架 |
-| `adapters/nnunet/` | nnUNet Adapter 边界说明，训练核心仍在 `pipelines/nnunet/` |
-| `adapters/fewshot/` | FewShot Adapter 落点，当前仅确认架构位置，实现后置 |
-| `adapters/label_generation/` | 公开算法、内部模型、批量推理输出的适配器落点 |
-| `scripts/` | Case Package 文件阶段的通用工具脚本 |
+## 5. 文档维护规则
 
-## 6. 维护原则
-
-1. 平台设计以 `docs/architecture/platform_blueprint.md` 为准。
-2. 三大实现域是当前最重要的实现定位入口，后续新增文档优先放入对应域。
-3. 如果一个文档讨论跨域研究方向而不是具体实现职责，优先放在 `docs/research/`。
-4. 如果一个文档同时涉及多个域且已经形成平台决策，优先放在 `docs/architecture/`，并在各域入口里链接它。
-5. `docs/domains/labeling/` 不定义训练标签编号规则；训练编号规则以训练域和主蓝图为准。
-6. `docs/domains/training/` 不定义人工 review 流程；review 契约以标注域为准。
-7. `docs/domains/label_generation/` 不把候选标签直接视为真值，必须记录来源和准入策略。
-8. Mimics 相关具体 API、版本号、系统要求等，只有在本机 POC 或官方文档核实后才能写成确定事实。
-9. 执行计划可以有，但不能替代架构设计。
+1. 架构结论只写入 `architecture/` 或对应域的现行契约。
+2. 只有实现时仍需查阅的外部手册放入 `references/`；一次性转换产物不进入仓库。
+3. 被新设计替代但仍有追溯价值的文档移入 `archive/`，不要继续出现在推荐阅读主线。
+4. 同一主题只能有一份主文档；研究源笔记和外部参考必须在入口文档中标清身份。
+5. 文件移动、对象改名或状态变化时，必须同步更新 README、交叉引用和实施计划。
+6. 外部事实优先引用官方文档、论文和官方仓库；未经核实的内容必须明确标注。
+7. 固定英文名称第一次出现时必须同时给出中文解释；缩写第一次出现时必须展开。
+8. 蓝图说明“为什么和怎么协作”，数据模型说明“记录什么字段”，域文档说明“具体怎样工作”，不要在三处重复整段定义。

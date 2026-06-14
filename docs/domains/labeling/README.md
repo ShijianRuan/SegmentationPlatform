@@ -1,56 +1,78 @@
-# 标注域文档入口
+# 人工标注与复查域
 
-> 日期：2026-06-07  
-> 状态：标注域导航；平台总体设计以 `docs/architecture/platform_blueprint.md` 为准。
+> 日期：2026-06-13
+> 状态：当前标注域入口。平台总体设计以[平台蓝图](../../architecture/platform_blueprint.md)为准。
 
-## 1. 这个域管什么
+## 1. 这个域负责什么
 
-`labeling` 是“人工和工具如何把标签生产出来并安全导回平台”的实现域。
+`labeling` 负责“怎样把图像和草稿标签交给标注者，以及怎样把人工结果安全地收回平台”。
 
-它覆盖的不是狭义的人工勾画，而是整条标注侧链路：
+它包括：
 
-- Case Package 导出与导回
-- 标注工具适配
-- 草稿标签 review
-- 人工保存后的 `verified_label`
-- 几何校验、label 校验、来源记录
+- 准备标注或复查任务。
+- 生成离线病例包。
+- 调用 Mimics 或其他标注工具。
+- 保存中间进度。
+- 提交完成、提交复查和报告阻塞。
+- 导回指定器官标签。
+- 检查图像与标签是否对齐。
+- 创建新的人工确认标签版本。
 
-因此这里不用 `annotation_pipeline` 命名，而用 `labeling`。它比单纯的 annotation 更能容纳“人工标注 + 伪标签修订 + 标签交换契约”这一整块。
+它不负责：
 
-## 2. 关键文档
+- 定义 nnUNet 训练编号。
+- 决定哪些候选标签进入某次训练。
+- 运行模型批量生成候选标签。
 
-| 文档 | 当前用途 |
+## 2. 标注者实际看到什么
+
+标注者只需要处理四类动作：
+
+1. 打开分配给自己的病例。
+2. 修正任务指定的器官。
+3. 保存进度。
+4. 提交完成、提交复查或报告阻塞。
+
+标注者不需要填写标签生命周期、文件校验值、空间矩阵或训练准入结果。平台脚本负责这些机械记录。
+
+## 3. 从哪份文档开始
+
+| 文档 | 用途 |
 | --- | --- |
-| `docs/domains/labeling/case_package_contract.md` | 标注工具和平台之间的离线文件交换契约 |
-| `docs/domains/labeling/mimics_feasibility.md` | Mimics 是否适合作为第一阶段人工标注/修正工具 |
-| `docs/domains/labeling/mimics_poc_plan.md` | Mimics POC 的执行草案 |
-| `docs/domains/labeling/mimics_research_notes.md` | Mimics 外部资料整理，供调研追溯 |
+| [标注工作流](labeling_workflow.md) | 了解平台、标注者和工具从准备数据到提交结果的完整步骤 |
+| [病例包契约](case_package_contract.md) | 实现病例包生成、校验、导回或其他标注工具适配器 |
+| [Mimics 可行性](mimics_feasibility.md) | 判断 Mimics 21.0 是否适合作为主要标注工具 |
+| [Mimics 适配器设计与开发流程](mimics_adapter_design.md) | 明确外部平台代码、Mimics Python 3.5 脚本、安装方式、操作步骤和工作量 |
+| [Mimics 技术参考](mimics_reference.md) | 查询格式、脚本参数、Mask buffer、`.mcs` 和 Python 版本边界 |
+| [Mimics POC 计划](mimics_poc_plan.md) | 在实际安装和许可环境中逐项验证能力 |
+| [Mimics 21.0 API 手册入口](../../references/mimics/README.md) | 查阅本地官方手册转换稿 |
 
-## 3. 和其他域的边界
+## 4. 数据怎样进入这个域
 
-- 和 `training` 的边界：标注域负责产出可注册的标签，不负责定义任务级训练 label id。
-- 和 `label_generation` 的边界：候选标签可以进入标注域做人工修正，但候选标签是否被接受、如何抽检，属于标签生成域和主蓝图中的准入策略。
+任意数据集不会直接“变成标注域数据”。它先经过平台导入：
 
-## 4. 数据集接入标准
+1. 图像登记为图像记录，并保存来源、文件校验值和空间信息。
+2. 已有标签登记为标签记录，并按器官保存来源和状态。
+3. 外部器官名称映射到平台统一名称。
+4. 去标识和空间检查通过后，平台才创建标注任务和病例包。
 
-任意来源的数据集不能直接等同于 `labeling` 域。它应先经过平台 ingest/import，登记为 Image Artifact 和 Label Artifact。只有当它需要人工 review、修正或工具交换时，才进入标注域。
+只有需要人工查看、修正或复查的数据才进入这个域。
 
-最低接入标准：
+## 5. 和其他域怎样协作
 
-1. 图像能登记为 Image Artifact，并记录 shape、spacing、origin/direction 或 affine、hash、来源。
-2. 标签能登记为 Label Artifact；如果是多器官标签，应能按 segment 记录器官、来源和状态。
-3. 外部器官名称能映射到 `anatomy_vocabulary`。
-4. 如果要进入 review 工具，必须能生成 Case Package，并携带 `review_label_map.yaml`。
-5. 导回后必须通过几何、label id 和 provenance 校验。
+- 候选标签生成域可以产出模型草稿，标注域负责人工修正。
+- 标注域提交的新标签回到资产登记册。
+- 训练域在创建训练数据快照时决定是否采用这些标签。
+- 标注域不会把候选标签直接改成“全局可训练”。
 
-这保证了后续 Web UI 里“导入数据集”“生成 review 任务”“提交标注结果”都是平台动作，而不是临时脚本拼接。
+## 6. 当前实现位置
 
-## 5. 当前实现落点
+| 位置 | 当前用途 |
+| --- | --- |
+| `scripts/check_case_package.py` | 已实现病例包 v0.5 的提交前检查 |
+| `scripts/hash_package.py` | 可选的整个目录传输校验工具 |
+| `src/segplatform/adapters/mimics/` | 外部现代 Python 的准备、启动、桥接和收尾代码 |
+| `adapters/mimics/` | Mimics Python 3.5.2 运行脚本、能力探针和标注员说明 |
+| `docs/domains/labeling/` | 标注流程和病例包契约 |
 
-当前仓库里，这个域的代码还没有独立成模块，但它已经有明确落点：
-
-- 平台侧通用脚本在 `scripts/`
-- 标注工具适配脚本后续应和工具一起组织，例如 `adapters/mimics/`
-- 与训练框架无关的文件契约、几何校验、mask 拆分/合并，应优先归在这个域
-
-这意味着你后面找“和标注闭环有关的实现”，优先看这个域，而不是去 `pipelines/nnunet/` 里翻。
+后续实现与标注闭环有关的代码时，优先从本域和 `adapters/mimics/` 定位，不放入 nnUNet 训练管线。

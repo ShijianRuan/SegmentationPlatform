@@ -1,1 +1,7 @@
 .DS_Store
+__pycache__/
+*.py[cod]
+outputs/
+hatch-pet-runs/
+pipelines/nnunet/gpu*.sh
+pipelines/nnunet/SmallTools.ipynb

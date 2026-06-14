@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://segmentation-platform/registry/schemas/case_manifest.schema.json",
+  "title": "病例 Case",
+  "description": "一次标注、训练或评估所需的病例工作上下文，可含同一检查的多个序列。字段说明见 platform_data_model.md §4.1。",
+  "type": "object",
+  "required": ["schema_version", "case_id", "leakage_group_id", "leakage_group_basis", "leakage_group_confidence", "study_id", "image_ids", "data_governance"],
+  "properties": {
+    "schema_version": {"const": "case_manifest.v1"},
+    "case_id": {"type": "string"},
+    "leakage_group_id": {"type": "string", "description": "防泄漏分组键：同一患者或相关检查归入同一组。不证明已去标识。"},
+    "leakage_group_basis": {
+      "type": "string",
+      "enum": ["patient_pseudonym", "source_subject", "study", "case", "import_batch_unknown"],
+      "description": "当前防泄漏分组使用的依据。"
+    },
+    "leakage_group_confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"],
+      "description": "患者或相关检查关联的可信度。low 不能用于宣称患者独立的正式评估。"
+    },
+    "study_id": {"type": "string"},
+    "patient_id_hash": {"$ref": "_defs.schema.json#/$defs/hmac_pseudonym"},
+    "study_instance_uid_hash": {"$ref": "_defs.schema.json#/$defs/hmac_pseudonym"},
+    "modality": {
+      "type": "string",
+      "description": "可选的主模态，仅作展示。权威模态以各 image_artifact.modality 为准；病例可含多模态序列。"
+    },
+    "image_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "data_governance": {"$ref": "_defs.schema.json#/$defs/data_governance"}
+  },
+  "additionalProperties": false
+}

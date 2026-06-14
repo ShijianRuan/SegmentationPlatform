@@ -1,0 +1,357 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://segmentation-platform/registry/schemas/image_artifact.schema.json",
+  "title": "图像记录 Image Artifact",
+  "description": "一个独立三维体素网格及其存储、空间信息、来源和用途判断。字段说明见 platform_data_model.md §4.2 和 data_ingestion_contract.md。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "image_id",
+    "case_id",
+    "modality",
+    "format",
+    "path",
+    "hash",
+    "hash_scope",
+    "pixel_type",
+    "shape",
+    "geometry_status",
+    "geometry_evidence",
+    "source",
+    "usability"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "image_artifact.v1"
+    },
+    "image_id": {
+      "type": "string"
+    },
+    "case_id": {
+      "type": "string"
+    },
+    "modality": {
+      "type": "string",
+      "description": "本图像的模态，例如 CT、MR；无法获得时明确写 UNKNOWN，不得猜测。"
+    },
+    "format": {
+      "type": "string",
+      "enum": [
+        "dicom_series",
+        "nifti",
+        "metaimage",
+        "raw_binary",
+        "other"
+      ]
+    },
+    "path": {
+      "type": "string",
+      "description": "主入口，可以是单文件，也可以是 DICOM 序列目录。"
+    },
+    "companion_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true,
+      "description": "MHD 引用的 RAW、sidecar 等伴随文件。"
+    },
+    "hash": {
+      "$ref": "_defs.schema.json#/$defs/sha256_hash"
+    },
+    "hash_scope": {
+      "type": "string",
+      "enum": [
+        "file",
+        "bundle_manifest"
+      ],
+      "description": "单文件摘要或稳定文件组清单摘要。"
+    },
+    "pixel_type": {
+      "type": "string",
+      "minLength": 1,
+      "description": "实际读取后的像素类型，例如 int16、uint16、float32。"
+    },
+    "shape": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "spacing": {
+      "type": "array",
+      "items": {
+        "type": "number",
+        "exclusiveMinimum": 0
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "origin": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "direction": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 9,
+      "maxItems": 9
+    },
+    "geometry_status": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "partial",
+        "index_only"
+      ]
+    },
+    "geometry_evidence": {
+      "type": "object",
+      "required": [
+        "coordinate_system",
+        "shape",
+        "spacing",
+        "origin",
+        "direction",
+        "assumptions"
+      ],
+      "properties": {
+        "coordinate_system": {
+          "type": "string",
+          "enum": [
+            "LPS",
+            "RAS",
+            "other",
+            "unknown"
+          ]
+        },
+        "shape": {
+          "$ref": "#/$defs/geometry_source"
+        },
+        "spacing": {
+          "$ref": "#/$defs/geometry_source"
+        },
+        "origin": {
+          "$ref": "#/$defs/geometry_source"
+        },
+        "direction": {
+          "$ref": "#/$defs/geometry_source"
+        },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "anatomy_coverage": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "organs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "_defs.schema.json#/$defs/anatomy_coverage_value"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "type",
+        "import_batch",
+        "reader"
+      ],
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "import_batch": {
+          "type": "string"
+        },
+        "source_layout": {
+          "type": "object",
+          "properties": {
+            "subject": {
+              "type": "string"
+            },
+            "study": {
+              "type": "string"
+            },
+            "series": {
+              "type": "string"
+            },
+            "relative_path": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "reader": {
+          "type": "object",
+          "required": [
+            "name",
+            "version"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            },
+            "parameters": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "usability": {
+      "type": "object",
+      "required": [
+        "annotation",
+        "training",
+        "evaluation",
+        "reasons"
+      ],
+      "properties": {
+        "annotation": {
+          "$ref": "#/$defs/usability_value"
+        },
+        "training": {
+          "$ref": "#/$defs/usability_value"
+        },
+        "evaluation": {
+          "$ref": "#/$defs/usability_value"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "derived_from_image_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "transform": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "container_conversion",
+            "reorientation",
+            "crop",
+            "resample",
+            "split_4d",
+            "other"
+          ]
+        },
+        "tool": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "type",
+        "tool",
+        "version"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "geometry_status": {
+            "const": "complete"
+          }
+        },
+        "required": [
+          "geometry_status"
+        ]
+      },
+      "then": {
+        "required": [
+          "spacing",
+          "origin",
+          "direction"
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "derived_from_image_id"
+        ],
+        "properties": {
+          "derived_from_image_id": {
+            "type": "string"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "transform"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "geometry_source": {
+      "type": "string",
+      "enum": [
+        "header",
+        "dicom",
+        "sidecar",
+        "inferred",
+        "assumed",
+        "unknown"
+      ]
+    },
+    "usability_value": {
+      "type": "string",
+      "enum": [
+        "allowed",
+        "allowed_with_assumptions",
+        "blocked"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

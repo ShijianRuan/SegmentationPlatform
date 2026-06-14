@@ -1,90 +1,87 @@
-# 训练域文档入口
+# 模型训练域
 
-> 日期：2026-06-07  
-> 状态：训练相关文档导航；平台总体设计以 `docs/architecture/platform_blueprint.md` 为准。
+> 日期：2026-06-13
+> 状态：当前训练域入口。平台总体设计以[平台蓝图](../../architecture/platform_blueprint.md)为准。
 
-## 1. 当前定位
+## 1. 这个域负责什么
 
-`training` 是“任务如何消费标签并产出模型”的实现域。
+`training` 负责把一份固定的训练数据快照变成可追溯模型。
 
-`pipelines/nnunet/` 是现有可复用训练管线。平台蓝图中提到的 `nnUNet Adapter`，第一阶段应尽量复用这里的转换、预处理、训练、预测和评估逻辑。
+它包括：
 
-这部分文档不负责定义平台级标签治理。标签来源、训练准入、Dataset Snapshot、Mimics 标注闭环等概念应看 `docs/architecture/platform_blueprint.md` 和 `docs/domains/labeling/case_package_contract.md`。
+- 检查训练数据快照。
+- 把平台器官名称转换为训练任务所需整数编号。
+- 导出 nnUNet 或其他框架需要的目录。
+- 记录实际预处理和训练配置。
+- 运行训练。
+- 登记模型权重和训练结果。
+- 在独立数据上运行正式评估。
 
-## 2. 文档分层
+它不负责：
 
-| 文档 | 当前用途 |
+- 人工标注和标注工具操作。
+- 运行已有模型批量生成候选标签。
+- 改写标签来源或生命周期。
+
+## 2. 当前 nnUNet 管线的定位
+
+`pipelines/nnunet/` 是已有训练核心，包含数据转换、预处理、训练、预测和评估代码。
+
+平台不会重写这部分核心逻辑。nnUNet 工具适配器负责在它前后补齐平台规则：
+
+```text
+训练数据快照
+-> 检查患者划分、标签来源和缺失标签
+-> 导出 nnUNet 目录与真实 dataset.json
+-> 调用现有训练管线
+-> 登记模型
+-> 在独立评估集上创建评估记录
+```
+
+## 3. 当前代码存在的边界
+
+| 当前行为 | 为什么不能直接作为正式平台行为 |
 | --- | --- |
-| `docs/domains/training/nnunet_pipeline_reference.md` | 现有 nnUNet 训练与推理管线说明 |
-| `docs/research/digests/*.md` | 跨域研究摘要，帮助理解后续能力边界 |
-| `docs/research/originals/*.md` | 原始研究材料，供追溯最初调研内容 |
-| `pipelines/nnunet/ModelMap.toml` | 当前任务级 label map 的事实来源 |
-| `pipelines/nnunet/Config_*.toml` | 当前训练配置样例 |
-| `pipelines/nnunet/*.py` | 可复用的转换、训练、预测和评估实现 |
+| 缺少 `meta.csv` 时随机划分数据 | 没有固定随机种子，也不能保证同一患者的检查被分在同一侧 |
+| 缺少某个器官 mask 时保留背景 0 | 会把“没有标注”错误地解释为“器官不存在” |
+| `dataset.json` 中部分来源和许可写死 | 不能反映真实训练数据来源 |
+| Surface Dice 依赖未启用 | 修复和测试前，现有评估不能作为完整正式评估 |
 
-## 3. 和平台蓝图的关系
+正式训练必须使用训练数据快照中固定的患者级划分、标签版本和准入结果。
 
-平台不会把 nnUNet 写死为唯一训练框架。更合适的关系是：**Dataset Snapshot 对接多个并行 Adapter，每个 Adapter 对应一种训练方法**。
+## 4. 训练工具适配器必须做到什么
 
-```mermaid
-flowchart TB
-    accTitle: Training Adapter Architecture
-    accDescr: Dataset snapshots feed multiple parallel adapters — nnUNet for full supervision and FewShot for few-shot learning — both producing Model Records.
+不同于 nnUNet 的训练框架也可以接入，但必须满足同一组边界：
 
-    snapshot["Dataset Snapshot"]
-    nnunet["nnUNet Adapter<br/>全监督训练"]
-    fewshot["FewShot Adapter<br/>少样本训练"]
-    pipeline["现有 nnUNet 管线<br/>Action1-5"]
-    fewshot_impl["少样本实验协议<br/>预训练 + 微调"]
-    model["Model Record"]
-    model2["Model Record"]
+1. 输入是一份训练数据快照，不能直接读取无法追溯的散落文件。
+2. 说明怎样解释任务标签编号表。
+3. 在导出前处理缺失标签、空类别和标签编号检查。
+4. 记录实际重采样、patch size、fold、随机种子和代码版本。
+5. 训练完成后创建模型记录。
+6. 正式独立评估另建评估记录，不能覆盖训练验证指标。
 
-    snapshot --> nnunet
-    snapshot --> fewshot
-    nnunet --> pipeline
-    fewshot --> fewshot_impl
-    pipeline --> model
-    fewshot_impl --> model2
-```
+## 5. 少样本学习放在哪里
 
-**Adapter 层级结构**：nnUNet Adapter 和 FewShot Adapter 是 training 域下的两个平行 Adapter，共享同一个 Dataset Snapshot 数据契约，各自产出 Model Record。
+少样本学习是一种实验设置，不等于一个统一训练框架。
 
-```
-adapters/
-  nnunet/                         ← nnUNet Adapter 边界说明
-  fewshot/                         ← 少样本 Adapter（设计已确认，待实现）
-    experiment_protocol.py         ← 离线实验协议
-    finetune_adapter.py            ← 预训练 + 微调
+- 使用少量病例训练 nnUNet 时，仍走 nnUNet 工具适配器。
+- 支持集、查询集、样本数和重复次数写入单独的少样本实验协议。
+- UniverSeg、Neuroverse3D 等具体方法只有在真实复现、输入输出稳定后，才建立自己的工具适配器。
+- 使用已有模型批量推理生成标签属于候选标签生成域。
 
-pipelines/
-  nnunet/                          ← 当前可复用训练核心
-```
+相关材料：
 
-后续接 MONAI、Transformer 时同样新增 Adapter，不改变数据契约。
+- [少样本医学图像分割综述](../../research/few_shot_learning_survey.md)
+- [少样本能力接入平台的设计](../../research/few_shot_platform_integration.md)
 
-## 4. 训练框架接入标准
+## 6. 当前实现位置
 
-不同于 nnUNet 的训练框架或算法可以加入 `training` 域，但标准不是“能训练模型”这么宽，而是必须服从平台数据契约：
+| 位置 | 当前用途 |
+| --- | --- |
+| `pipelines/nnunet/` | 已有可复用训练核心 |
+| `adapters/nnunet/` | 平台训练数据快照与现有管线之间的适配边界 |
+| [nnUNet 管线参考](nnunet_pipeline_reference.md) | 当前每个脚本和工作流的详细说明 |
+| `pipelines/nnunet/ModelMap.toml` | 当前任务标签编号的事实来源 |
+| `pipelines/nnunet/Config_Template.toml`、`Config_*.toml` | 配置模板与已有任务配置 |
 
-1. 输入必须是 Dataset Snapshot，不能绕过 Registry 直接读散落文件。
-2. 必须声明如何解释 TaskLabelMap，以及是否需要额外 task 配置。
-3. 必须记录实际预处理和训练配置，例如 resample spacing、patch size、fold、随机种子。
-4. 必须产出 Model Record，记录 Snapshot、代码版本、权重路径、指标和使用边界。
-5. 如果只是用已有模型批量推理生成标签，默认归入 `label_generation`，不是 `training`。
-
-因此 nnUNet、MONAI、FewShot 都可以作为 training Adapter；TotalSegmentator 这类直接生成候选标签的工具，通常先作为 label_generation Adapter。
-
-## 5. 当前实现落点
-
-- 当前主代码在 `pipelines/nnunet/`（nnUNet Adapter 的实际实现）
-- FewShot Adapter 已确认架构位置，但实现后置——需等 Data Registry、Dataset Snapshot 和冻结评估集建好后才能做生产级验证
-- `docs/research/digests/few_shot_learning_digest.md` 记录了少样本学习与平台的集成边界
-- 训练域只关心”如何把任务快照变成模型”，不负责人工标注和候选标签治理
-
-## 6. 为什么 research 不再放这里
-
-像 TTA、持续学习、小样本学习这类研究，会同时影响训练、标签生成、病例选择和标签治理。
-
-它们不是训练域的直接子模块，而是跨域参考材料。因此研究笔记已移到 `docs/research/`。
-
-**例外**：当某个研究方向经过生产级验证准入后，可以从研究层升级为 training 域的正式 Adapter。FewShot Adapter 已明确了这一升级路径。
+研究材料放在 `docs/research/`，因为少样本、持续学习和测试时适应可能同时影响训练、病例选择和候选标签生成，不属于训练域的直接实现。

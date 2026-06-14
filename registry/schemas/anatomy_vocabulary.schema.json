@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://segmentation-platform/registry/schemas/anatomy_vocabulary.schema.json",
+  "title": "器官名称表 Anatomy Vocabulary",
+  "description": "平台统一器官名称表。只回答“这是哪个器官”，不保存训练整数编号（见蓝图 §7.1、ADR-002、ADR-017）。规范文件：config/anatomy_vocabulary.yaml。",
+  "type": "object",
+  "required": ["schema_version", "organs"],
+  "properties": {
+    "schema_version": {"const": "anatomy_vocabulary.v1"},
+    "organs": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[a-z][A-Za-z0-9_]*$"},
+      "additionalProperties": {
+        "type": "object",
+        "required": ["display_name", "aliases"],
+        "properties": {
+          "display_name": {"type": "string", "minLength": 1},
+          "aliases": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

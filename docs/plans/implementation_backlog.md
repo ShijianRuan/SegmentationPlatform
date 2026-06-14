@@ -1,172 +1,179 @@
-# 分割平台近期实现 Backlog
+# 分割平台近期任务清单
 
-> 日期：2026-06-06
-> 范围：Case Package v0.1 + Mimics POC + 手动闭环
-> 状态：执行草案，不是架构主文档；当前主设计以 `docs/architecture/platform_blueprint.md` 为准。
+> 日期：2026-06-13
+> 近期目标：用 3 至 5 个病例跑通第一次手动闭环
+> 总体日期和验收标准见[实施计划](platform_implementation_plan_2026-10-30.md)。
+> 代码结构、工作量和依赖顺序见[阶段 A 开发执行说明](development_execution_guide.md)。
 
-> 说明：本文属于执行草案。相关实现应优先按三大域理解位置：
-> `labeling` 负责病例包、导入导出、人工 review；
-> `training` 负责 nnUNet 小闭环；
-> `label_generation` 负责候选标签和下一轮草稿回流。
->
-> 2026-10-30 前的总体节奏、里程碑和验收清单见
-> `docs/plans/platform_implementation_plan_2026-10-30.md`。
-> 本文主要服务该计划中的 M0-M3 近期落地任务。
+## 1. 近期只做什么
 
----
-
-## 1. 当前不应做的事
-
-先明确边界，避免一上来把工程拖重：
-
-1. 不先做完整 Web UI。
-2. 不先做复杂 Orchestrator。
-3. 不先把 nnUNet、MONAI、Mimics 强行统一到一个大包里。
-4. 不在 provenance 上造假；`candidate_label`、`accepted_pseudo_label` 是否进入训练由 `label_policy.allow_status` 显式控制。
-5. 不直接认定 Mimics 是最终标注工具。
-
-近期目标只有一个：用 3-5 个病例跑通 `Case Package -> Review -> Review Export -> Registry Import -> nnUNet Training Snapshot -> Predict Draft` 的手动闭环。
-
----
-
-## 2. 里程碑
-
-| 里程碑 | 目标 | 完成标准 |
-|---|---|---|
-| M0 | 样例病例选择 | 选出 3-5 个病例，覆盖无标签、有草稿、部分标签、空间边界 |
-| M1 | Case Package 生成 | 每个病例可生成符合 v0.1 契约的文件夹 |
-| M2 | Mimics 导入 POC | Windows Mimics 能打开 CT 与草稿 mask |
-| M3 | Mimics 导出 POC | Mimics 结果能导回 `verified_label.nii.gz` |
-| M4 | Registry Import | 导回包能注册为 verified 标签 |
-| M5 | nnUNet 小训练 | 使用 verified 标签生成训练快照并跑通一次训练/预测 |
-| M6 | 第二轮草稿 | 新模型预测能成为下一轮 `draft_label` |
-
----
-
-## 3. 第一批脚本任务
-
-### 3.1 平台侧脚本
-
-| 任务 | 文件 | 输入 | 输出 |
-|---|---|---|---|
-| 生成病例包 | `scripts/package_case.py` | `ct.nii.gz`, optional labels, anatomy/review config | `case_package_*` |
-| 校验病例包 | `scripts/check_case_package.py` | `case_package_*` | `preflight_report.json` |
-| 拆分多标签 | `scripts/split_multilabel_to_masks.py` | `draft_label.nii.gz`, `review_label_map.yaml` | `masks/{organ}.nii.gz` |
-| 合并二值 mask | `scripts/merge_masks_to_multilabel.py` | `masks/*.nii.gz`, `review_label_map.yaml` | `verified_label.nii.gz` |
-| 空间校验 | `scripts/check_geometry.py` | `ct.nii.gz`, label | `geometry_check.json` |
-| hash 生成 | `scripts/hash_package.py` | package dir | `checksums.sha256` |
-
-当前进度：
-
-| 状态 | 脚本 | 说明 |
-|---|---|---|
-| 已存在 | `scripts/hash_package.py` | 无额外依赖，生成 package checksum |
-| 已存在 | `scripts/check_case_package.py` | 无额外依赖，已按当前 Case Package 契约检查 `anatomy_vocabulary.yaml` 和 `review_label_map.yaml` |
-| 待实现 | `scripts/split_multilabel_to_masks.py` | 需要 `numpy`, `nibabel`, `PyYAML` |
-| 待实现 | `scripts/merge_masks_to_multilabel.py` | 需要 `numpy`, `nibabel`, `PyYAML` |
-| 待实现 | `scripts/check_geometry.py` | 需要 `numpy`, `nibabel` 或 `SimpleITK` |
-
-### 3.2 Mimics 侧脚本
-
-| 任务 | 文件 | 说明 |
-|---|---|---|
-| 导入病例包 | `adapters/mimics/import_case_package.py` | 当前已建立占位入口；后续在 Mimics 内补齐导入逻辑 |
-| 导出 Review 包 | `adapters/mimics/export_review_package.py` | 当前已建立占位入口；后续补齐导出逻辑 |
-| 标注员说明 | `adapters/mimics/README_for_annotators.md` | 当前已建立第一阶段手动闭环说明 |
-
-### 3.3 label_generation 侧脚本
-
-| 任务 | 文件 | 所属里程碑 | 说明 |
-|---|---|---|---|
-| 批量推理入口 | `adapters/label_generation/run_batch_inference.py` | M6 | 对病例列表生成 candidate_label |
-| QC routing | `adapters/label_generation/route_candidates.py` | M6 | 根据 QC 报告和 label_policy 决定输出到 draft/accepted_pseudo/rejected |
-| candidate → draft | `adapters/label_generation/candidate_to_draft.py` | M6 | 将 candidate_label 转成下一轮 review 的 draft_label |
-
-当前状态：目录 `adapters/label_generation/` 已建立；所有脚本待实现。M6 之前不必启动，但 backlog 需要条目占位以保证计划可追溯。
-
-### 3.4 暂缓脚本
-
-| 脚本 | 暂缓原因 |
-|---|---|
-| `orchestrator/serve` | 手动闭环未跑通前没有意义 |
-| Web UI | 需求和数据状态还在变 |
-| 自动主动学习策略 | 先用简单筛选和人工选择病例 |
-| MONAI Adapter | nnUNet 小闭环和 Mimics POC 先跑通 |
-| FewShot Adapter | 架构位置已确认，但需要 Data Registry、Dataset Snapshot 和冻结评估集后再生产级验证 |
-
----
-
-## 4. 实现顺序
-
-### Step 1. 文件契约脚本
-
-先实现纯 Python、与 Mimics 无关的脚本：
+近期目标只有一条流程：
 
 ```text
-package_case.py
-check_case_package.py
-split_multilabel_to_masks.py
-merge_masks_to_multilabel.py
-check_geometry.py
-hash_package.py
+准备病例包
+-> 人工保存或提交
+-> 检查提交结果
+-> 登记人工确认标签
+-> 创建最小训练数据快照
+-> 运行一次 nnUNet 小训练和推理
+-> 登记候选标签
+-> 生成下一轮人工草稿
 ```
 
-原因：这些脚本在 Mimics、3D Slicer、ITK-SNAP 之间通用，即使后面换标注工具也不会浪费。
+近期不做：
 
-### Step 2. Mimics 手动导入验证
+- 完整 Web 界面。
+- 常驻流程调度服务。
+- 复杂任务队列。
+- MONAI 工具适配器。
+- 通用少样本工具适配器。
+- 自动主动学习。
+- 完整多人审批。
 
-先不写复杂 Mimics 插件。用一个病例包，手动在 Mimics 中尝试：
+## 2. 七个闭环检查点
 
-1. 导入 CT。
-2. 导入逐器官 mask。
-3. 修正一个器官。
-4. 导出 mask。
+| 检查点 | 目标 | 完成标准 |
+| --- | --- | --- |
+| B0 | 选好样例 | 3 至 5 个已完成去标识检查的病例，覆盖无标签、草稿、部分标签和空间边界差异 |
+| B1 | 生成病例包 | 每个病例都有图像集、目标组、基础标签版本和去标识声明 |
+| B2 | 导入标注工具 | Mimics 21.0 或备用工具能打开多个图像集和初始 mask |
+| B3 | 导出标注结果 | 能导出单个或多个完整目标组，并通过空间检查 |
+| B4 | 登记提交结果 | 只有明确提交且检查通过的目标组创建人工确认标签 |
+| B5 | nnUNet 小训练 | 用最小训练数据快照完成一次导出、训练和推理 |
+| B6 | 第二轮草稿 | 新模型输出登记为候选标签，并进入下一轮人工任务 |
 
-记录每一步是否需要人工不可控操作。
+首次闭环为了减少变量，B5 可以只使用人工确认标签。闭环稳定后，外部来源标签和候选标签仍可按训练数据快照规则进入训练。
 
-### Step 3. Mimics 脚本化
+## 3. 通用脚本
 
-只有 Step 2 证明 Mimics 能稳定导入导出后，再写 Mimics 内 Python 脚本。
+### 已存在
 
-### Step 4. nnUNet 小闭环
+| 文件 | 当前能力 |
+| --- | --- |
+| `scripts/check_case_package.py` | 检查病例包 v0.5 的必需文件、目标组、去标识声明、配置引用和文件校验值 |
+| `scripts/hash_package.py` | 复制或归档整个目录时生成可选校验值 |
 
-用导回的 `verified_label.nii.gz` 创建最小训练快照，只训练少量器官或少量 case，目标不是模型效果，而是验证数据路径。
+### 待实现
 
----
+| 文件 | 输入 | 输出 |
+| --- | --- | --- |
+| `src/segplatform/ingest/scan.py` | DICOM、NIfTI、MHD+RAW 或 RAW 来源 | 只读扫描报告 |
+| `src/segplatform/ingest/import_cases.py` | 扫描报告和确认映射 | Case、Image Artifact |
+| `src/segplatform/labeling/package_case.py` | 已登记图像、可选标签、器官和任务配置 | 病例包 |
+| `src/segplatform/labeling/mask_conversion.py` | 多标签文件或逐器官 mask、标签映射 | 拆分或合并结果 |
+| `src/segplatform/qc/geometry.py` | 图像和标签记录 | 空间检查报告 |
 
-## 5. 关键设计风险
+顶层 `scripts/` 如需保留命令兼容，只提供薄入口；核心逻辑进入可测试的 `src/segplatform/`。这些能力与具体标注软件无关，应先于 Mimics 自动化完成。
 
-| 风险 | 优先级 | 当前处理 |
-|---|---|---|
-| Mimics 导出 shape 不一致 | P0 | shape 不一致是硬故障；需切换导出方式或工具 |
-| Mimics affine/origin/direction 不一致 | P1 | shape 一致时由 `check_geometry.py` 检测并修复几何头，再抽检 |
-| 多标签与 Mimics 多 mask 映射复杂 | P0 | 统一用 `review_label_map.yaml` 和 mask name 映射 |
-| 伪标签误入训练 | P0 | `label_policy.allow_status` 显式控制；状态和来源不改写 |
-| Windows 与远程路径不同 | P1 | manifest 中只用相对路径 |
-| 训练框架扩展过早 | P2 | 先只实现 nnUNet 小闭环 |
-| 标注员负担过重 | P1 | 不做逐器官 checklist，只要求保存导出 |
+## 4. Mimics 工具适配器
 
----
+> 首次闭环不必等 Mimics：先用 ITK-SNAP 或 3D Slicer 完成人工修正，Mimics 验证并行进行（见[实施计划](platform_implementation_plan_2026-10-30.md) M3）。
 
-## 6. 待用户确认
+### 先做工作站诊断和能力探针
 
-这些问题需要在真正开始 POC 前确认：
+按照[Mimics 适配器设计与开发流程](../domains/labeling/mimics_adapter_design.md)和[Mimics POC 计划](../domains/labeling/mimics_poc_plan.md)验证：
 
-1. Mimics 当前可用版本和许可证类型是什么？是否能运行 Python 脚本？
-2. 第一批 POC 病例在哪里？是否已有可公开给脚本处理的 3-5 个样例？
-3. 第一阶段目标范围已按会议确定为 v500 现有 CT1-16、MR1-8 多模型组合；POC 可从其中挑 3-5 个病例验证闭环。
-4. 训练服务器能否访问病例包输出目录？还是必须 zip 手动传输？
-5. 哪些任务或来源应从默认伪标签准入中排除？
+1. DICOM 多序列分组。
+2. 每个目标组绑定正确图像集。
+3. Mask 体素数组轴顺序。
+4. 图像索引到物理坐标的关系。
+5. 导入初始 mask。
+6. 修改一个器官并保存。
+7. 关闭后重新打开继续。
+8. 导出单个 mask 和完整目标组。
+9. 导出结果通过空间检查。
 
----
+每一步都记录是否需要不可控的人工操作。
 
-## 7. 下一步建议
+探针是完成 POC 所需的实验代码，不等待全部验证结束。生产工作流代码必须在 Gate A 通过后开始。
 
-下一步最值得做的是实现平台侧通用脚本的最小版本：
+### 外部现代 Python
 
-1. `split_multilabel_to_masks.py`
-2. `merge_masks_to_multilabel.py`
-3. `check_geometry.py`
-4. `hash_package.py`
+| 文件 | 作用 | 进入条件 |
+| --- | --- | --- |
+| `src/segplatform/adapters/mimics/doctor.py` | 检查工作站、启动诊断脚本并生成环境报告 | 立即实现 |
+| `src/segplatform/adapters/mimics/prepare.py` | 检查病例包并生成 runtime manifest | Gate A |
+| `src/segplatform/adapters/mimics/launcher.py` | 传参启动 Mimics 和打开任务脚本 | Gate A |
+| `src/segplatform/adapters/mimics/bridge.py` | 医学标签与逐器官布尔缓冲区互转 | P04/P05 路径成立 |
+| `src/segplatform/adapters/mimics/finalize.py` | 转换提交、执行 QC 并生成提交清单 | Gate A |
 
-有了这四个脚本，就可以开始验证 Mimics 导入导出，而不需要等完整 Registry。
+### Mimics Python 3.5.2
+
+| 文件 | 作用 | 进入条件 |
+| --- | --- | --- |
+| `adapters/mimics/runtime_py35/sp_common.py` | 兼容层、manifest、日志和错误处理 | 立即实现最小版 |
+| `adapters/mimics/runtime_py35/sp_diagnostics.py` | 检查版本、许可和关键 API | 立即实现 |
+| `adapters/mimics/runtime_py35/sp_open_review.py` | 导入或打开任务、绑定 image set、创建 Mask 和 metadata | Gate A |
+| `adapters/mimics/runtime_py35/sp_submit_review.py` | 选择完成/复查/阻塞并导出任务 Mask | Gate A |
+| `adapters/mimics/probes/p01_*.py` 至 `p06_*.py` | 验证分组、绑定、buffer、空间往返和选择性导出 | POC 期间 |
+
+当前这些脚本均待实现。
+
+## 5. nnUNet 小闭环
+
+实施顺序：
+
+1. 从通过检查的人工提交结果创建最小标签记录。
+2. 手写或用薄脚本创建最小训练数据快照。
+3. 固定病例划分和任务标签编号。
+4. 检查缺失标签、空类别，以及 train/test 病例的患者级（leakage_group）不相交。
+5. 导出现有 nnUNet 管线需要的目录。
+6. 运行小规模训练或快速训练。
+7. 对样例病例推理。
+8. 创建最小模型记录。
+
+目标是验证数据路径，不是追求模型指标。
+
+## 6. 候选标签回流
+
+待实现：
+
+| 文件 | 作用 |
+| --- | --- |
+| `adapters/label_generation/run_batch_inference.py` | 对病例列表运行模型并创建候选标签生成批次 |
+| `adapters/label_generation/route_candidates.py` | 根据质量报告把结果送复查、保留候选或拒绝 |
+| `adapters/label_generation/candidate_to_draft.py` | 把候选标签准备成下一轮人工草稿 |
+
+要求：
+
+- 一个病例失败不影响其他成功病例。
+- 重跑不覆盖已成功输出。
+- 每个候选标签保存模型、参数和质量报告。
+- 本步骤不写训练准入结论。
+
+## 7. 当前最高风险
+
+| 风险 | 优先级 | 处理方式 |
+| --- | --- | --- |
+| Mimics 图像索引到物理坐标无法解释 | P0 | 不复制头信息绕过；停止该路径并换导出方式或工具 |
+| Mask 绑定错误图像集 | P0 | 导入和导出按目标组切换并验证图像标识 |
+| 多标签文件与 Mimics 多 Mask 映射错误 | P0 | 使用同一份 `review_label_map.yaml` |
+| 候选标签误当人工真值 | P0 | 保持候选状态，训练采用结果只写入训练数据快照 |
+| 多位标注者覆盖彼此结果 | P0 | 检查任务、目标组、标注者和基础标签校验值 |
+| 标注者操作负担过重 | P1 | 第一阶段允许平台操作者运行前后脚本，稳定后再封装启动器 |
+| Windows 与服务器路径不同 | P1 | 清单优先使用相对路径 |
+| 过早扩展训练框架 | P2 | 先完成 nnUNet 小闭环 |
+
+## 8. 开始 POC 前仍需确认
+
+1. Mimics Research 21.0 的 edition、许可模块和 Python scripting 权限。
+2. 第一批 3 至 5 个样例病例的位置和可用范围。
+3. DICOM、NIfTI、MHD+RAW、RAW+sidecar 和不完整几何样例能否覆盖最小导入矩阵。
+4. 训练服务器能否直接访问病例包输出，还是需要手动传输。
+5. 第一轮小训练选择哪个 v500 任务。
+6. 哪些数据或算法来源明确禁止作为候选训练标签。
+
+## 9. 紧接着要做的工作
+
+按顺序：
+
+1. 固定 3 至 5 个闭环病例和最小异构导入样例。
+2. 建立 `pyproject.toml`、`src/segplatform/`、统一 CLI 和测试骨架。
+3. 实现 Schema 运行时校验、单文件摘要和稳定文件组摘要。
+4. 实现 NIfTI、MHD+RAW 扫描，再实现 DICOM 分组和 RAW+sidecar。
+5. 实现最小文件型 Registry 和几何 QC。
+6. 实现病例包生成、mask 拆分合并，并复用已有 `check_case_package.py`。
+7. 实现 Mimics doctor 和能力探针，按 Gate A 决定是否继续生产脚本。
+8. 创建最小 Dataset Snapshot，随后接入 nnUNet。
+
+完成前六步后，即使最终不用 Mimics，数据入口、Registry、QC 和病例包仍可复用于其他标注工具。
