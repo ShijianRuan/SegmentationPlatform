@@ -1,6 +1,6 @@
 # Mimics 标注员说明
 
-> 状态：阶段 A 的目标操作说明，入口尚待本机验证和实现
+> 状态：阶段 A 脚本已实现；正式使用前必须由管理员完成 Mimics Research 21.0 工作站验收
 
 标注者只负责核对图像并修正器官边界，不负责路径、格式、标签编号、生命周期状态和训练规则。
 
@@ -18,8 +18,8 @@
 阶段 A 尚未封装界面时，平台操作者运行：
 
 ```bash
-sp mimics prepare /path/to/case_package
-sp mimics open /path/to/case_package
+sp mimics prepare /path/to/case_package --config /path/to/mimics_workstation.yaml
+sp mimics open /path/to/case_package --config /path/to/mimics_workstation.yaml --registry /path/to/registry
 ```
 
 ## 标注和保存
@@ -27,6 +27,7 @@ sp mimics open /path/to/case_package
 - 使用 Mimics 正常工具编辑平台创建的 Mask。
 - 可以随时保存 `.mcs` 并关闭软件。
 - 保存只保留进度，不会提交，也不会创建 verified 标签。
+- 长时间工作或完成一个阶段后，可运行 **SP - Save Checkpoint**，额外保存全部 Mask 的恢复快照。
 - 不自行改变平台 Mask 的器官名称或删除其任务 metadata。
 - 不手工复制 header、重采样、改标签编号或导出 NIfTI。
 
@@ -36,7 +37,7 @@ sp mimics open /path/to/case_package
 
 1. 打开 `Script -> Scripting Library`。
 2. 运行 **SP - Submit Review**。
-3. 选择一个结果：
+3. 选择一个结果和本次要提交的目标组。2–5 个目标组时可以逐个勾选后一次提交任意组合。
 
 | 选择 | 何时使用 |
 | --- | --- |
@@ -47,12 +48,16 @@ sp mimics open /path/to/case_package
 
 脚本只导出本次任务管理的 Mask，并提示“已导出，仍需平台检查”。平台随后运行格式转换和空间 QC；只有检查通过的“提交完成”才会生成新的人工确认标签版本。
 
+提交前脚本会聚合检查 Mask 是否齐全、是否绑定正确图像、基础标签版本和 shape。多个空 Mask 会先在一个清单中显示，可以统一选择“全部确认不存在”“全部待复查”，也可以逐项判断。
+
 一个目标组需要复查或检查失败，不应阻塞同一病例其他已经完成的目标组。
 
 ## 继续和返修
 
 - 未提交任务：再次从平台入口打开同一个病例包，继续编辑已有 `.mcs`。
-- 提交检查失败：保留原 `.mcs`，平台给出问题报告，修正后重新提交。
+- 提交前检查失败：弹窗列出主要问题，完整内容见 `reports/mimics_submit_precheck.json`。
+- 平台 QC 失败：查看 `reports/review_report.json`；下次打开任务时也会显示最近的失败摘要。
+- `.mcs` 损坏：不要删除病例包。管理员保留旧文件并从最近的 checkpoint 重建工作区。
 - 已验证标签再修改：平台创建新的 `review_id`，旧标签作为基础版本；新结果形成新版本，不覆盖旧版本。
 - 多位标注者：每个人使用独立任务和 `.mcs`，不要多人共享写同一项目文件。
 

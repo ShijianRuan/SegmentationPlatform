@@ -1,6 +1,10 @@
 .DS_Store
 __pycache__/
 *.py[cod]
+.venv/
+*.egg-info/
+config/mimics_workstation.local.yaml
+config/mimics_workstation.verified.yaml
 outputs/
 hatch-pet-runs/
 pipelines/nnunet/gpu*.sh

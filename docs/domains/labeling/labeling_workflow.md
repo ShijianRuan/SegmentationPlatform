@@ -99,7 +99,9 @@ Mimics 中的“当前活动图像”只是软件运行时状态。工具适配�
 
 ### 4.1 保存进度
 
-标注者可以反复保存 `.mcs` 或其他工作文件并关闭软件。
+标注者可以反复保存 `.mcs` 或其他工作文件并关闭软件。长时间工作后可以额外运行
+`SP - Save Checkpoint`，把全部受管 Mask 保存为病例包内的恢复 buffer；该动作是灾备，
+不等于提交。
 
 保存进度只说明“工作可以继续”，不会：
 
@@ -270,6 +272,7 @@ Mimics 是工具适配器，不承担平台状态机和数据治理。实现采�
 sp mimics prepare
 -> sp mimics open
 -> 标注者在 Mimics 编辑并保存
+-> 可选：SP - Save Checkpoint
 -> Script / Scripting Library / SP - Submit Review
 -> sp mimics finalize
 -> 平台 QC 和标签版本登记
@@ -296,7 +299,12 @@ Mimics 21.0 官方资料明确支持 DICOM、BMP、TIFF、JPEG 和 raw 图像；
 - 提交时可以导出单个 Mask，也可以按目标组导出全部 Mask。
 - 输出目录按 `image_id/organ` 组织，避免多序列混淆。
 
-`.mcs` 保存 Mimics 工作现场，适合作为中间进度文件，但不是平台唯一数据来源。跨机器和跨版本能力必须实际验证。
+`.mcs` 保存 Mimics 工作现场，适合作为中间进度文件，但不是平台唯一数据来源。病例包 v0.5
+允许在 `working/checkpoints/{review_id}/` 保存 gzip 压缩的逐器官 Mask 恢复快照；`.mcs` 损坏时可以保留
+旧文件并从最近 checkpoint 重建。跨机器和跨版本能力仍必须实际验证。
+
+Windows 工作站的安装、v0.5 目录、探针、checkpoint 和恢复命令见
+[Mimics Research 21 Windows 工作站操作手册](mimics_windows_runbook.md)。
 
 ## 12. 候选标签生成为什么仍是独立域
 

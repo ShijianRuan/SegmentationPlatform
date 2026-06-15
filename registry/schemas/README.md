@@ -22,6 +22,7 @@
 | `image_artifact.v1` | `image_artifact.schema.json` | 图像记录；支持单文件、DICOM/MHD 文件组和不完整空间信息 |
 | `label_artifact.v1` | `label_artifact.schema.json` | 标签记录（含按 segment 的 `lineage`） |
 | `dataset_snapshot.v1` | `dataset_snapshot.schema.json` | 训练数据快照 |
+| `review_task.v1` | `review_task.schema.json` | 离线人工标注任务、目标组状态和事件 |
 | —（共享） | `_defs.schema.json` | 被各 schema 引用的共享 `$defs`，本身不对应单条记录 |
 
 ## 3. 还没有 schema 的记录（按需补，不提前写）

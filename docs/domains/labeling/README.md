@@ -40,6 +40,8 @@
 | 文档 | 用途 |
 | --- | --- |
 | [标注工作流](labeling_workflow.md) | 了解平台、标注者和工具从准备数据到提交结果的完整步骤 |
+| [标注闭环实现与运行指南](labeling_implementation_guide.md) | 安装代码、生成病例包、配置 Mimics、提交收尾和创建 Snapshot |
+| [Mimics Research 21 Windows 工作站操作手册](mimics_windows_runbook.md) | 在独立 Windows 机器上安装、运行探针、标注、提交、QC 和回收结果 |
 | [病例包契约](case_package_contract.md) | 实现病例包生成、校验、导回或其他标注工具适配器 |
 | [Mimics 可行性](mimics_feasibility.md) | 判断 Mimics 21.0 是否适合作为主要标注工具 |
 | [Mimics 适配器设计与开发流程](mimics_adapter_design.md) | 明确外部平台代码、Mimics Python 3.5 脚本、安装方式、操作步骤和工作量 |
@@ -69,7 +71,8 @@
 
 | 位置 | 当前用途 |
 | --- | --- |
-| `scripts/check_case_package.py` | 已实现病例包 v0.5 的提交前检查 |
+| `src/segplatform/` | 已实现训练前离线闭环的 CLI、Registry、图像几何、Mimics 外部适配和 Snapshot |
+| `scripts/check_case_package.py` | 已实现病例包 v0.5、初始标签和 Mimics `.u8` 提交布局检查 |
 | `scripts/hash_package.py` | 可选的整个目录传输校验工具 |
 | `src/segplatform/adapters/mimics/` | 外部现代 Python 的准备、启动、桥接和收尾代码 |
 | `adapters/mimics/` | Mimics Python 3.5.2 运行脚本、能力探针和标注员说明 |

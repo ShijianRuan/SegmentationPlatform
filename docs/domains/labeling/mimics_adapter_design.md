@@ -1,7 +1,7 @@
 # Mimics 适配器设计与开发流程
 
 > 适用版本：优先验证 Mimics Research 21.0
-> 状态：阶段 A 实施设计；带“本机门禁”的部分在验证通过前不得承诺
+> 状态：阶段 A 代码已实现；带“本机门禁”的部分在 Mimics 21 工作站验证通过前不得投入真实数据生产
 > 目标：让标注者只处理图像和 Mask，不处理路径、格式转换、Python 环境和平台状态
 
 ## 1. 先给出结论
@@ -59,6 +59,7 @@ src/segplatform/adapters/mimics/
   prepare.py
   launcher.py
   bridge.py
+  probes.py
   finalize.py
 
 adapters/mimics/
@@ -66,8 +67,10 @@ adapters/mimics/
     sp_common.py
     sp_diagnostics.py
     sp_open_review.py
+    sp_save_checkpoint.py
     sp_submit_review.py
   probes/
+    sp_probe_suite.py
     p01_dicom_grouping.py
     p02_image_set_binding.py
     p04_mask_buffer.py
@@ -79,7 +82,7 @@ adapters/mimics/
 
 两类脚本含义不同：
 
-- `probes/` 是可丢弃或保留作回归测试的能力探针，不是正式工作流；
+- `probes/sp_probe_suite.py` 是工作站验收入口；单项探针用于失败定位和回归；
 - `runtime_py35/` 是标注者实际使用的稳定脚本，必须兼容 Python 3.5。
 
 ## 5. 外部现代 Python 要开发什么
@@ -107,7 +110,7 @@ sp mimics doctor --config config/mimics_workstation.yaml
 目标命令：
 
 ```bash
-sp mimics prepare /path/to/case_package
+sp mimics prepare /path/to/case_package --config /path/to/mimics_workstation.yaml
 ```
 
 职责：
@@ -153,11 +156,12 @@ working/bridge/
   import/
     img_ct/
       liver.u8
-  export/
-    img_ct/
-      liver.u8
   buffer_manifest.json
 ```
+
+Mimics 导出的提交 buffer 不写入 `working/bridge/`，而是写入
+`submissions/{review_id}/buffers/`。导出清单保存相对 Case Package 的路径，
+使病例包可从 Windows 工作站迁移回持有主 Registry 的平台机器完成 Finalize。
 
 `buffer_manifest.json` 至少记录：
 
@@ -174,7 +178,7 @@ working/bridge/
 目标命令：
 
 ```bash
-sp mimics open /path/to/case_package
+sp mimics open /path/to/case_package --config /path/to/mimics_workstation.yaml --registry /path/to/registry
 ```
 
 职责：
@@ -202,7 +206,7 @@ sp mimics open /path/to/case_package
 目标命令：
 
 ```bash
-sp mimics finalize /path/to/case_package
+sp mimics finalize /path/to/case_package --config /path/to/mimics_workstation.yaml --registry /path/to/registry
 ```
 
 职责：
@@ -272,6 +276,10 @@ sp mimics finalize /path/to/case_package
 
 一个 `.mcs` 第一阶段只承载一个 `review_id`。这条限制可以避免提交脚本不知道当前在提交哪个任务，也使中断恢复和多人协作更清楚。
 
+Resume 时先比较已有 Mask metadata 与当前 target 的 `base_label_id` 和
+`base_label_sha256`。这里比较的是 Label Artifact bundle 版本，不把逐器官 import buffer
+文件 hash 错当成同一个 hash；任一版本不一致都阻断打开。
+
 ### 6.4 `sp_submit_review.py`
 
 标注者从 `Script -> Scripting Library` 运行 **SP - Submit Review**。
@@ -284,10 +292,10 @@ sp mimics finalize /path/to/case_package
 - Mask 是否绑定到正确 image set；
 - 导出缓冲区能否写入。
 
-随后只显示一个对话框：
+提交时只显示与当前决定有关的对话框：
 
 ```text
-提交完成 | 提交复查 | 报告阻塞 | 取消
+提交意图 -> 目标组选择 -> 仅在存在空 Mask 时确认缺失语义
 ```
 
 处理规则：
@@ -297,7 +305,19 @@ sp mimics finalize /path/to/case_package
 - **报告阻塞**：不要求所有 Mask 完成，写入阻塞类型和可选说明；
 - **取消**：不写提交结果。
 
+2–5 个目标组使用 `question_box()` 模拟勾选，可一次组成任意提交组合。Mimics 21 API
+没有原生 checkbox/multi-select 对话框，因此不依赖不存在的控件能力。
+
+导出前脚本聚合检查 Mask 是否存在、image set、基础标签版本和 shape。多个空 Mask 先显示
+总清单，允许统一确认或逐项处理。
+
 脚本完成后保存 `.mcs`，并提示“已导出，仍需平台检查”。它不直接写 `verified_label`。
+
+### 6.5 `sp_save_checkpoint.py`
+
+该脚本显式导出当前 review 的全部受管 Mask 为 gzip 压缩 `.u8.gz`，并写入 checkpoint manifest。它用于 `.mcs`
+损坏后的恢复，不创建提交、不改变标签状态。Mimics 21 资料没有证明存在稳定的项目保存事件
+回调，因此第一阶段不伪造“每次保存自动 checkpoint”；标注者在长时间工作后主动运行一次。
 
 ## 7. 标注者实际怎样使用
 
@@ -318,8 +338,8 @@ sp mimics finalize /path/to/case_package
 平台操作者或桌面启动器运行：
 
 ```bash
-sp mimics prepare D:\review_packages\case_001
-sp mimics open D:\review_packages\case_001
+sp mimics prepare D:\review_packages\case_001 --config C:\SegmentationPlatform\config\mimics_workstation.yaml
+sp mimics open D:\review_packages\case_001 --config C:\SegmentationPlatform\config\mimics_workstation.yaml --registry D:\platform_registry
 ```
 
 Mimics 自动打开任务后，标注者只核对：
@@ -335,6 +355,7 @@ Mimics 自动打开任务后，标注者只核对：
 
 - 使用 Mimics 正常编辑工具修改 Mask；
 - 可以任意多次保存 `.mcs`；
+- 长时间工作后可以保存独立 Mask checkpoint；
 - 关闭后继续时，仍通过 `sp mimics open` 打开同一个病例包；
 - 保存只保留进度，不产生提交。
 
@@ -343,7 +364,7 @@ Mimics 自动打开任务后，标注者只核对：
 1. 在 Scripting Library 运行 **SP - Submit Review**；
 2. 选择完成、复查、阻塞或取消；
 3. 等待脚本提示导出完成；
-4. 平台操作者或启动器运行 `sp mimics finalize`；
+4. 平台操作者或启动器运行带工作站配置和 Registry 路径的 `sp mimics finalize`；
 5. QC 通过后，平台更新任务和标签版本。
 
 标注者不手工导出 NIfTI，不选择输出文件名，也不维护生命周期状态。
@@ -381,17 +402,19 @@ Mimics 自动打开任务后，标注者只核对：
 | 器官 Mask 缺失 | 提交脚本 | 列出缺少目标 | 返回继续编辑 |
 | 医学上不能确认 | 标注者 | 选择“提交复查” | 保留草稿并创建复查队列 |
 | 工具或数据导致无法工作 | 标注者 | 选择“报告阻塞” | 平台操作者处理后重开 |
-| 导出后几何 QC 失败 | `finalize` | 任务显示提交失败，不丢失项目 | 禁止创建 verified 标签 |
+| 导出后几何 QC 失败 | `finalize` | 查看 `review_report.json`；下次打开显示摘要 | 禁止创建 verified 标签 |
+| `.mcs` 损坏 | `open` | 保留旧文件并提示重建 | 从匹配当前版本的 checkpoint 恢复 |
 
 用户提示只显示任务相关信息。完整堆栈、API 参数和文件路径写入 `reports/`，不直接展示给标注者。
 
 ## 10. 对话框使用原则
 
-只保留三类人为确认：
+人为交互只保留四类：
 
 1. 打开后的任务摘要确认；
-2. 提交意图选择；
-3. 无法继续的阻断信息。
+2. 提交意图和目标组选择；
+3. 仅在存在空 Mask 时确认缺失语义；
+4. 无法继续的阻断信息。
 
 可预答的对话框必须满足“平台预检查已确定唯一答案”。例如方向信息已从可信 DICOM 验证时，才可以预设 `ChangeOrientation=default`。
 
@@ -421,7 +444,7 @@ Mimics 主路径预计 **16-29 人日**。如果直接文件路径无法使用�
 
 ## 12. 分阶段门禁
 
-### Gate A：可以开始写生产脚本
+### Gate A：生产脚本可以连接真实数据
 
 必须通过：
 

@@ -13,7 +13,7 @@
 | 目录传输摘要 | `scripts/hash_package.py` | 已实现，但不是 Image Artifact 文件组摘要 |
 | 核心记录 Schema | `registry/schemas/` | 已有 Case、Image、Label、Snapshot；运行时校验器未实现 |
 | 器官名称表 | `config/anatomy_vocabulary.yaml` | 已有基础数据，需要统一校验入口 |
-| 标注工具适配器 | 已定义 Mimics 双运行时、探针和标注者流程 | 无可运行诊断或生产脚本 |
+| 标注工具适配器 | Mimics 双运行时、诊断、关键探针、打开/提交/收尾脚本已实现 | 真实 Mimics 21 工作站 Gate A/B/C 尚未验收 |
 | nnUNet 工具适配器 | `adapters/nnunet/` 只有说明 | 未实现 |
 | 候选标签生成适配器 | `adapters/label_generation/` 只有说明 | 未实现 |
 | Data Registry | 只有 Schema | 未实现文件登记、查询和追加版本 |

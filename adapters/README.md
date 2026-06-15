@@ -12,7 +12,7 @@
 
 | 目录 | 用途 | 当前状态 |
 |---|---|---|
-| `mimics/` | 保存 Mimics Python 3.5.2 脚本和探针；平台侧代码另在 `src/segplatform/adapters/mimics/` | [双运行时设计](../docs/domains/labeling/mimics_adapter_design.md)已明确，代码待实现 |
+| `mimics/` | 保存 Mimics Python 3.5.2 正式脚本和 POC 探针；平台侧代码在 `src/segplatform/adapters/mimics/` | 代码已实现，等待 Mimics Research 21.0 工作站验收 |
 | `nnunet/` | 把训练数据快照导出成 nnUNet 数据集 | 已定义边界，训练核心仍在 `pipelines/nnunet/` |
 | `label_generation/` | 接入能够生成候选标签的模型或算法 | 已定义共同输出要求 |
 

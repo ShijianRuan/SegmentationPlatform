@@ -57,6 +57,9 @@ class CasePackageV05Tests(unittest.TestCase):
                     "sha256": sha256(image),
                     "shape": [32, 32, 16],
                     "spacing": [1.0, 1.0, 2.0],
+                    "origin": [0.0, 0.0, 0.0],
+                    "direction": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    "coordinate_system": "RAS",
                 }
             ],
             "review": {
@@ -136,6 +139,9 @@ class CasePackageV05Tests(unittest.TestCase):
                 "sha256": sha256(second_image),
                 "shape": [24, 24, 12],
                 "spacing": [1.2, 1.2, 2.5],
+                "origin": [0.0, 0.0, 0.0],
+                "direction": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                "coordinate_system": "RAS",
             }
         )
         manifest["review"]["targets"].append(

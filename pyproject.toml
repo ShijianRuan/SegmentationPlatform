@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "segmentation-platform"
+version = "0.1.0"
+description = "Offline data, annotation, Mimics 21, registry, and snapshot workflow for SegmentationPlatform"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "jsonschema>=4.20",
+  "nibabel>=5.2",
+  "numpy>=1.24",
+  "pydicom>=2.4",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+metaimage = ["SimpleITK>=2.3"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+sp = "segplatform.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

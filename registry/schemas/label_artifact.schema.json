@@ -61,6 +61,7 @@
       "additionalProperties": true
     },
     "artifact_lifecycle": {"$ref": "_defs.schema.json#/$defs/artifact_file_lifecycle"},
+    "usage_constraints": {"$ref": "_defs.schema.json#/$defs/usage_constraints"},
     "parent_label_id": {"type": ["string", "null"], "description": "文件级修订指针：本文件从哪一份文件版本改来。与 segment 级 lineage 是两件事。"},
     "segments": {
       "type": "array",

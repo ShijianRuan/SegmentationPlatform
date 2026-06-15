@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a Case Package v0.5 directory against the current contract draft."""
+"""Validate a Case Package v0.5 directory against the current contract."""
 
 from __future__ import annotations
 
@@ -49,6 +49,16 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(chunk_size), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_directory(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted((item for item in root.rglob("*") if item.is_file()), key=lambda item: item.relative_to(root).as_posix()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(sha256_file(path).encode("ascii"))
+        digest.update(b"\n")
     return digest.hexdigest()
 
 
@@ -145,6 +155,17 @@ def validate_vector(
     ):
         kind = "positive integers" if integer else "positive numbers"
         findings.append(Finding("error", "geometry_vector_invalid", f"{field} must contain three {kind}"))
+
+
+def validate_numeric_vector(value: Any, field: str, length: int, findings: list[Finding]) -> None:
+    if (
+        not isinstance(value, list)
+        or len(value) != length
+        or not all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in value)
+    ):
+        findings.append(
+            Finding("error", "geometry_vector_invalid", f"{field} must contain {length} numeric values")
+        )
 
 
 def validate_sha256(value: Any, field: str, findings: list[Finding], *, placeholder_allowed: bool) -> None:
@@ -367,6 +388,16 @@ def validate_manifest(root: Path, findings: list[Finding]) -> dict[str, Any] | N
 
             validate_vector(image.get("shape"), f"{prefix}.shape", findings, integer=True)
             validate_vector(image.get("spacing"), f"{prefix}.spacing", findings, integer=False)
+            validate_numeric_vector(image.get("origin"), f"{prefix}.origin", 3, findings)
+            validate_numeric_vector(image.get("direction"), f"{prefix}.direction", 9, findings)
+            if image.get("coordinate_system") not in {"LPS", "RAS"}:
+                findings.append(
+                    Finding(
+                        "error",
+                        "geometry_coordinate_system_invalid",
+                        f"{prefix}.coordinate_system must be LPS or RAS",
+                    )
+                )
 
             if "sha256" not in image:
                 findings.append(Finding("error", "manifest_image_sha_missing", f"{prefix}.sha256 is required"))
@@ -388,6 +419,26 @@ def validate_manifest(root: Path, findings: list[Finding]) -> dict[str, Any] | N
                             "error",
                             "manifest_image_sha_mismatch",
                             f"{prefix}.image_path sha256 mismatch: "
+                            f"expected {image.get('sha256')}, got {actual_digest}",
+                        )
+                    )
+
+            if (
+                dicom_path
+                and resolved_dicom
+                and resolved_dicom.is_dir()
+                and image.get("sha256")
+                and image.get("sha256") != "TO_BE_FILLED"
+                and SHA256_PATTERN.fullmatch(str(image.get("sha256")))
+            ):
+                expected_digest = normalized_sha256(str(image["sha256"]))
+                actual_digest = sha256_directory(resolved_dicom)
+                if actual_digest.lower() != expected_digest.lower():
+                    findings.append(
+                        Finding(
+                            "error",
+                            "manifest_dicom_sha_mismatch",
+                            f"{prefix}.dicom_path sha256 mismatch: "
                             f"expected {image.get('sha256')}, got {actual_digest}",
                         )
                     )
@@ -482,6 +533,51 @@ def validate_manifest(root: Path, findings: list[Finding]) -> dict[str, Any] | N
                         "manifest_base_label_incomplete",
                         f"{prefix}.base_label_id and base_label_sha256 must both be set or omitted",
                     )
+                )
+
+    initial_labels = manifest.get("initial_labels", [])
+    if not isinstance(initial_labels, list):
+        findings.append(
+            Finding("error", "manifest_initial_labels_type", "manifest.initial_labels must be an array")
+        )
+    else:
+        seen_initial: set[tuple[str, str]] = set()
+        for index, label in enumerate(initial_labels):
+            prefix = f"manifest.initial_labels[{index}]"
+            if not isinstance(label, dict):
+                findings.append(Finding("error", "manifest_initial_label_type", f"{prefix} must be an object"))
+                continue
+            image_id = label.get("image_id")
+            organ = label.get("organ")
+            if image_id not in image_ids:
+                findings.append(
+                    Finding("error", "manifest_initial_label_image_unknown", f"{prefix}.image_id is unknown")
+                )
+            if not isinstance(organ, str) or not ID_PATTERN.fullmatch(organ):
+                findings.append(
+                    Finding("error", "manifest_initial_label_organ_invalid", f"{prefix}.organ is invalid")
+                )
+            elif (image_id, organ) in seen_initial:
+                findings.append(
+                    Finding("error", "manifest_initial_label_duplicate", f"duplicate initial label: {image_id}/{organ}")
+                )
+            else:
+                seen_initial.add((image_id, organ))
+            resolved_label = resolve_package_path(root, label.get("path"), f"{prefix}.path", findings)
+            if resolved_label and not resolved_label.is_file():
+                findings.append(
+                    Finding("error", "manifest_initial_label_missing", f"{prefix}.path does not exist")
+                )
+            validate_sha256(label.get("sha256"), f"{prefix}.sha256", findings, placeholder_allowed=False)
+            if (
+                resolved_label
+                and resolved_label.is_file()
+                and isinstance(label.get("sha256"), str)
+                and SHA256_PATTERN.fullmatch(label["sha256"])
+                and sha256_file(resolved_label).lower() != normalized_sha256(label["sha256"]).lower()
+            ):
+                findings.append(
+                    Finding("error", "manifest_initial_label_sha_mismatch", f"{prefix}.sha256 does not match the file")
                 )
 
     return manifest
@@ -613,13 +709,16 @@ def validate_label_inputs(
             )
 
 
-def output_exists(submission_dir: Path, image_id: str, organ: str) -> bool:
+def output_exists(submission_dir: Path, target_id: str, image_id: str, organ: str) -> bool:
     return any(
         path.is_file()
         for path in (
             submission_dir / "buffers" / image_id / f"{organ}.npy",
+            submission_dir / "buffers" / image_id / target_id / f"{organ}.u8",
             submission_dir / "labels" / image_id / f"{organ}.nii",
             submission_dir / "labels" / image_id / f"{organ}.nii.gz",
+            submission_dir / "labels" / image_id / target_id / f"{organ}.nii",
+            submission_dir / "labels" / image_id / target_id / f"{organ}.nii.gz",
         )
     )
 
@@ -783,11 +882,11 @@ def validate_submissions(
                         )
                     )
 
-            if action == "submit_complete":
+            if action in {"submit_complete", "submit_for_review"}:
                 image_id = target.get("image_id")
                 for organ in target.get("organs", []):
                     if isinstance(image_id, str) and isinstance(organ, str) and not output_exists(
-                        submission_dir, image_id, organ
+                        submission_dir, target_id, image_id, organ
                     ):
                         findings.append(
                             Finding(
@@ -801,7 +900,11 @@ def validate_submissions(
         for rel_path in ("reports/review_report.json", "provenance/tool_export.json"):
             if not (root / rel_path).is_file():
                 findings.append(
-                    Finding("error", "submission_evidence_missing", f"submission evidence is missing: {rel_path}")
+                    Finding(
+                        "warning",
+                        "submission_evidence_pending",
+                        f"submission evidence is not present yet; finalize may still be pending or failed: {rel_path}",
+                    )
                 )
 
 

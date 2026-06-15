@@ -191,6 +191,10 @@ index = image.get_voxel_indexes(world)
 
 官方资料只证明 Mask buffer 是三维 memory view，没有充分依据把它固定写成 `(Z, Y, X)`。实际轴顺序必须通过上述测试确定。
 
+当前桥接只表达三维索引轴的排列和翻转，不执行任意角度旋转、剪切、重采样或非线性变换。
+平台只接受规则、正交、等间距的 DICOM 体素网格；检测到 gantry tilt、sheared slice grid
+或 P05 无法得到唯一排列/翻转时会阻断，而不是近似转换。
+
 发生重采样时：
 
 - 图像可根据用途选择合适插值；
@@ -267,14 +271,16 @@ Mask 具有名称、颜色、关联图像、metadata、选中状态和可见状�
 - 保存为 Mimics 16 至 20 兼容格式时，多 image set 项目只保存 active image set 及其关联对象；
 - 有损 JPEG 压缩会改变图像，不应作为默认标注方案。
 
-跨机器使用仍取决于兼容版本、edition、license 和环境。`.mcs` 只作为工作检查点，平台仍保存病例包、原始文件和提交结果。
+跨机器使用仍取决于兼容版本、edition、license 和环境。`.mcs` 只作为工作现场，平台仍保存
+病例包、原始文件和提交结果。实现另外提供显式 Mask checkpoint；它不依赖 `.mcs` 内部结构，
+但仍要求相同 review、基础标签和 buffer mapping evidence。
 
 ## 10. 对话框
 
 Mimics API 提供：
 
 - `set_predefined_answer()`：为可预测的内置对话框预设答案；
-- `question_box()`：要求用户做少量明确选择；
+- `question_box()`：要求用户做少量明确选择；它返回一个按钮结果，没有原生多选返回值；
 - `message_box()`：显示提示或阻断信息。
 
 平台只应在三类场景打断标注者：

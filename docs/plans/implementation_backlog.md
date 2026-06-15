@@ -1,6 +1,6 @@
 # 分割平台近期任务清单
 
-> 日期：2026-06-13
+> 更新日期：2026-06-15
 > 近期目标：用 3 至 5 个病例跑通第一次手动闭环
 > 总体日期和验收标准见[实施计划](platform_implementation_plan_2026-10-30.md)。
 > 代码结构、工作量和依赖顺序见[阶段 A 开发执行说明](development_execution_guide.md)。
@@ -53,17 +53,17 @@
 | `scripts/check_case_package.py` | 检查病例包 v0.5 的必需文件、目标组、去标识声明、配置引用和文件校验值 |
 | `scripts/hash_package.py` | 复制或归档整个目录时生成可选校验值 |
 
-### 待实现
+### 已实现于 `src/segplatform/`
 
-| 文件 | 输入 | 输出 |
-| --- | --- | --- |
-| `src/segplatform/ingest/scan.py` | DICOM、NIfTI、MHD+RAW 或 RAW 来源 | 只读扫描报告 |
-| `src/segplatform/ingest/import_cases.py` | 扫描报告和确认映射 | Case、Image Artifact |
-| `src/segplatform/labeling/package_case.py` | 已登记图像、可选标签、器官和任务配置 | 病例包 |
-| `src/segplatform/labeling/mask_conversion.py` | 多标签文件或逐器官 mask、标签映射 | 拆分或合并结果 |
-| `src/segplatform/qc/geometry.py` | 图像和标签记录 | 空间检查报告 |
+| 文件 | 当前能力 |
+| --- | --- |
+| `src/segplatform/imaging.py` | DICOM、NIfTI、可选 MetaImage；图像/标签空间、Mask 读写和轴映射 |
+| `src/segplatform/case_packages.py` | Case、Image Artifact、初始 Label Artifact、病例包和初始 Mask 拆分 |
+| `src/segplatform/registry.py` | 文件式不可变 Registry |
+| `src/segplatform/adapters/mimics/finalize.py` | 提交身份、基础版本、buffer、空标签和空间 QC |
+| `src/segplatform/snapshots.py` | 标签准入、split 防泄漏和 Dataset Snapshot |
 
-顶层 `scripts/` 如需保留命令兼容，只提供薄入口；核心逻辑进入可测试的 `src/segplatform/`。这些能力与具体标注软件无关，应先于 Mimics 自动化完成。
+纯 RAW 通用 sidecar、数据库服务和完整反向引用索引仍后置。当前闭环支持实际所需的 DICOM/NIfTI，MHD/MHA 通过可选 SimpleITK 依赖支持。
 
 ## 4. Mimics 工具适配器
 
@@ -85,29 +85,30 @@
 
 每一步都记录是否需要不可控的人工操作。
 
-探针是完成 POC 所需的实验代码，不等待全部验证结束。生产工作流代码必须在 Gate A 通过后开始。
+探针和生产工作流代码均已实现。Windows 操作者通过 `probe-run` 在单次 Mimics 会话收集证据，再由 `probe-evaluate` 自动求解并冻结 buffer mapping；未通过时会阻断已有 Mask 注入和结果回收。
 
 ### 外部现代 Python
 
 | 文件 | 作用 | 进入条件 |
 | --- | --- | --- |
-| `src/segplatform/adapters/mimics/doctor.py` | 检查工作站、启动诊断脚本并生成环境报告 | 立即实现 |
-| `src/segplatform/adapters/mimics/prepare.py` | 检查病例包并生成 runtime manifest | Gate A |
-| `src/segplatform/adapters/mimics/launcher.py` | 传参启动 Mimics 和打开任务脚本 | Gate A |
-| `src/segplatform/adapters/mimics/bridge.py` | 医学标签与逐器官布尔缓冲区互转 | P04/P05 路径成立 |
-| `src/segplatform/adapters/mimics/finalize.py` | 转换提交、执行 QC 并生成提交清单 | Gate A |
+| `src/segplatform/adapters/mimics/doctor.py` | 已实现 | 在 Windows 工作站运行并记录版本/许可/API |
+| `src/segplatform/adapters/mimics/prepare.py` | 已实现 | 使用真实病例执行 Gate A |
+| `src/segplatform/adapters/mimics/launcher.py` | 已实现 | 确认 Research 21 实际可执行文件和参数 |
+| `src/segplatform/adapters/mimics/bridge.py` | 已实现并强制 P05 证据 | 执行 P04/P05 |
+| `src/segplatform/adapters/mimics/finalize.py` | 已实现 | 用真实导出验证空间和失败恢复 |
 
 ### Mimics Python 3.5.2
 
 | 文件 | 作用 | 进入条件 |
 | --- | --- | --- |
-| `adapters/mimics/runtime_py35/sp_common.py` | 兼容层、manifest、日志和错误处理 | 立即实现最小版 |
-| `adapters/mimics/runtime_py35/sp_diagnostics.py` | 检查版本、许可和关键 API | 立即实现 |
-| `adapters/mimics/runtime_py35/sp_open_review.py` | 导入或打开任务、绑定 image set、创建 Mask 和 metadata | Gate A |
-| `adapters/mimics/runtime_py35/sp_submit_review.py` | 选择完成/复查/阻塞并导出任务 Mask | Gate A |
-| `adapters/mimics/probes/p01_*.py` 至 `p06_*.py` | 验证分组、绑定、buffer、空间往返和选择性导出 | POC 期间 |
+| `adapters/mimics/runtime_py35/sp_common.py` | 已实现 | 在 Python 3.5.2 实测 memoryview/NumPy 路径 |
+| `adapters/mimics/runtime_py35/sp_diagnostics.py` | 已实现 | 运行本机诊断 |
+| `adapters/mimics/runtime_py35/sp_open_review.py` | 已实现 | Gate A/B 真实病例验收 |
+| `adapters/mimics/runtime_py35/sp_submit_review.py` | 已实现 | Gate B 提交操作验收 |
+| `adapters/mimics/probes/sp_probe_suite.py` | 已实现 | 单次 Mimics 会话收集 P01/P02/P04/P05/P06 |
+| `src/segplatform/adapters/mimics/probes.py` | 已实现 | 启动探针、自动评估空间映射并生成 verified 配置 |
 
-当前这些脚本均待实现。
+详细运行步骤见 [Mimics Research 21 Windows 工作站操作手册](../domains/labeling/mimics_windows_runbook.md)。
 
 ## 5. nnUNet 小闭环
 
@@ -167,13 +168,12 @@
 
 按顺序：
 
-1. 固定 3 至 5 个闭环病例和最小异构导入样例。
-2. 建立 `pyproject.toml`、`src/segplatform/`、统一 CLI 和测试骨架。
-3. 实现 Schema 运行时校验、单文件摘要和稳定文件组摘要。
-4. 实现 NIfTI、MHD+RAW 扫描，再实现 DICOM 分组和 RAW+sidecar。
-5. 实现最小文件型 Registry 和几何 QC。
-6. 实现病例包生成、mask 拆分合并，并复用已有 `check_case_package.py`。
-7. 实现 Mimics doctor 和能力探针，按 Gate A 决定是否继续生产脚本。
-8. 创建最小 Dataset Snapshot，随后接入 nnUNet。
+1. 在 Mimics Research 21.0 Windows 工作站运行 `sp mimics doctor --run-diagnostics`。
+2. 对一个三轴尺寸不同的 DICOM Case Package 执行 `probe-run` 和 `probe-evaluate`，冻结该工作站的 buffer mapping。
+3. 固定 3 至 5 个已去标识真实病例，执行首次 `prepare/open/submit/finalize`。
+4. 验证保存后重开、提交复查、报告阻塞、QC 失败返修和已验证标签再修订。
+5. 用两个独立 review 模拟多标注者，不共享 `.mcs`。
+6. 创建第一个真实 Dataset Snapshot。
+7. Snapshot 验收后才进入 nnUNet Adapter 和小训练。
 
-完成前六步后，即使最终不用 Mimics，数据入口、Registry、QC 和病例包仍可复用于其他标注工具。
+代码层训练前闭环已经完成；当前剩余工作是 Mimics 21 本机能力验收和真实数据验收，不能用自动测试替代。
