@@ -8,7 +8,7 @@ import numpy as np
 
 from segplatform.common import prefixed_sha256, utc_now, write_json
 from segplatform.errors import ValidationError
-from segplatform.imaging import BufferMapping, geometry_from_manifest, read_mask, voxel_count
+from segplatform.imaging import BufferMapping, geometry_from_manifest, geometry_matches, read_mask, voxel_count
 from segplatform.vocabulary import AnatomyVocabulary
 
 
@@ -29,8 +29,12 @@ def prepare_import_buffers(case_root: Path, runtime: dict[str, Any], mapping: Bu
         source_path = case_root / label["path"]
         array, geometry = read_mask(source_path)
         expected = geometry_from_manifest(next(item for item in manifest["image_sets"] if item["image_id"] == label["image_id"]))
-        if geometry.shape != expected.shape:
-            raise ValidationError(f"initial mask shape mismatch for {label['image_id']}/{label['organ']}")
+        matches, reasons = geometry_matches(expected, geometry)
+        if not matches:
+            raise ValidationError(
+                f"initial mask geometry mismatch for {label['image_id']}/{label['organ']}: "
+                + "; ".join(reasons)
+            )
         transformed = mapping.platform_to_mimics(np.asarray(array != 0, dtype=np.uint8))
         destination = case_root / "working" / "bridge" / "import" / label["image_id"] / f"{label['organ']}.u8"
         destination.parent.mkdir(parents=True, exist_ok=True)

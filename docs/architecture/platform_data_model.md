@@ -865,14 +865,13 @@ outputs:
 
 ## 13. 第一阶段统一校验入口
 
-第一阶段即使采用文件和命令行，也要提供统一校验命令。下面是目标接口，尚未全部实现：
+第一阶段即使采用文件和命令行，也要提供统一校验命令。当前已实现的入口覆盖病例包、Registry 单记录、标签索引和快照；更细的 task-map/export 校验仍在后续阶段。
 
 ```bash
-sp validate vocabulary anatomy_vocabulary.yaml
-sp validate registry registry/
-sp validate task-map task_label_maps/CT5_Liver.yaml
-sp validate snapshot snapshots/snap_CT5_Liver_001.yaml
-sp validate export nnunet_exports/CT5_Liver_001/
+sp package validate dataset_package/cases/case_001
+sp registry validate registry/images/img_001.json --schema image_artifact.schema.json
+sp registry rebuild-index registry/
+sp snapshot validate registry/snapshots/snap_CT5_Liver_001.json
 ```
 
 最低检查内容：

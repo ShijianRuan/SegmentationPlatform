@@ -39,6 +39,20 @@ def hash_directory(root: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def hash_file_set(paths: list[Path], *, root: Path) -> str:
+    """Hash a stable file bundle without depending on absolute paths."""
+
+    digest = hashlib.sha256()
+    resolved_root = root.resolve()
+    for path in sorted((item.resolve() for item in paths), key=lambda item: item.relative_to(resolved_root).as_posix()):
+        relative = path.relative_to(resolved_root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(sha256_file(path).encode("ascii"))
+        digest.update(b"\n")
+    return "sha256:" + digest.hexdigest()
+
+
 def load_data(path: Path) -> Any:
     suffixes = "".join(path.suffixes).lower()
     text = path.read_text(encoding="utf-8")
@@ -97,4 +111,3 @@ def canonical_id(value: str, field: str = "id") -> str:
     if any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for char in stripped):
         raise ValueError(f"{field} contains unsupported characters: {value!r}")
     return stripped
-

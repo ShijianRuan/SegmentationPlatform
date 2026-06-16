@@ -332,12 +332,13 @@ M3 不等待完整数据库、批量框架或 Web 界面。
 # 已存在：检查病例包
 python scripts/check_case_package.py packages/case_001
 
-# 待实现：扫描并导入不同来源格式
+# 已实现阶段 A DICOM 扫描、请求生成和批量病例包创建
 sp ingest scan /data/source --output reports/source_scan.json
-sp ingest import reports/source_scan.json --mapping import_mapping.yaml
+sp ingest build-requests reports/source_scan.json package_requests/ --organs liver spleen --import-batch batch_001
+sp package create-many package_requests/ dataset_package/ --registry registry/
 
-# 待实现：生成病例包
-sp labeling package --case case_001 --review review_001
+# 已实现：重建文件式 Registry 标签索引
+sp registry rebuild-index registry/
 
 # 待实现：检查空间关系
 sp validate geometry \

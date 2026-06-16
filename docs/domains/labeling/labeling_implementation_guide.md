@@ -9,24 +9,28 @@
 
 当前代码已经可以在外部现代 Python 环境中完成：
 
-1. 检查 DICOM、NIfTI 和可选 MetaImage 图像的格式、哈希与三维空间。
-2. 从请求文件创建 Case Package v0.5。
-3. 把 Case、Image Artifact、初始 Label Artifact 和 Review Task 写入文件式 Registry。
-4. 把已有逐器官或多标签文件拆成逐器官 NIfTI。
-5. 为 Mimics 21 生成运行清单和逐器官 `.u8` 体素缓冲区。
-6. 启动 Mimics，并在 Mimics 内创建、绑定、恢复和导出受平台管理的 Mask。
-7. 区分保存进度、提交完成、提交复查和报告阻塞。
-8. 在外部环境回收 Mask，执行身份、基础版本、哈希、shape、轴映射、空 Mask 和空间检查。
-9. 追加创建 `verified_label` 或 `draft_label`，不覆盖旧版本。
-10. 从 Registry 选择明确标签版本，检查患者级 split 泄漏，创建不可变 Dataset Snapshot。
+1. 扫描 DICOM 根目录，按患者候选、检查和序列生成可审阅的导入清单。
+2. 检查 DICOM、NIfTI 和可选 MetaImage 图像的格式、哈希与三维空间。
+3. 从扫描清单批量生成病例包请求，或从单个请求文件创建 Case Package v0.5。
+4. 批量创建病例包，避免逐病例手工运行 `package create`。
+5. 把 Case、Image Artifact、初始 Label Artifact 和 Review Task 写入文件式 Registry。
+6. 把已有逐器官或多标签文件拆成逐器官 NIfTI。
+7. 为 Mimics 21 生成运行清单和逐器官 `.u8` 体素缓冲区。
+8. 启动 Mimics，并在 Mimics 内创建、绑定、恢复和导出受平台管理的 Mask。
+9. 区分保存进度、提交完成、提交复查和报告阻塞。
+10. 在外部环境回收 Mask，执行身份、基础版本、哈希、shape、轴映射、空 Mask 和空间检查。
+11. 追加创建 `verified_label` 或 `draft_label`，不覆盖旧版本。
+12. 从 Registry 选择明确标签版本，检查患者级 split 泄漏，创建不可变 Dataset Snapshot。
+13. 为文件式 Registry 维护标签查询索引，避免快照创建时反复全量扫描标签目录。
 
 没有宣称已经完成的部分：
 
 - 当前机器不是 Mimics 21 Windows 工作站，因此 P01-P14 尚未产生真实证据。
 - `buffer_mapping.status=verified` 必须来自 P05 实测，不能照抄示例值。
 - 未校准时可以创建空 Mask 从零标注，但不能导入已有 Mask，也不能把导出缓冲区转换为正式标签。
-- RAW 图像没有可靠 sidecar 时仍然阻断；MetaImage 需要安装可选依赖。
-- 本阶段没有 Web UI、在线锁、队列、权限系统或多人实时协同。
+- RAW 图像没有可靠 sidecar 时仍然阻断；MetaImage 需要安装可选依赖，`.mhd` 按头文件和伴随数据文件形成文件组校验。
+- 本阶段没有 Web UI、在线锁、权限系统或多人实时协同。批量入口是命令行扫描、请求生成和批量创建，不是在线任务队列。
+- 阶段 A 仍采用“一个 `.mcs` 一个 review/case 工作空间”。多病例塞进同一 `.mcs` 暂不作为默认路径。
 
 ## 2. 端到端流程走查
 
@@ -68,6 +72,25 @@
 **谁做**：平台操作者，每批标注任务执行一次。
 
 **目标**：把原始数据整理成标注者可以直接使用的离线工作目录，同时在 Registry 中登记所有资产。
+
+推荐批量入口：
+
+```bash
+sp ingest scan /data/source_dicom --output /data/reports/source_scan.json
+
+sp ingest build-requests /data/reports/source_scan.json /data/package_requests \
+  --organs liver spleen kidney_left kidney_right \
+  --import-batch batch_20260616 \
+  --assignee annotator_01
+
+sp package create-many /data/package_requests /data/dataset_package \
+  --registry /data/platform_registry \
+  --continue-on-error
+```
+
+这三步分别负责“发现”“生成可审阅请求”“创建病例包”。中间的请求文件允许人工批量检查和修改，比如只保留静脉期、修改 assignee 或调整目标器官。扫描报告不保存原始 PatientID，只保存哈希、相对路径和导入可用性。
+
+单例调试入口仍然可用：
 
 ```bash
 sp package create examples/labeling/case_package_request.yaml /data/dataset_package --registry /data/platform_registry
@@ -265,6 +288,7 @@ sp mimics finalize /data/dataset_package/cases/case_001 --config mimics_workstat
 | 位置 | 作用 |
 | --- | --- |
 | `src/segplatform/cli.py` | `sp` 命令入口 |
+| `src/segplatform/ingest.py` | DICOM 发现扫描和批量病例包请求生成 |
 | `src/segplatform/imaging.py` | DICOM/NIfTI/MetaImage 几何、Mask 读写和轴映射 |
 | `src/segplatform/case_packages.py` | 病例包创建、初始标签拆分和登记 |
 | `src/segplatform/registry.py` | 文件式 Registry 的不可变写入和查询 |
@@ -302,7 +326,19 @@ Mimics 内置 Python 不安装 nibabel、pydicom 或 SimpleITK。它只运行 `r
 
 ## 5. 准备病例包
 
-先复制并修改 [病例包请求示例](../../../examples/labeling/case_package_request.yaml)。每个 `image_set` 必须只指向一个 DICOM Series；包含多个 SeriesInstanceUID 的目录会被阻断。
+大批量数据优先从扫描开始：
+
+```bash
+sp ingest scan /data/source_dicom --output /data/reports/source_scan.json
+sp ingest build-requests /data/reports/source_scan.json /data/package_requests \
+  --organs liver spleen kidney_left kidney_right \
+  --import-batch batch_20260616
+sp package create-many /data/package_requests /data/dataset_package --registry /data/platform_registry
+```
+
+`scan` 会把一个混合 DICOM 根目录拆成候选 Series，并为每个 Series 记录 `source_files`。因此来源目录不必预先人工整理成“一个文件夹一个序列”。`build-requests` 生成的是可审阅 YAML，不直接写 Registry。
+
+单个病例调试时，可以复制并修改 [病例包请求示例](../../../examples/labeling/case_package_request.yaml)。每个 `image_set` 必须只指向一个 DICOM Series；包含多个 SeriesInstanceUID 的目录会被阻断。
 
 ```bash
 sp package create \
@@ -521,6 +557,8 @@ sp snapshot create \
 - 同一 `leakage_group_id` 不跨 train/val/test。
 - 所有输入的 `usage_constraints` 取最严结果。
 
+`cases[].segments` 是本病例实际进入监督的器官列表，不要求等于 `task_label_map` 的全集。一个病例只有肝标签时可以只列 liver；缺失器官不能在 Snapshot 中伪装成背景。后续训练导出适配器必须根据 Snapshot 中实际存在的 segment 决定监督、ignore 或按器官排除。
+
 快照写入后不可覆盖：
 
 ```bash
@@ -542,7 +580,18 @@ sp snapshot validate /data/platform_registry/snapshots/snap_abdomen_v1.json
 | 多标注者 | 每人独立 `review_id` 和 `.mcs`；阶段 A 不共享写同一文件 |
 | `.mcs` 损坏 | 运行 `prepare --rebuild-workspace` 保留旧文件，并从最新 checkpoint 或初始标签重建 |
 
-## 12. 验证命令
+## 12. 规模化标注的当前决策
+
+| 问题 | 当前处理 |
+| --- | --- |
+| 手写 10000 份 YAML 不可行 | 已提供 `sp ingest scan`、`sp ingest build-requests` 和 `sp package create-many`。扫描和请求生成是批量入口，人工只审阅规则和异常项。 |
+| 一个 `.mcs` 多病例能否减少启动成本 | 阶段 A 不采用。单 `.mcs` 多病例会放大项目损坏、Mask 误绑定、部分提交、多人分派和失败回滚的风险。当前选择一个 review/case 一个 `.mcs`，用批量发现和批量创建降低平台侧成本。 |
+| prepare/open/finalize 是否仍需逐病例 | `prepare` 和 `finalize` 可以由 shell/PowerShell 循环批量执行；`open` 仍是标注者交互入口，不能后台无监督替代人工标注。后续服务化再做队列和任务领取。 |
+| Registry 标签查询 O(N) | 文件式 Registry 已维护 `_indexes/labels_by_case_image_organ.json`。旧 Registry 可运行 `sp registry rebuild-index /data/platform_registry` 生成索引。 |
+| 空间信息不完整 | 数据导入契约允许 `complete/partial/index_only`，但 Mimics 病例包当前仍要求可控的工具空间。纯 RAW 和无法证明空间的来源应先创建带明确假设的派生图像，或停在导入报告中。 |
+| 部分器官标签 | Snapshot 支持按病例列出实际 segment 子集。不能把未标器官当背景；训练导出层后续要显式实现 ignore/排除策略。 |
+
+## 13. 验证命令
 
 ```bash
 .venv/bin/python -m pytest -q

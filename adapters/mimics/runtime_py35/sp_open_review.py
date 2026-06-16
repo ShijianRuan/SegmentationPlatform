@@ -14,6 +14,7 @@ from sp_common import (
     load_json,
     match_images,
     metadata_get,
+    metadata_get_required,
     metadata_set,
     sha256_file,
     set_mask_buffer_from_u8,
@@ -36,7 +37,7 @@ def checkpoint_entry_map(runtime):
     return result
 
 
-def validate_existing_mask(mask, target, organ):
+def validate_existing_mask(mask, target, organ, runtime):
     expected = {
         "sp.image_id": target["image_id"],
         "sp.base_label_id": target.get("base_label_id", ""),
@@ -44,7 +45,7 @@ def validate_existing_mask(mask, target, organ):
     }
     mismatches = []
     for key, expected_value in expected.items():
-        actual = metadata_get(mask, key, "")
+        actual = metadata_get_required(mask, key)
         if actual != expected_value:
             mismatches.append("{0}: stored={1!r}, expected={2!r}".format(key, actual, expected_value))
     if mismatches:
@@ -53,6 +54,10 @@ def validate_existing_mask(mask, target, organ):
                 target["target_id"], organ, "; ".join(mismatches)
             )
         )
+    previous_root = metadata_get(mask, "sp.package_root", "")
+    if previous_root and os.path.abspath(previous_root) != os.path.abspath(runtime["package_root"]):
+        return "sp.package_root updated from {0!r} to {1!r}".format(previous_root, runtime["package_root"])
+    return None
 
 
 def previous_qc_summary(runtime):
@@ -107,7 +112,9 @@ def main():
                 except Exception as error:
                     binding_error = "{0}: {1}".format(error.__class__.__name__, str(error))
             else:
-                validate_existing_mask(mask, target, organ)
+                root_warning = validate_existing_mask(mask, target, organ, runtime)
+                if root_warning:
+                    warnings.append("{0}/{1}: {2}".format(target["target_id"], organ, root_warning))
             if mask.image != image:
                 raise RuntimeError(
                     "Mask is linked to the wrong image set: {0}/{1}. Binding error: {2}".format(

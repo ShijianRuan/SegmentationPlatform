@@ -713,7 +713,6 @@ def output_exists(submission_dir: Path, target_id: str, image_id: str, organ: st
     return any(
         path.is_file()
         for path in (
-            submission_dir / "buffers" / image_id / f"{organ}.npy",
             submission_dir / "buffers" / image_id / target_id / f"{organ}.u8",
             submission_dir / "labels" / image_id / f"{organ}.nii",
             submission_dir / "labels" / image_id / f"{organ}.nii.gz",

@@ -10,7 +10,7 @@ import nibabel as nib
 import numpy as np
 import pydicom
 
-from segplatform.common import hash_directory, prefixed_sha256
+from segplatform.common import hash_directory, hash_file_set, prefixed_sha256
 from segplatform.errors import ConfigurationError, ValidationError
 
 
@@ -102,11 +102,29 @@ def _dicom_headers(root: Path) -> list[Any]:
 
 
 def inspect_dicom_series(root: Path) -> tuple[Geometry, dict[str, Any]]:
-    headers = _dicom_headers(root)
+    return _inspect_dicom_headers(_dicom_headers(root), hash_value=hash_directory(root))
+
+
+def inspect_dicom_files(paths: list[Path], *, root: Path) -> tuple[Geometry, dict[str, Any]]:
+    headers = []
+    for path in sorted(paths):
+        try:
+            dataset = pydicom.dcmread(str(path), stop_before_pixels=True, force=False)
+        except Exception as error:
+            raise ValidationError(f"unreadable DICOM file in explicit series: {path}") from error
+        if not hasattr(dataset, "Rows") or not hasattr(dataset, "Columns"):
+            raise ValidationError(f"explicit DICOM series contains a non-image file: {path}")
+        headers.append((path, dataset))
+    if not headers:
+        raise ValidationError("explicit DICOM series contains no files")
+    return _inspect_dicom_headers(headers, hash_value=hash_file_set([path for path, _ in headers], root=root))
+
+
+def _inspect_dicom_headers(headers: list[Any], *, hash_value: str) -> tuple[Geometry, dict[str, Any]]:
     series_uids = {str(dataset.get("SeriesInstanceUID", "")) for _, dataset in headers}
     if "" in series_uids or len(series_uids) != 1:
         raise ValidationError(
-            f"one image_set must contain exactly one DICOM SeriesInstanceUID; found {sorted(series_uids)} in {root}"
+            f"one image_set must contain exactly one DICOM SeriesInstanceUID; found {sorted(series_uids)}"
         )
 
     first = headers[0][1]
@@ -143,9 +161,9 @@ def inspect_dicom_series(root: Path) -> tuple[Geometry, dict[str, Any]]:
     if not np.isclose(np.linalg.norm(axis_x), 1.0, atol=1e-5) or not np.isclose(
         np.linalg.norm(axis_y), 1.0, atol=1e-5
     ):
-        raise ValidationError(f"DICOM direction cosines are not unit length: {root}")
+        raise ValidationError("DICOM direction cosines are not unit length")
     if not np.isclose(float(np.dot(axis_x, axis_y)), 0.0, atol=1e-5):
-        raise ValidationError(f"DICOM row and column directions are not orthogonal: {root}")
+        raise ValidationError("DICOM row and column directions are not orthogonal")
     axis_x = axis_x / np.linalg.norm(axis_x)
     axis_y = axis_y / np.linalg.norm(axis_y)
     axis_z = np.cross(axis_x, axis_y)
@@ -174,7 +192,7 @@ def inspect_dicom_series(root: Path) -> tuple[Geometry, dict[str, Any]]:
         gaps = np.diff([item[0] for item in positions])
         slice_spacing = float(np.median(np.abs(gaps)))
         if slice_spacing <= 0 or not np.allclose(np.abs(gaps), slice_spacing, rtol=1e-3, atol=1e-3):
-            raise ValidationError(f"DICOM series has duplicate or non-uniform slice positions: {root}")
+            raise ValidationError("DICOM series has duplicate or non-uniform slice positions")
     else:
         slice_spacing = float(first.get("SpacingBetweenSlices", first.get("SliceThickness", 1.0)))
 
@@ -190,7 +208,7 @@ def inspect_dicom_series(root: Path) -> tuple[Geometry, dict[str, Any]]:
         source="dicom",
     )
     return geometry, {
-        "hash": hash_directory(root),
+        "hash": hash_value,
         "hash_scope": "bundle_manifest",
         "reader": {"name": "pydicom", "version": pydicom.__version__},
         "dicom_series_uid_sha256": "sha256:" + hashlib.sha256(series_uid.encode("utf-8")).hexdigest(),
@@ -204,6 +222,34 @@ def inspect_dicom_series(root: Path) -> tuple[Geometry, dict[str, Any]]:
             "burned_in_annotation_values": burned_in_annotation,
         },
     }
+
+
+def _metaimage_companions(path: Path) -> list[Path]:
+    if path.suffix.lower() != ".mhd":
+        return []
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    companions: list[Path] = []
+    list_mode = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if list_mode:
+            companion = path.parent / stripped
+            if companion.exists():
+                companions.append(companion)
+            continue
+        if stripped.startswith("ElementDataFile") and "=" in stripped:
+            value = stripped.split("=", 1)[1].strip()
+            if value.upper() == "LOCAL":
+                return []
+            if value.upper() == "LIST":
+                list_mode = True
+                continue
+            companion = path.parent / value
+            if companion.exists():
+                companions.append(companion)
+    return companions
 
 
 def inspect_metaimage(path: Path) -> tuple[Geometry, dict[str, Any]]:
@@ -223,18 +269,18 @@ def inspect_metaimage(path: Path) -> tuple[Geometry, dict[str, Any]]:
         pixel_type=image.GetPixelIDTypeAsString(),
         source="header",
     )
-    companions = []
-    if path.suffix.lower() == ".mhd":
-        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            if line.strip().startswith("ElementDataFile") and "=" in line:
-                companion = path.parent / line.split("=", 1)[1].strip()
-                if companion.exists():
-                    companions.append(str(companion))
+    companions = _metaimage_companions(path)
+    if companions:
+        digest = hash_file_set([path, *companions], root=path.parent)
+        hash_scope = "bundle_manifest"
+    else:
+        digest = prefixed_sha256(path)
+        hash_scope = "file"
     return geometry, {
-        "hash": prefixed_sha256(path),
-        "hash_scope": "file",
+        "hash": digest,
+        "hash_scope": hash_scope,
         "reader": {"name": "SimpleITK", "version": sitk.Version_VersionString()},
-        "companion_paths": companions,
+        "companion_paths": [str(path) for path in companions],
     }
 
 

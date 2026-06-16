@@ -171,14 +171,15 @@ sp hash bundle path/to/dicom_or_mhd_bundle
 
 ```bash
 sp ingest scan /data/source --output reports/source_scan.json
-sp ingest import reports/source_scan.json --mapping import_mapping.yaml
-sp registry show image img_001
-sp registry list images --case case_001
+sp ingest build-requests reports/source_scan.json package_requests/ --organs liver spleen --import-batch batch_001
+sp package create-many package_requests/ dataset_package/ --registry registry/
+sp registry rebuild-index registry/
 ```
 
 完成标志：
 
 - DICOM 多检查、多序列不会被错误合并；
+- DICOM 扫描清单可以批量生成可审阅病例包请求；
 - NIfTI、MHD+RAW、带 sidecar 的 RAW 及其来源标签可以登记；
 - 元数据缺失被记录为 `partial` 或 `index_only`，而不是填假值；
 - 重复导入同一文件不会静默创建冲突记录。

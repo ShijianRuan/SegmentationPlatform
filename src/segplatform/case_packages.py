@@ -10,6 +10,7 @@ import numpy as np
 from segplatform.common import (
     canonical_id,
     copy_path,
+    ensure_within,
     hash_directory,
     load_data,
     prefixed_sha256,
@@ -23,6 +24,7 @@ from segplatform.imaging import (
     Geometry,
     geometry_matches,
     infer_format,
+    inspect_dicom_files,
     inspect_image,
     read_mask,
     write_mask_nifti,
@@ -32,10 +34,30 @@ from segplatform.schema import repository_root, validate_schema
 from segplatform.vocabulary import AnatomyVocabulary
 
 
-def _copy_image(source: Path, image_root: Path, format_name: str) -> tuple[Path, str]:
+def _copy_dicom_file_set(source_root: Path, relative_files: list[str], destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for relative in relative_files:
+        source_file = ensure_within(source_root, source_root / relative)
+        if not source_file.is_file():
+            raise ValidationError(f"DICOM source file does not exist: {source_file}")
+        target = ensure_within(destination, destination / relative)
+        copy_path(source_file, target)
+
+
+def _copy_image(
+    source: Path,
+    image_root: Path,
+    format_name: str,
+    *,
+    source_files: list[str] | None = None,
+    companion_paths: list[str] | None = None,
+) -> tuple[Path, str]:
     if format_name == "dicom_series":
         destination = image_root / "dicom"
-        copy_path(source, destination)
+        if source_files:
+            _copy_dicom_file_set(source, source_files, destination)
+        else:
+            copy_path(source, destination)
         return destination, "dicom_path"
     if format_name == "nifti":
         suffix = ".nii.gz" if source.name.lower().endswith(".nii.gz") else ".nii"
@@ -45,12 +67,14 @@ def _copy_image(source: Path, image_root: Path, format_name: str) -> tuple[Path,
     if format_name == "metaimage":
         destination = image_root / source.name
         copy_path(source, destination)
-        if source.suffix.lower() == ".mhd":
-            for line in source.read_text(encoding="utf-8", errors="ignore").splitlines():
-                if line.strip().startswith("ElementDataFile") and "=" in line:
-                    companion = source.parent / line.split("=", 1)[1].strip()
-                    if companion.exists():
-                        copy_path(companion, image_root / companion.name)
+        for companion_text in companion_paths or []:
+            companion = Path(companion_text)
+            if companion.exists():
+                try:
+                    companion_relative = companion.resolve().relative_to(source.parent.resolve())
+                except ValueError:
+                    companion_relative = Path(companion.name)
+                copy_path(companion, image_root / companion_relative)
         return destination, "image_path"
     raise ValidationError(f"unsupported image format for package creation: {format_name}")
 
@@ -88,15 +112,18 @@ def _image_artifact(
         "spacing": list(geometry.spacing),
         "origin": list(geometry.origin),
         "direction": list(geometry.direction),
-        "geometry_status": "complete",
-        "geometry_evidence": {
-            "coordinate_system": geometry.coordinate_system,
-            "shape": geometry.source,
-            "spacing": geometry.source,
-            "origin": geometry.source,
-            "direction": geometry.source,
-            "assumptions": [],
-        },
+        "geometry_status": inspection.get("geometry_status", "complete"),
+        "geometry_evidence": inspection.get(
+            "geometry_evidence",
+            {
+                "coordinate_system": geometry.coordinate_system,
+                "shape": geometry.source,
+                "spacing": geometry.source,
+                "origin": geometry.source,
+                "direction": geometry.source,
+                "assumptions": [],
+            },
+        ),
         "source": source,
         "usability": {
             "annotation": "allowed",
@@ -258,8 +285,25 @@ def create_case_package(
             raise ValidationError(f"duplicate image_id: {image_id}")
         image_ids.add(image_id)
         format_name = str(image_request.get("format") or infer_format(source))
-        source_geometry, source_inspection = inspect_image(source, format_name)
-        copied_path, manifest_path_field = _copy_image(source, case_root / "images" / image_id, format_name)
+        source_files = image_request.get("source_files")
+        if source_files:
+            if format_name != "dicom_series":
+                raise ValidationError(f"image {image_id}: source_files is only supported for dicom_series")
+            relative_files = [str(item) for item in source_files]
+            source_geometry, source_inspection = inspect_dicom_files(
+                [source / relative for relative in relative_files],
+                root=source,
+            )
+        else:
+            relative_files = None
+            source_geometry, source_inspection = inspect_image(source, format_name)
+        copied_path, manifest_path_field = _copy_image(
+            source,
+            case_root / "images" / image_id,
+            format_name,
+            source_files=relative_files,
+            companion_paths=source_inspection.get("companion_paths", []),
+        )
         copied_geometry, copied_inspection = inspect_image(copied_path, format_name)
         matches, reasons = geometry_matches(source_geometry, copied_geometry)
         if not matches or source_inspection["hash"] != copied_inspection["hash"]:

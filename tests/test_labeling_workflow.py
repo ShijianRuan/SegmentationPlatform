@@ -24,6 +24,7 @@ from segplatform.case_packages import create_case_package
 from segplatform.common import load_data
 from segplatform.imaging import inspect_dicom_series, write_mask_nifti
 from segplatform.imaging import BufferMapping
+from segplatform.ingest import build_case_package_requests, scan_source
 from segplatform.errors import ValidationError
 from segplatform.registry import FileRegistry
 from segplatform.snapshots import create_snapshot, validate_snapshot
@@ -165,6 +166,7 @@ class LabelingWorkflowTests(unittest.TestCase):
             self.root / "dataset_package",
             registry_root=registry_root,
         )
+        self.assertTrue((registry_root / "_indexes" / "labels_by_case_image_organ.json").is_file())
         runtime_path = prepare_case(case_root, self.workstation_config(verified=True))
         runtime = load_data(runtime_path)
         self.assertEqual("new", runtime["mode"])
@@ -270,6 +272,34 @@ class LabelingWorkflowTests(unittest.TestCase):
         case_root = create_case_package(self.make_request(dicom_root, source_mask), self.root / "dataset_package")
         with self.assertRaisesRegex(Exception, "not verified"):
             prepare_case(case_root, self.workstation_config(verified=False))
+
+    def test_ingest_scan_builds_requests_without_manual_image_sets(self) -> None:
+        dicom_root = self.make_dicom_series()
+        scan = scan_source(dicom_root)
+        self.assertEqual(1, scan["summary"]["importable_series_count"])
+        encoded = json.dumps(scan)
+        self.assertNotIn("PSEUDO_001", encoded)
+
+        scan_path = self.root / "scan.json"
+        scan_path.write_text(json.dumps(scan), encoding="utf-8")
+        requests_dir = self.root / "requests"
+        batch = build_case_package_requests(
+            scan_path,
+            requests_dir,
+            organs=["liver"],
+            import_batch="batch_test",
+            assignee="annotator_01",
+        )
+        self.assertEqual(1, batch["request_count"])
+        request_path = Path(batch["requests"][0])
+        request = load_data(request_path)
+        self.assertEqual("dicom_series", request["image_sets"][0]["format"])
+        self.assertTrue(request["image_sets"][0]["source_files"])
+
+        case_root = create_case_package(request_path, self.root / "dataset_package")
+        manifest = load_data(case_root / "manifest.json")
+        self.assertEqual(1, len(manifest["image_sets"]))
+        self.assertEqual(["liver"], manifest["review"]["targets"][0]["organs"])
 
     def test_windows_probe_command_and_mapping_evaluation(self) -> None:
         dicom_root = self.make_dicom_series()
@@ -461,7 +491,7 @@ class LabelingWorkflowTests(unittest.TestCase):
             "platform_shape": [6, 5, 3],
             "series_description": "VENOUS",
         }
-        with self.assertRaisesRegex(RuntimeError, "matched 0"):
+        with self.assertRaisesRegex(RuntimeError, "shape differs"):
             sp_common.match_images(image_container, [expected])
 
         checkpoint_array = np.zeros((3, 4, 5), dtype=np.bool_)
@@ -530,7 +560,7 @@ class LabelingWorkflowTests(unittest.TestCase):
             "base_label_sha256": "sha256:new",
         }
         with self.assertRaisesRegex(RuntimeError, "different task version"):
-            module.validate_existing_mask(mask, target, "liver")
+            module.validate_existing_mask(mask, target, "liver", {"package_root": str(self.root)})
 
     def test_checkpoint_is_loaded_and_rebuild_preserves_old_mcs(self) -> None:
         dicom_root = self.make_dicom_series()

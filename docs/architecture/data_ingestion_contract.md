@@ -234,11 +234,12 @@ spacing、origin 和 direction 可以未知，但尺寸、像素类型和字节�
 
 ```bash
 sp ingest scan /data/source --output reports/source_scan.json
-sp ingest import reports/source_scan.json --mapping import_mapping.yaml
-sp validate registry registry/
+sp ingest build-requests reports/source_scan.json package_requests/ --organs liver spleen --import-batch batch_001
+sp package create-many package_requests/ dataset_package/ --registry registry/
+sp registry rebuild-index registry/
 ```
 
-`scan` 只发现和报告，不写正式记录。`import` 根据人工确认或规则化映射创建 Case 和 Image Artifact。这样可以避免批量扫描时错误分组直接污染登记册。
+`scan` 只发现和报告，不写正式记录。`build-requests` 根据人工确认或规则化参数生成可审阅的 Case Package 请求；`package create-many` 才创建 Case Package 和 Registry 记录。这样可以避免批量扫描时错误分组直接污染登记册。
 
 导入器至少要产出：
 

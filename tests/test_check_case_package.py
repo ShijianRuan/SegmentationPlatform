@@ -183,8 +183,8 @@ class CasePackageV05Tests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        (submission / "buffers" / "img_ct").mkdir(parents=True)
-        (submission / "buffers" / "img_ct" / "liver.npy").write_bytes(b"mask")
+        (submission / "buffers" / "img_ct" / "target_abdomen").mkdir(parents=True)
+        (submission / "buffers" / "img_ct" / "target_abdomen" / "liver.u8").write_bytes(b"mask")
         (package / "reports").mkdir()
         (package / "reports" / "review_report.json").write_text("{}", encoding="utf-8")
         (package / "provenance").mkdir()
@@ -196,10 +196,10 @@ class CasePackageV05Tests(unittest.TestCase):
     def test_complete_submission_with_buffers_passes(self) -> None:
         package = self.make_package()
         submission = package / "submissions" / "review_001"
-        buffers = submission / "buffers" / "img_ct"
+        buffers = submission / "buffers" / "img_ct" / "target_abdomen"
         buffers.mkdir(parents=True)
         for organ in ("liver", "kidney_left"):
-            (buffers / f"{organ}.npy").write_bytes(b"mask")
+            (buffers / f"{organ}.u8").write_bytes(b"mask")
         (submission / "submission_manifest.json").write_text(
             json.dumps(
                 {

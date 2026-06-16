@@ -33,15 +33,13 @@ def _target_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _update_review(
-    registry: FileRegistry,
-    review_id: str,
+    record: dict[str, Any],
     *,
     action: str,
     target_ids: list[str],
     label_ids: dict[str, str],
     actor: str | None,
 ) -> None:
-    record = registry.get("reviews", review_id)
     status_by_action = {
         "submit_complete": "completed",
         "submit_for_review": "needs_review",
@@ -74,16 +72,13 @@ def _update_review(
             "target_ids": target_ids,
         }
     )
-    registry.put("reviews", record, allow_update=True)
 
 
 def _mark_qc_failed(
-    registry: FileRegistry,
-    review_id: str,
+    record: dict[str, Any],
     target_ids: list[str],
     actor: str | None,
 ) -> None:
-    record = registry.get("reviews", review_id)
     for target in record["targets"]:
         if target["target_id"] in target_ids:
             target["status"] = "in_progress"
@@ -97,7 +92,6 @@ def _mark_qc_failed(
             "target_ids": target_ids,
         }
     )
-    registry.put("reviews", record, allow_update=True)
 
 
 def _submission_identity_findings(
@@ -167,25 +161,28 @@ def finalize_case(
         raise ValidationError(f"submission has invalid target_ids: {target_ids}")
 
     registry = FileRegistry(registry_root)
+    review_record = registry.get("reviews", review_id)
     identity_findings = _submission_identity_findings(manifest, submission, target_ids, targets)
     if identity_findings:
-        _mark_qc_failed(registry, review_id, target_ids, submission.get("assignee"))
+        _mark_qc_failed(review_record, target_ids, submission.get("assignee"))
+        registry.put("reviews", review_record, allow_update=True)
         _report(case_root, review_id, "failed", identity_findings)
         raise ValidationError("submission identity check failed; see reports/review_report.json")
     if action == "report_blocked":
         _update_review(
-            registry,
-            review_id,
+            review_record,
             action=action,
             target_ids=target_ids,
             label_ids={},
             actor=submission.get("assignee"),
         )
+        registry.put("reviews", review_record, allow_update=True)
+        reason = submission.get("reason") or submission.get("reason_code", "")
         report_path = _report(
             case_root,
             review_id,
             "blocked",
-            [{"severity": "error", "code": submission.get("reason_code", "annotator_blocked"), "message": submission.get("reason", "")}],
+            [{"severity": "error", "code": submission.get("reason_code", "annotator_blocked"), "message": reason}],
         )
         return {"status": "blocked", "report": str(report_path), "label_ids": []}
 
@@ -232,7 +229,8 @@ def finalize_case(
                     }
                 )
     if findings:
-        _mark_qc_failed(registry, review_id, target_ids, submission.get("assignee"))
+        _mark_qc_failed(review_record, target_ids, submission.get("assignee"))
+        registry.put("reviews", review_record, allow_update=True)
         _report(case_root, review_id, "failed", findings)
         raise ValidationError("submission QC failed:\n- " + "\n- ".join(item["message"] for item in findings))
 
@@ -274,7 +272,8 @@ def finalize_case(
             }
         )
     if any(item["severity"] == "error" for item in findings):
-        _mark_qc_failed(registry, review_id, target_ids, submission.get("assignee"))
+        _mark_qc_failed(review_record, target_ids, submission.get("assignee"))
+        registry.put("reviews", review_record, allow_update=True)
         _report(case_root, review_id, "failed", findings)
         raise ValidationError("submission QC failed; see reports/review_report.json")
 
@@ -358,13 +357,13 @@ def finalize_case(
         created_records.append(label_record)
 
     _update_review(
-        registry,
-        review_id,
+        review_record,
         action=action,
         target_ids=target_ids,
         label_ids=label_ids,
         actor=submission.get("assignee"),
     )
+    registry.put("reviews", review_record, allow_update=True)
     report_status = "passed" if action == "submit_complete" else "needs_review"
     report_path = _report(case_root, review_id, report_status, findings)
     write_json(

@@ -55,6 +55,7 @@ dataset_package/
       submissions/
         review_case001_001/
           submission_manifest.json
+          export_manifest.json
           buffers/
             img_noncontrast/
               target_noncontrast_abdomen/
@@ -62,8 +63,17 @@ dataset_package/
             img_arterial/
               target_arterial_liver/
                 liver.u8
+          labels/
+            img_noncontrast/
+              target_noncontrast_abdomen/
+                liver.nii.gz
       reports/
+        ingest_report.json
+        mimics_open_report.json
+        mimics_submit_precheck.json
+        review_report.json
       provenance/
+        tool_export.json
 ```
 
 单序列病例也使用 `image_sets` 数组，只包含一个元素。平台不维护另一套“单图像病例”格式。
@@ -138,8 +148,8 @@ dataset_package/
         "target_id": "target_noncontrast_abdomen",
         "image_id": "img_noncontrast",
         "organs": ["liver", "kidney_left", "kidney_right"],
-      "base_label_id": "label_noncontrast_v1",
-      "base_label_sha256": "sha256:..."
+        "base_label_id": "label_noncontrast_v1",
+        "base_label_sha256": "sha256:..."
       },
       {
         "target_id": "target_arterial_liver",

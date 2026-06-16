@@ -30,12 +30,12 @@ scripts/    与具体工具无关的校验和文件包脚本
 | --- | --- |
 | nnUNet 管线 | 已有转换、预处理、训练、预测和评估代码 |
 | 病例包校验 | 已有 v0.5 提交前检查和可选的目录校验值工具 |
-| 统一器官名称表 | 已从 ModelMap 生成 `config/anatomy_vocabulary.yaml`（120 个器官） |
+| 统一器官名称表 | 已从 ModelMap 生成 `config/anatomy_vocabulary.yaml`（126 个器官） |
 | 记录格式定义 | `registry/schemas/` 已定义核心记录的 JSON Schema，作为字段唯一事实源 |
 | 训练前离线闭环 | 已实现病例包、文件式 Registry、Mimics 双运行时、提交 QC 和 Dataset Snapshot |
 | Mimics 工具适配器 | Windows 安装、单会话探针、自动空间映射评估和正式标注脚本已实现；证据由实际工作站运行后生成 |
 | 候选标签生成适配器 | 只有输入输出边界，尚未实现 |
-| 数据导入、登记册和训练数据快照 | 已实现 DICOM/NIfTI/可选 MetaImage 的阶段 A 文件式窄版本；纯 RAW 通用入口、数据库和服务化尚未实现 |
+| 数据导入、登记册和训练数据快照 | 已实现 DICOM 扫描与批量病例包请求生成、DICOM/NIfTI/可选 MetaImage 的阶段 A 文件式窄版本；纯 RAW 通用入口、数据库和服务化尚未实现 |
 
 仓库当前可以运行训练前离线文件包闭环，但还不是 Web 服务化平台。Mimics 真实能力必须由 21.0 工作站验收，文档中的后期服务能力不能当作已经实现。
 
@@ -48,6 +48,14 @@ python3 -m venv .venv
 ```
 
 安装后使用 `sp --help` 查看病例包、Mimics、Registry 和 Snapshot 命令。
+
+批量 DICOM 标注入口从这里开始：
+
+```bash
+sp ingest scan /data/source_dicom --output /data/reports/source_scan.json
+sp ingest build-requests /data/reports/source_scan.json /data/package_requests --organs liver spleen --import-batch batch_001
+sp package create-many /data/package_requests /data/dataset_package --registry /data/platform_registry
+```
 
 ## 目录规则
 

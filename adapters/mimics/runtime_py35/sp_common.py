@@ -22,6 +22,9 @@ METADATA_KEYS = (
     "sp.package_root",
 )
 
+TOGGLE_PREFIX_SELECTED = "[x] "
+TOGGLE_PREFIX_CLEAR = "[ ] "
+
 
 def load_json(path):
     with open(path, "r") as handle:
@@ -70,6 +73,14 @@ def metadata_get(obj, name, default=None):
             return obj.metadata[name].value
         except Exception:
             return default
+
+
+def metadata_get_required(obj, name):
+    marker = object()
+    value = metadata_get(obj, name, marker)
+    if value is marker:
+        raise RuntimeError("metadata value could not be read: {0}".format(name))
+    return value
 
 
 def metadata_set(obj, name, value):
@@ -137,6 +148,7 @@ def match_images(mimics, expected_images):
     used = set()
     for expected in expected_images:
         matches = []
+        uid_shape_mismatches = []
         expected_uid = expected.get("dicom_series_uid_sha256")
         for image, identity in available:
             if id(image) in used:
@@ -144,12 +156,20 @@ def match_images(mimics, expected_images):
             if expected_uid and identity.get("dicom_series_uid_sha256") == expected_uid:
                 if identity["logical_dimensions"] == expected["platform_shape"]:
                     matches.append((image, identity))
+                else:
+                    uid_shape_mismatches.append(identity["logical_dimensions"])
                 continue
             if not expected_uid and identity["logical_dimensions"] == expected["platform_shape"]:
                 expected_description = expected.get("series_description", "")
                 if not expected_description or expected_description == identity.get("series_description", ""):
                     matches.append((image, identity))
         if len(matches) != 1:
+            if expected_uid and uid_shape_mismatches:
+                raise RuntimeError(
+                    "image_id {0} matched the expected Series UID but shape differs; expected shape={1}, found shapes={2}".format(
+                        expected["image_id"], expected["platform_shape"], uid_shape_mismatches
+                    )
+                )
             raise RuntimeError(
                 "image_id {0} matched {1} Mimics image sets; expected UID={2}, shape={3}".format(
                     expected["image_id"], len(matches), expected_uid, expected["platform_shape"]

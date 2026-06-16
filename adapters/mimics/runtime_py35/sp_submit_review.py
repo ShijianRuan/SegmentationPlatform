@@ -16,6 +16,8 @@ from sp_common import (
     managed_masks,
     match_images,
     metadata_get,
+    TOGGLE_PREFIX_CLEAR,
+    TOGGLE_PREFIX_SELECTED,
     write_error_report,
     write_json,
 )
@@ -59,7 +61,7 @@ def choose_targets(runtime):
         selected = []
         while True:
             toggle_buttons = [
-                ("[x] " if target_id in selected else "[ ] ") + str(index + 1)
+                (TOGGLE_PREFIX_SELECTED if target_id in selected else TOGGLE_PREFIX_CLEAR) + str(index + 1)
                 for index, target_id in enumerate(target_ids)
             ]
             buttons = toggle_buttons + ["Use Selected", "All Targets", "Cancel"]
@@ -89,12 +91,18 @@ def choose_targets(runtime):
                 )
                 continue
             for index, target_id in enumerate(target_ids):
-                if answer in ("[ ] " + str(index + 1), "[x] " + str(index + 1)):
+                if answer in (TOGGLE_PREFIX_CLEAR + str(index + 1), TOGGLE_PREFIX_SELECTED + str(index + 1)):
                     if target_id in selected:
                         selected.remove(target_id)
                     else:
                         selected.append(target_id)
                     break
+            else:
+                mimics.dialogs.message_box(
+                    "The target selection response was not recognized. Please choose again.",
+                    title="SP - Target Groups",
+                    ui_blocking=True,
+                )
         return []
     buttons = ["All Targets"] + target_ids + ["Cancel"]
     answer = mimics.dialogs.question_box(
@@ -265,6 +273,18 @@ def main():
         if empty_outcomes is None:
             return 0
         if empty_needs_review:
+            if action == "submit_complete":
+                confirm = mimics.dialogs.question_box(
+                    message=(
+                        "At least one empty Mask was marked as needing review.\n\n"
+                        "This cannot be submitted as Complete. The submission will be changed to Submit For Review."
+                    ),
+                    buttons="Submit For Review;Cancel",
+                    title="SP - Submit Type Changed",
+                    ui_blocking=True,
+                )
+                if confirm != "Submit For Review":
+                    return 0
             action = "submit_for_review"
             if reason_code is None:
                 reason_code = "medical_uncertainty"
