@@ -2,7 +2,7 @@
 
 > 病例包版本：v0.5。  
 > 状态：代码已准备并通过本地自动化测试；Mimics 21 的实际 API 与空间映射证据由 Windows 工作站运行后生成。  
-> 目标：让操作者在 Windows 机器上完成工作站初始化、探针验收、病例标注、提交和平台 QC，不需要修改 Python 源码。
+> 目标：让管理员在 Windows 机器上完成工作站初始化、探针验收和平台收尾；标注者只打开 Mimics，并通过 Scripting Library 中的 **SP Review Console** 领取、保存和提交任务。
 
 ## 1. 运行边界
 
@@ -45,11 +45,22 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 .\scripts\windows\setup_mimics_workstation.ps1 `
   -MimicsExecutable "C:\Program Files\Materialise\Mimics Research 21.0\MimicsResearch.exe" `
-  -WorkRoot "D:\SegmentationPlatform\work"
+  -WorkRoot "D:\SegmentationPlatform\work" `
+  -RegistryRoot "D:\SegmentationPlatform\data\registry" `
+  -Assignee "annotator_01"
 ```
 
 脚本会创建项目专用 `.venv`、安装平台依赖、生成
-`config\mimics_workstation.local.yaml`，并检查软件路径、脚本目录和工作目录权限。
+`config\mimics_workstation.local.yaml`。如果提供 `RegistryRoot` 和 `Assignee`，还会生成
+`adapters\mimics\scripting_library\sp_review_console.local.json`，供 Mimics 内 **SP Review Console** 使用。
+
+在 Mimics 的 `File -> Preferences -> Scripting` 中，把 Scripting Library 路径设置为：
+
+```text
+C:\SegmentationPlatform\adapters\mimics\scripting_library
+```
+
+不要把 `runtime_py35` 直接设为 Scripting Library；那是内部脚本目录，会把诊断、打开、提交等实现脚本暴露给标注者。
 
 如果机器使用其他 Python：
 
@@ -144,6 +155,8 @@ $Registry = "D:\SegmentationPlatform\data\registry"
 
 ### 6.1 平台准备病例
 
+平台可以提前批量准备病例，也可以不提前准备，让 **SP Review Console** 在标注者点击 **Open Next Review** 后后台执行。提前准备时可运行：
+
 ```powershell
 .\scripts\windows\invoke_mimics_case.ps1 `
   -Action Prepare `
@@ -156,14 +169,9 @@ $Registry = "D:\SegmentationPlatform\data\registry"
 
 ### 6.2 打开 Mimics
 
-```powershell
-.\scripts\windows\invoke_mimics_case.ps1 `
-  -Action Open `
-  -ConfigPath $Config `
-  -CaseRoot $Case
-```
+正式标注时，标注者只手动打开 Mimics，然后在 Scripting Library 运行 **SP Review Console**。Console 会读取本机 JSON 配置，查询分配给当前 assignee 的下一例，必要时后台运行 `prepare`，并在当前 Mimics 会话中打开 `.mcs` 或导入 DICOM。
 
-如果 Windows 机器直接访问唯一的主 Registry，可以额外传入 `-RegistryRoot $Registry` 以立即记录 `in_progress`。离线拷贝场景不要复制一份 Registry 只为更新进度。
+`invoke_mimics_case.ps1 -Action Open` 只作为管理员调试入口保留，不作为标注者日常步骤。
 
 Mimics 启动后会自动：
 
@@ -181,24 +189,20 @@ Mimics 启动后会自动：
 
 标注者只需要：
 
-1. 确认病例和目标器官。
-2. 使用 Mimics 工具修正对应的 `SP__<target_id>__<organ>` Mask。
-3. 随时保存 `.mcs`，关闭 Mimics 后可以继续。
-4. 长时间工作或完成一个阶段后，在 Scripting Library 运行 `sp_save_checkpoint.py`。
-5. 不修改以 `sp.` 开头的 Mask metadata。
-6. 不把 Mask 移到另一个 image set。
+1. 打开 Mimics。
+2. 运行 `Script -> Scripting Library -> SP Review Console`。
+3. 选择 **Open Next Review**，核对病例、序列和目标器官。
+4. 使用 Mimics 工具修正对应的 `SP__<target_id>__<organ>` Mask。
+5. 随时保存 `.mcs`，关闭 Mimics 后可以继续。
+6. 长时间工作或完成一个阶段后，在 Console 中选择 **Save Checkpoint**。
+7. 不修改以 `sp.` 开头的 Mask metadata。
+8. 不把 Mask 移到另一个 image set。
 
 保存 `.mcs` 只代表保存进度，不代表标签已经提交或验证。
 
 ### 6.4 在当前 Mimics 会话提交
 
-完成或需要中断时，通过 Mimics 的脚本运行入口执行：
-
-```text
-C:\SegmentationPlatform\adapters\mimics\runtime_py35\sp_submit_review.py
-```
-
-这个脚本必须在当前已打开病例的 Mimics 会话中运行。它不需要命令行参数，会从 Mask metadata 找到 Case Package。
+完成或需要中断时，仍在 **SP Review Console** 中选择 **Submit Current Review**。Console 会在当前已打开病例的 Mimics 会话中调用内部提交脚本，不需要标注者填写命令行参数或文件路径。
 
 | 动作 | 平台语义 |
 | --- | --- |
@@ -275,16 +279,16 @@ QC 报告位于 `reports\review_<review_id>_finalize.json`。
 `verified_label` 不会被覆盖写。需要继续修正时：
 
 1. 平台创建新的 review 版本和新 Case Package，旧 verified label 作为 `base_label_id`。
-2. 重新执行 `Prepare` 和 `Open`。
+2. 平台可提前执行 `Prepare`，或等待 Console 打开任务时后台准备。
 3. Mimics 首次创建新 review 的 Mask 时导入旧标签。
-4. 标注者修正并重新提交。
+4. 标注者通过 **SP Review Console** 打开新任务，修正并重新提交。
 5. Finalize 生成新的 Label Artifact，并保留旧版本和父子来源关系。
 
 不要直接修改旧 Case Package 后覆盖 Registry 中已经登记的标签。
 
 ## 8. `.mcs` 损坏时恢复
 
-`SP - Save Checkpoint` 会把全部受管 Mask 保存为 gzip 压缩的 `.u8.gz`：
+**SP Review Console** 的 **Save Checkpoint** 会把全部受管 Mask 保存为 gzip 压缩的 `.u8.gz`：
 
 ```text
 working\checkpoints\<review_id>\<timestamp>\
@@ -304,7 +308,7 @@ Mimics 21 文档没有提供可依赖的“每次保存项目后自动回调脚�
 ```
 
 平台会把旧 `.mcs` 改名保留，然后验证 checkpoint 的 review、package、base label、mapping
-evidence、shape 和 hash。通过后，下一次 Open 会重新导入 DICOM 并恢复 checkpoint；没有可用
+evidence、shape 和 hash。通过后，标注者下一次通过 Console 打开任务时会重新导入 DICOM 并恢复 checkpoint；没有可用
 checkpoint 时退回初始标签或空 Mask。
 
 ## 9. 多标注者使用
@@ -345,8 +349,8 @@ checkpoint 时退回初始标签或空 Mask。
 | P02 Mask 绑定失败 | 不进入正式标注，保留探针证据 |
 | ProbeEvaluate 无唯一映射 | 换用三轴尺寸不同的 DICOM，检查方向和坐标输出 |
 | Prepare 报 mapping unverified | 使用探针生成的 verified 配置 |
-| Open 报 image set 匹配数量不是 1 | 检查 Series UID、DICOM 内容和 `.mcs` |
-| Submit 报找不到 managed Mask | 不改 metadata；重新执行 Prepare/Open 恢复 |
+| Console 打开时报 image set 匹配数量不是 1 | 管理员检查 Series UID、DICOM 内容和 `.mcs` |
+| Console 提交时报找不到 managed Mask | 不改 metadata；管理员重新 Prepare 或重建工作区后由 Console 恢复 |
 | Finalize hash或尺寸失败 | 不手改 `.u8`；回到 Mimics 重新提交 |
 | Finalize geometry 失败 | 保留报告，禁止人工强制登记 |
 | `.mcs` 损坏 | 使用 `Prepare -RebuildWorkspace`，从 checkpoint 重建 |
@@ -362,7 +366,7 @@ checkpoint 时退回初始标签或空 Mask。
 - [ ] P04 与 P06 buffer 内容一致
 - [ ] ProbeEvaluate 返回 `passed`
 - [ ] verified 配置包含 evidence hash
-- [ ] 无初始标签病例可 Prepare/Open/Submit/Finalize
+- [ ] 无初始标签病例可通过 Console 打开、提交并由 Finalize 收尾
 - [ ] 带初始标签病例可正确导入并回写
 - [ ] Submit For Review 生成 `draft_label`
 - [ ] Report Blocked 不生成标签

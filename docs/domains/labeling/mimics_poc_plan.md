@@ -271,7 +271,7 @@ machine:
 **操作**
 
 1. 通过 `-run_script` 传入任务清单和输出目录。
-2. 用外部启动器循环多个任务。
+2. 用 **SP Review Console** 连续领取多个任务。
 3. 对无人工步骤使用 background mode。
 4. 人为制造一个失败病例。
 

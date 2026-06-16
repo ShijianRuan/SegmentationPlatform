@@ -100,7 +100,7 @@ Mimics 中的“当前活动图像”只是软件运行时状态。工具适配�
 ### 4.1 保存进度
 
 标注者可以反复保存 `.mcs` 或其他工作文件并关闭软件。长时间工作后可以额外运行
-`SP - Save Checkpoint`，把全部受管 Mask 保存为病例包内的恢复 buffer；该动作是灾备，
+**SP Review Console** 的 **Save Checkpoint**，把全部受管 Mask 保存为病例包内的恢复 buffer；该动作是灾备，
 不等于提交。
 
 保存进度只说明“工作可以继续”，不会：
@@ -269,12 +269,14 @@ Mimics 是工具适配器，不承担平台状态机和数据治理。实现采�
 第一阶段的完整调用顺序是：
 
 ```text
-sp mimics prepare
--> sp mimics open
+平台批量建包、分配 review，可选提前 sp mimics prepare
+-> 标注者打开 Mimics
+-> Script / Scripting Library / SP Review Console
+-> Open Next Review
 -> 标注者在 Mimics 编辑并保存
--> 可选：SP - Save Checkpoint
--> Script / Scripting Library / SP - Submit Review
--> sp mimics finalize
+-> 可选：Console / Save Checkpoint
+-> Console / Submit Current Review
+-> 平台后台 sp mimics finalize 或 watcher
 -> 平台 QC 和标签版本登记
 ```
 
@@ -284,7 +286,7 @@ sp mimics prepare
 
 一个 `.mcs` 第一阶段只对应一个 `review_id`。多序列图像平等存在，每个目标组绑定明确的 `image_id`，脚本在操作 Mask 前显式切换 image set，不设置默认 primary/reference。
 
-第一阶段允许同一人兼任平台操作者和标注者：操作者运行准备与收尾命令，标注者只在 Mimics 中编辑并运行一次提交脚本。稳定后再把三个外部命令封装为统一启动入口，不先建设跨进程服务或任务队列。
+第一阶段允许同一人兼任平台操作者和标注者，但职责仍要分开：平台动作在标注前后批量执行或由 `SP Review Console` 后台调用；标注者的日常动作只发生在 Mimics 内，不直接运行 `prepare/open/finalize`。
 
 完整代码边界和标注者操作见[Mimics 适配器设计与开发流程](mimics_adapter_design.md)，技术事实见[Mimics 技术参考](mimics_reference.md)，验证步骤见[Mimics POC 计划](mimics_poc_plan.md)。
 
@@ -349,13 +351,13 @@ Windows 工作站的安装、v0.5 目录、探针、checkpoint 和恢复命令�
 Mimics Gate A 通过后实现：
 
 - 外部 `prepare`、`open`、`finalize` 命令。
-- Mimics 内 `sp_open_review.py` 和 `sp_submit_review.py`。
+- Mimics 内 `sp_review_console.py`、`sp_open_review.py`、`sp_submit_review.py` 和 `sp_save_checkpoint.py`。
+- 只暴露给标注者的 `scripting_library/SP_Review_Console.py`。
 - 逐器官布尔缓冲区和 manifest 桥接。
 - 任务专属 `.mcs`、Mask metadata 和选择性导出。
 
 Gate B 通过后再实现：
 
-- 面向标注者的统一启动入口。
 - 更完整的多人进度汇总。
 - 标注入口一键生成候选标签。
 

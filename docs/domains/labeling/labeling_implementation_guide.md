@@ -45,7 +45,7 @@
 **步骤**：
 
 1. 安装 Mimics Research 21.0，确认许可含 Scripting 模块。在 `File → Preferences → Scripting` 中配置 Python 3.5.2。
-2. 把 `adapters/mimics/runtime_py35/` 设为 Scripting Library。
+2. 把 `adapters/mimics/scripting_library/` 设为 Scripting Library；`runtime_py35/` 是内部实现目录，不直接暴露给标注者。
 3. 创建 `config/mimics_workstation.yaml`，记录 Mimics 路径和工作目录。
 4. 运行环境诊断：
    ```powershell
@@ -133,20 +133,30 @@ sp package validate /data/dataset_package/cases/case_001
 
 ---
 
-### 阶段 3：为 Mimics 准备并启动任务
+### 阶段 3：为 Mimics 准备任务队列
 
-**谁做**：平台操作者。
+**谁做**：平台操作者或后台脚本。
 
-**目标**：把病例包中的数据转成 Mimics 能理解的格式，生成任务说明书，启动 Mimics。
+**目标**：把病例包和 Registry 变成 Mimics 内 `SP Review Console` 可以领取的任务队列。这个阶段不要求标注者参与。
 
 ```bash
+sp review next --registry /data/platform_registry --assignee annotator_01
 sp mimics prepare /data/dataset_package/cases/case_001 --config mimics_workstation.yaml
-sp mimics open /data/dataset_package/cases/case_001 --config mimics_workstation.yaml --registry /data/platform_registry
 ```
 
-**`prepare` 做的事**：
+平台可以提前批量运行 `prepare`，也可以让 `SP Review Console` 在标注者点击 **Open Next Review** 后后台调用 `prepare`。两种方式都不能暴露给标注者。
 
-- 再次校验病例包
+**平台提前做的事**：
+
+- 批量创建病例包和 Registry 记录；
+- 为每个标注者分配 `review_id`；
+- 配置 `adapters/mimics/scripting_library/sp_review_console.local.json`，或由 Windows setup 脚本生成；
+- 可选批量运行 `sp mimics prepare`，生成 `working/mimics_runtime.json` 和导入缓冲区；
+- 运行 `sp review next` 检查队列是否能取到下一例。
+
+**`prepare` 后台做的事**：
+
+- 再次校验病例包；
 - 如果 P05 已通过 → 把逐器官 NIfTI 标签转为 `.u8` 缓冲区，写入 `working/bridge/import/{image_id}/{organ}.u8`
 - 生成 `working/mimics_runtime.json` — 这是 Mimics 内部脚本的任务说明书：
   ```text
@@ -171,15 +181,19 @@ sp mimics open /data/dataset_package/cases/case_001 --config mimics_workstation.
   submissions_dir: submissions/review_case001_001/
   ```
 
-**`open` 做的事**：
+**`SP Review Console` 打开任务时做的事**：
 
-- 启动 Mimics，通过 `-run_script` 调用 `sp_open_review.py`
-- `sp_open_review.py` 在 Mimics 内部执行：导入 DICOM → 用 UID 哈希 + shape 将 image set 与 `image_id` 一一匹配 → 为每个 target 的每个器官创建/找到 Mask → 写入 7 个 metadata（review_id、target_id、image_id、organ、base_label_id/hash、package_root）→ 如有 import buffer 则在首次创建时注入 → 保存 `.mcs` → 弹出任务摘要对话框
+- 在 Mimics 内调用 `sp_review_console.py`；
+- 通过外部 Python 查询 `sp review next`；
+- 如本例尚未准备，后台调用 `sp mimics prepare`；
+- 标记 Review 为 `in_progress`；
+- 在当前 Mimics 会话里调用 `sp_open_review.py`；
+- `sp_open_review.py` 导入 DICOM 或打开 `.mcs` → 用 UID 哈希 + shape 将 image set 与 `image_id` 一一匹配 → 为每个 target 的每个器官创建/找到 Mask → 写入 7 个 metadata（review_id、target_id、image_id、organ、base_label_id/hash、package_root）→ 如有 import buffer 则在首次创建时注入 → 保存 `.mcs` → 弹出任务摘要对话框。
 
 **验证方式**：
 
 - `prepare` 后检查 `working/mimics_runtime.json` 和 `working/bridge/import/` 是否有内容
-- `open` 后 Mimics 弹窗显示任务摘要（病例号、序列数、目标器官列表）
+- `SP Review Console` 打开后 Mimics 弹窗显示任务摘要（病例号、序列数、目标器官列表）
 - Registry 中 Review 状态更新为 `in_progress`
 - 报告写入 `reports/mimics_open_report.json`
 
@@ -191,12 +205,14 @@ sp mimics open /data/dataset_package/cases/case_001 --config mimics_workstation.
 
 **标注者看到的流程**：
 
-1. Mimics 自动打开，弹窗显示任务摘要。**核对**：病例是否正确、有哪些序列、每个序列要标哪些器官。
-2. 如不一致 → 直接 `Script → SP - Submit Review → 报告阻塞`，不编辑。
-3. 如一致 → 使用 Mimics 正常工具编辑每个 Mask。每个 Mask 的名称、metadata 由平台管理，标注者不改。
-4. 随时 Ctrl+S 保存 `.mcs`。保存只保留进度，不触发提交。
-5. 长时间工作后可选运行 `Script → SP - Save Checkpoint`，额外保存一份独立于 `.mcs` 的 Mask 恢复快照。
-6. 关闭软件后，下次仍通过平台操作者运行 `sp mimics open` 继续。
+1. 打开 Mimics。
+2. 运行 `Script → Scripting Library → SP Review Console`。
+3. 选择 **Open Next Review**，弹窗显示任务摘要。**核对**：病例是否正确、有哪些序列、每个序列要标哪些器官。
+4. 如不一致 → 通过 `SP Review Console` 进入提交动作并报告阻塞，不编辑。
+5. 如一致 → 使用 Mimics 正常工具编辑每个 Mask。每个 Mask 的名称、metadata 由平台管理，标注者不改。
+6. 随时 Ctrl+S 保存 `.mcs`。保存只保留进度，不触发提交。
+7. 长时间工作后可在 `SP Review Console` 里选择 **Save Checkpoint**，额外保存一份独立于 `.mcs` 的 Mask 恢复快照。
+8. 关闭软件后，下次仍打开 Mimics 并进入 `SP Review Console` 继续。
 
 **标注者不需要知道的事**：标签生命周期、文件哈希、NIfTI 格式、训练编号、Registry 路径。
 
@@ -208,11 +224,12 @@ sp mimics open /data/dataset_package/cases/case_001 --config mimics_workstation.
 
 **标注者的操作**：
 
-1. `Script → Scripting Library → SP - Submit Review`
-2. 第一个对话框：选择提交意图 — **提交完成 / 提交复查 / 报告阻塞 / 取消**
-3. 第二个对话框：选择要提交的目标组 — 一个、多个（2–5 个时模拟勾选）或全部
-4. 如有空 Mask，弹出聚合清单 — 可统一选择"全部确认不存在""全部待复查"或逐项判断
-5. 等待脚本提示 "已导出，仍需平台检查"
+1. `Script → Scripting Library → SP Review Console`
+2. 选择 **Submit Current Review**
+3. 第一个对话框：选择提交意图 — **提交完成 / 提交复查 / 报告阻塞 / 取消**
+4. 第二个对话框：选择要提交的目标组 — 一个、多个（2–5 个时模拟勾选）或全部
+5. 如有空 Mask，弹出聚合清单 — 可统一选择"全部确认不存在""全部待复查"或逐项判断
+6. 等待脚本提示 "已导出，仍需平台检查"
 
 **脚本在后台做的事**（`sp_submit_review.py`）：
 
@@ -226,7 +243,7 @@ sp mimics open /data/dataset_package/cases/case_001 --config mimics_workstation.
 
 ### 阶段 6：平台收尾
 
-**谁做**：平台操作者。
+**谁做**：平台后台脚本或管理员批处理，不由标注者执行。
 
 ```bash
 sp mimics finalize /data/dataset_package/cases/case_001 --config mimics_workstation.yaml --registry /data/platform_registry
@@ -249,6 +266,8 @@ sp mimics finalize /data/dataset_package/cases/case_001 --config mimics_workstat
 | submit_for_review | 创建新的 `draft_label`，目标组标记 needs_review | 同上 |
 | report_blocked | 不创建标签，目标组标记 blocked | — |
 
+`sp_review_console.py` 支持 `auto_finalize=true`，可以在提交后立即调用 `finalize`；阶段 A 推荐默认 `false`，由平台独立 watcher 或批处理收尾，避免标注者等待长时间 QC。
+
 **验证方式**：
 
 - Registry 中出现新的 Label Artifact（source=manual，lifecycle_status=verified）
@@ -268,15 +287,16 @@ sp mimics finalize /data/dataset_package/cases/case_001 --config mimics_workstat
   sp package validate → 确认数据完整
          │
 [每任务] 平台操作者
-  sp mimics prepare → mimics_runtime.json + import buffers
-  sp mimics open → 启动 Mimics + 创建/恢复 Mask + 注入初始标签
+  分配 review_id + 可选提前 prepare
+         │
+[标注者] 打开 Mimics → SP Review Console → Open Next Review
          │
 [标注者] 在 Mimics 中编辑 Mask → 随时保存 .mcs → 可选 Save Checkpoint
          │
-[标注者] SP - Submit Review → 选意图 → 选目标组 → 确认空 Mask → 导出 .u8
+[标注者] SP Review Console → Submit Current Review → 导出 .u8
          │
-[平台操作者]
-  sp mimics finalize → 身份/完整/哈希/几何 QC
+[平台后台]
+  sp mimics finalize 或 watcher → 身份/完整/哈希/几何 QC
                     → 通过：verified_label
                     → 失败：review_report.json + 回到 in_progress
 ```
@@ -294,7 +314,8 @@ sp mimics finalize /data/dataset_package/cases/case_001 --config mimics_workstat
 | `src/segplatform/registry.py` | 文件式 Registry 的不可变写入和查询 |
 | `src/segplatform/snapshots.py` | 标签准入、split 检查和 Snapshot 冻结 |
 | `src/segplatform/adapters/mimics/` | Mimics 外部现代 Python 侧 |
-| `adapters/mimics/runtime_py35/` | Mimics 内 Python 3.5.2 打开、checkpoint 和提交脚本 |
+| `adapters/mimics/scripting_library/` | Mimics 菜单中唯一给标注者使用的 Console 入口 |
+| `adapters/mimics/runtime_py35/` | Mimics 内 Python 3.5.2 的内部打开、checkpoint 和提交脚本 |
 | `adapters/mimics/probes/` | P01/P02/P04/P05/P06 工作站探针 |
 | `registry/schemas/` | Image、Label、Review、Snapshot 等 JSON Schema |
 | `examples/labeling/` | 病例包和 Snapshot 请求示例 |
@@ -322,7 +343,7 @@ MetaImage（`.mhd/.mha`）另装：
 python -m pip install -e '.[metaimage]'
 ```
 
-Mimics 内置 Python 不安装 nibabel、pydicom 或 SimpleITK。它只运行 `runtime_py35/` 中的脚本。
+Mimics 内置 Python 不安装 nibabel、pydicom 或 SimpleITK。它只运行 `scripting_library/` 包装入口和 `runtime_py35/` 内部脚本。
 
 ## 5. 准备病例包
 
@@ -395,7 +416,7 @@ Windows 工作站现在优先使用
 
 1. 安装 Mimics Research 21.0，并确认许可包含 Scripting。
 2. 在 Mimics Preferences 中确认 Python 3.5.2。
-3. 把 `adapters/mimics/runtime_py35/` 配置为 Scripting Library。
+3. 把 `adapters/mimics/scripting_library/` 配置为 Scripting Library。
 4. 复制并修改 `config/mimics_workstation.example.yaml`。
 5. 运行静态诊断：
 
@@ -459,18 +480,24 @@ P05 不是收集到坐标就结束。`probe-evaluate` 必须得到唯一轴排�
 
 ## 8. 标注者完整流程
 
-平台操作者先执行：
+管理员先完成一次性配置：
 
 ```powershell
-sp mimics prepare D:\dataset_package\cases\case_001 `
-  --config C:\SegmentationPlatform\config\mimics_workstation.yaml
-
-sp mimics open D:\dataset_package\cases\case_001 `
-  --config C:\SegmentationPlatform\config\mimics_workstation.yaml `
-  --registry D:\platform_registry
+copy C:\SegmentationPlatform\config\mimics_review_console.example.json `
+  C:\SegmentationPlatform\adapters\mimics\scripting_library\sp_review_console.local.json
 ```
 
-`prepare` 完成：
+本机 JSON 至少记录：
+
+- 外部平台 Python；
+- Registry 根目录；
+- verified 工作站配置；
+- 当前标注者 assignee；
+- 是否在提交后立刻 `auto_finalize`。
+
+平台可提前批量运行 `prepare`；如果没有提前准备，`SP Review Console` 会在打开下一例时后台调用 `prepare`。
+
+后台 `prepare` 完成：
 
 - 再次检查病例包。
 - 生成 `working/mimics_runtime.json`。
@@ -479,7 +506,7 @@ sp mimics open D:\dataset_package\cases\case_001 `
 
 同一图像的初始逐器官 Mask 会登记成一份多 segment Label Artifact。若一个目标组的全部器官都来自该 Artifact，病例包会自动把它设为目标组的基础标签，后续提交必须回传相同 ID 和 bundle hash。
 
-`open` 启动 `sp_open_review.py`。内部脚本完成：
+标注者打开 Mimics 后运行 `Script -> Scripting Library -> SP Review Console`，选择 **Open Next Review**。Console 后台调用 `sp_open_review.py`，内部脚本完成：
 
 - 首次任务导入 DICOM；继续任务打开专属 `.mcs`。
 - 使用 Series UID 哈希和 shape 唯一匹配 image set。
@@ -491,16 +518,19 @@ sp mimics open D:\dataset_package\cases\case_001 `
 - `.mcs` 不可用且选择重建时，优先恢复匹配当前任务版本和 mapping evidence 的 checkpoint。
 - 保存任务专属 `.mcs` 并显示一次摘要。
 
-外部启动成功后，Registry 中该 Review 和尚未开始的目标组会更新为 `in_progress`，并追加 `open_started` 事件。没有提供 `--registry` 时仍可打开，但不会更新集中进度。
+打开成功后，Registry 中该 Review 和尚未开始的目标组会更新为 `in_progress`，并追加 `open_started` 事件。
 
 标注者只执行：
 
-1. 核对病例、序列和目标器官。
-2. 使用 Mimics 正常工具编辑 Mask。
-3. 可随时保存 `.mcs` 并关闭。
-4. 长时间工作后可运行 `SP - Save Checkpoint` 保存独立 Mask 恢复快照。
-5. 完成时运行 `Script -> Scripting Library -> SP - Submit Review`。
-6. 选择完成、复查、阻塞或取消；2–5 个目标组可勾选任意组合一次提交。
+1. 打开 Mimics。
+2. 运行 **SP Review Console**。
+3. 打开下一例或继续当前例。
+4. 核对病例、序列和目标器官。
+5. 使用 Mimics 正常工具编辑 Mask。
+6. 可随时保存 `.mcs` 并关闭。
+7. 长时间工作后可在 Console 里选择 **Save Checkpoint**。
+8. 完成时在 Console 里选择 **Submit Current Review**。
+9. 选择完成、复查、阻塞或取消；2–5 个目标组可勾选任意组合一次提交。
 
 保存 `.mcs` 不会创建正式标签。提交脚本也只写出缓冲区和提交意图。
 提交前会聚合检查 Mask 完整性、image set、基础版本和 shape。多个空 Mask 可统一确认，
@@ -508,7 +538,7 @@ sp mimics open D:\dataset_package\cases\case_001 `
 
 ## 9. 平台收尾
 
-Mimics 导出后执行：
+Mimics 导出后由平台后台或管理员批处理执行：
 
 ```powershell
 sp mimics finalize D:\dataset_package\cases\case_001 `
@@ -571,11 +601,11 @@ sp snapshot validate /data/platform_registry/snapshots/snap_abdomen_v1.json
 
 | 情况 | 处理 |
 | --- | --- |
-| Mimics 打开失败 | 查看 `reports/mimics_open_error.json`，修复后重新 `open` |
-| 标注中断 | 保存 `.mcs`，以后仍通过 `sp mimics open` 继续 |
+| Mimics 打开失败 | 查看 `reports/mimics_open_error.json`，修复后由 **SP Review Console** 重新打开 |
+| 标注中断 | 保存 `.mcs`，以后仍打开 Mimics 并通过 **SP Review Console** 继续 |
 | Mask 错序列 | 提交脚本阻断；不要手工改 header |
 | Mimics 提交前检查失败 | 查看弹窗和 `reports/mimics_submit_precheck.json` |
-| 提交 QC 失败 | 查看 `reports/review_report.json`；下次 open 会显示失败摘要 |
+| 提交 QC 失败 | 查看 `reports/review_report.json`；下次通过 Console 打开时会显示失败摘要 |
 | 已验证标签要修改 | 新建 `review_id`，旧标签作为 base label，不覆盖旧版本 |
 | 多标注者 | 每人独立 `review_id` 和 `.mcs`；阶段 A 不共享写同一文件 |
 | `.mcs` 损坏 | 运行 `prepare --rebuild-workspace` 保留旧文件，并从最新 checkpoint 或初始标签重建 |
@@ -586,7 +616,7 @@ sp snapshot validate /data/platform_registry/snapshots/snap_abdomen_v1.json
 | --- | --- |
 | 手写 10000 份 YAML 不可行 | 已提供 `sp ingest scan`、`sp ingest build-requests` 和 `sp package create-many`。扫描和请求生成是批量入口，人工只审阅规则和异常项。 |
 | 一个 `.mcs` 多病例能否减少启动成本 | 阶段 A 不采用。单 `.mcs` 多病例会放大项目损坏、Mask 误绑定、部分提交、多人分派和失败回滚的风险。当前选择一个 review/case 一个 `.mcs`，用批量发现和批量创建降低平台侧成本。 |
-| prepare/open/finalize 是否仍需逐病例 | `prepare` 和 `finalize` 可以由 shell/PowerShell 循环批量执行；`open` 仍是标注者交互入口，不能后台无监督替代人工标注。后续服务化再做队列和任务领取。 |
+| prepare/open/finalize 是否仍需逐病例 | `prepare` 和 `finalize` 可以由 shell/PowerShell、watcher 或管理员批处理执行；标注者不直接运行 `open`，而是在 Mimics 内通过 **SP Review Console** 领取下一例。 |
 | Registry 标签查询 O(N) | 文件式 Registry 已维护 `_indexes/labels_by_case_image_organ.json`。旧 Registry 可运行 `sp registry rebuild-index /data/platform_registry` 生成索引。 |
 | 空间信息不完整 | 数据导入契约允许 `complete/partial/index_only`，但 Mimics 病例包当前仍要求可控的工具空间。纯 RAW 和无法证明空间的来源应先创建带明确假设的派生图像，或停在导入报告中。 |
 | 部分器官标签 | Snapshot 支持按病例列出实际 segment 子集。不能把未标器官当背景；训练导出层后续要显式实现 ignore/排除策略。 |

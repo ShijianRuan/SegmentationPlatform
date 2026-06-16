@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
 import py_compile
 import sys
 import tempfile
@@ -27,6 +28,7 @@ from segplatform.imaging import BufferMapping
 from segplatform.ingest import build_case_package_requests, scan_source
 from segplatform.errors import ValidationError
 from segplatform.registry import FileRegistry
+from segplatform.reviews import next_review
 from segplatform.snapshots import create_snapshot, validate_snapshot
 
 
@@ -300,6 +302,72 @@ class LabelingWorkflowTests(unittest.TestCase):
         manifest = load_data(case_root / "manifest.json")
         self.assertEqual(1, len(manifest["image_sets"]))
         self.assertEqual(["liver"], manifest["review"]["targets"][0]["organs"])
+
+    def test_review_next_skips_submitted_pending_but_returns_failed_qc(self) -> None:
+        registry_root = self.root / "registry"
+        case_root = self.root / "dataset_package" / "cases" / "case_001"
+        case_root.mkdir(parents=True)
+        record = {
+            "schema_version": "review_task.v1",
+            "review_id": "review_case_001",
+            "package_id": "pkg_case_001",
+            "case_id": "case_001",
+            "tool": "mimics",
+            "status": "in_progress",
+            "assignee": "annotator_01",
+            "package_path": str(case_root),
+            "created_at": "2026-06-16T00:00:00+00:00",
+            "targets": [
+                {
+                    "target_id": "target_liver",
+                    "image_id": "img_venous",
+                    "organs": ["liver"],
+                    "status": "in_progress",
+                }
+            ],
+            "events": [],
+        }
+        registry = FileRegistry(registry_root)
+        registry.put("reviews", record)
+        self.assertEqual("review_case_001", next_review(registry_root, assignee="annotator_01")["review_id"])
+        next_case_root = self.root / "dataset_package" / "cases" / "case_002"
+        next_case_root.mkdir(parents=True)
+        second_record = {
+            **record,
+            "review_id": "review_case_002",
+            "case_id": "case_002",
+            "status": "ready",
+            "package_path": str(next_case_root),
+            "created_at": "2026-06-16T00:01:00+00:00",
+            "targets": [{**record["targets"][0], "status": "ready"}],
+        }
+        registry.put("reviews", second_record)
+        self.assertEqual(
+            "review_case_002",
+            next_review(
+                registry_root,
+                assignee="annotator_01",
+                exclude_review_id="review_case_001",
+            )["review_id"],
+        )
+        second_record["status"] = "completed"
+        registry.put("reviews", second_record, allow_update=True)
+
+        submission = case_root / "submissions" / "review_case_001" / "submission_manifest.json"
+        submission.parent.mkdir(parents=True)
+        submission.write_text(json.dumps({"schema_version": "review_submission.v1"}), encoding="utf-8")
+        self.assertEqual("empty", next_review(registry_root, assignee="annotator_01")["status"])
+
+        report = case_root / "reports" / "review_report.json"
+        report.parent.mkdir()
+        report.write_text(json.dumps({"schema_version": "review_report.v1", "status": "failed"}), encoding="utf-8")
+        os.utime(submission, (1000, 1000))
+        os.utime(report, (2000, 2000))
+        self.assertEqual("review_case_001", next_review(registry_root, assignee="annotator_01")["review_id"])
+
+        submission.write_text(json.dumps({"schema_version": "review_submission.v1", "attempt": 2}), encoding="utf-8")
+        os.utime(submission, (3000, 3000))
+        self.assertEqual("empty", next_review(registry_root, assignee="annotator_01")["status"])
 
     def test_windows_probe_command_and_mapping_evaluation(self) -> None:
         dicom_root = self.make_dicom_series()

@@ -102,6 +102,8 @@
 | 文件 | 作用 | 进入条件 |
 | --- | --- | --- |
 | `adapters/mimics/runtime_py35/sp_common.py` | 已实现 | 在 Python 3.5.2 实测 memoryview/NumPy 路径 |
+| `adapters/mimics/scripting_library/SP_Review_Console.py` | 已实现 | 配置为标注者唯一可见 Scripting Library 入口 |
+| `adapters/mimics/runtime_py35/sp_review_console.py` | 已实现 | 在 Mimics 内领取任务、保存 checkpoint、提交当前 review |
 | `adapters/mimics/runtime_py35/sp_diagnostics.py` | 已实现 | 运行本机诊断 |
 | `adapters/mimics/runtime_py35/sp_open_review.py` | 已实现 | Gate A/B 真实病例验收 |
 | `adapters/mimics/runtime_py35/sp_submit_review.py` | 已实现 | Gate B 提交操作验收 |
@@ -151,7 +153,7 @@
 | 多标签文件与 Mimics 多 Mask 映射错误 | P0 | 使用同一份 `review_label_map.yaml` |
 | 候选标签误当人工真值 | P0 | 保持候选状态，训练采用结果只写入训练数据快照 |
 | 多位标注者覆盖彼此结果 | P0 | 检查任务、目标组、标注者和基础标签校验值 |
-| 标注者操作负担过重 | P1 | 第一阶段允许平台操作者运行前后脚本，稳定后再封装启动器 |
+| 标注者操作负担过重 | P1 | 标注者只使用 Mimics 内 **SP Review Console**；准备和收尾由平台后台、管理员批处理或 Console 内部调用 |
 | Windows 与服务器路径不同 | P1 | 清单优先使用相对路径 |
 | 过早扩展训练框架 | P2 | 先完成 nnUNet 小闭环 |
 

@@ -63,7 +63,10 @@ src/segplatform/adapters/mimics/
   finalize.py
 
 adapters/mimics/
+  scripting_library/
+    SP_Review_Console.py
   runtime_py35/
+    sp_review_console.py
     sp_common.py
     sp_diagnostics.py
     sp_open_review.py
@@ -83,7 +86,9 @@ adapters/mimics/
 两类脚本含义不同：
 
 - `probes/sp_probe_suite.py` 是工作站验收入口；单项探针用于失败定位和回归；
-- `runtime_py35/` 是标注者实际使用的稳定脚本，必须兼容 Python 3.5。
+- `scripting_library/SP_Review_Console.py` 是标注者在 Mimics 菜单中看到的唯一入口；
+- `runtime_py35/sp_review_console.py` 是 Console 的内部实现，必须兼容 Python 3.5；
+- `runtime_py35/` 中其他脚本是内部实现或管理员诊断入口，不要求标注者直接运行。
 
 ## 5. 外部现代 Python 要开发什么
 
@@ -181,6 +186,8 @@ Mimics 导出的提交 buffer 不写入 `working/bridge/`，而是写入
 sp mimics open /path/to/case_package --config /path/to/mimics_workstation.yaml --registry /path/to/registry
 ```
 
+这是管理员调试和兼容入口，不作为标注者日常入口。正式标注由 **SP Review Console** 在当前 Mimics 会话中调用内部打开逻辑。
+
 职责：
 
 1. 检查 `mimics_runtime.json`；
@@ -222,7 +229,32 @@ sp mimics finalize /path/to/case_package --config /path/to/mimics_workstation.ya
 
 ## 6. Mimics Python 3.5 要开发什么
 
-### 6.1 `sp_diagnostics.py`
+### 6.1 `sp_review_console.py`
+
+这是标注者在 Mimics 内通过 `scripting_library/SP_Review_Console.py` 调用的主入口，推荐在菜单中显示为 **SP Review Console**。
+
+它负责把平台流程收敛成少量 Mimics 内动作：
+
+- **Open Next Review**：读取本机 JSON 配置，调用外部平台 Python 查询 `sp review next`，必要时后台执行 `sp mimics prepare`，然后在当前 Mimics 会话内调用 `sp_open_review.py`。
+- **Submit Current Review**：调用 `sp_submit_review.py` 导出 Mask 和提交意图。默认不阻塞等待最终 QC；平台 watcher 或管理员批处理独立运行 `sp mimics finalize`。
+- **Save Checkpoint**：调用 `sp_save_checkpoint.py` 保存恢复快照。
+- **Open Next Review** 可在当前项目保存并关闭后继续下一例，但每个 `.mcs` 仍只对应一个 review/case。
+
+本机配置使用 JSON，而不是 YAML，因为 Mimics 21 内 Python 3.5 只应依赖标准库：
+
+```json
+{
+  "platform_python": "C:\\SegmentationPlatform\\.venv\\Scripts\\python.exe",
+  "registry_root": "D:\\platform_registry",
+  "workstation_config": "C:\\SegmentationPlatform\\config\\mimics_workstation.verified.yaml",
+  "assignee": "annotator_01",
+  "auto_finalize": false
+}
+```
+
+`auto_finalize=false` 是阶段 A 推荐默认值。提交后的几何、hash、Registry 写入和标签版本创建属于平台 QC，不是标注者交互流程。确需即时反馈时，可在受控工作站上设为 `true`。
+
+### 6.2 `sp_diagnostics.py`
 
 只做环境探测：
 
@@ -234,7 +266,7 @@ sp mimics finalize /path/to/case_package --config /path/to/mimics_workstation.ya
 
 输出 JSON，不修改病例数据。
 
-### 6.2 `sp_open_review.py`
+### 6.3 `sp_open_review.py`
 
 输入是 `mimics_runtime.json`。
 
@@ -258,7 +290,7 @@ sp mimics finalize /path/to/case_package --config /path/to/mimics_workstation.ya
 3. 刷新本机路径相关 metadata；
 4. 不重新注入或覆盖标注者已经修改的 Mask。
 
-### 6.3 Mask metadata 契约
+### 6.4 Mask metadata 契约
 
 每个由平台管理的 Mask 至少保存：
 
@@ -270,7 +302,7 @@ sp mimics finalize /path/to/case_package --config /path/to/mimics_workstation.ya
 | `sp.organ` | 平台统一器官名 |
 | `sp.base_label_id` | 初始标签版本，可为空 |
 | `sp.base_label_hash` | 初始标签校验值，可为空 |
-| `sp.package_root` | 当前工作站病例包路径，每次通过 launcher 打开时刷新 |
+| `sp.package_root` | 当前工作站病例包路径，每次通过 Console/open 内部脚本打开时刷新 |
 
 正式逻辑不能只依赖 Mask 名称或当前 active image。名称用于人看，metadata 用于机器核对。
 
@@ -280,9 +312,9 @@ Resume 时先比较已有 Mask metadata 与当前 target 的 `base_label_id` 和
 `base_label_sha256`。这里比较的是 Label Artifact bundle 版本，不把逐器官 import buffer
 文件 hash 错当成同一个 hash；任一版本不一致都阻断打开。
 
-### 6.4 `sp_submit_review.py`
+### 6.5 `sp_submit_review.py`
 
-标注者从 `Script -> Scripting Library` 运行 **SP - Submit Review**。
+日常使用时由 **SP Review Console** 调用。管理员调试时可临时运行该脚本；生产工作站不应把整个 `runtime_py35/` 目录暴露给标注者。
 
 脚本先自动检查：
 
@@ -313,7 +345,7 @@ Resume 时先比较已有 Mask metadata 与当前 target 的 `base_label_id` 和
 
 脚本完成后保存 `.mcs`，并提示“已导出，仍需平台检查”。它不直接写 `verified_label`。
 
-### 6.5 `sp_save_checkpoint.py`
+### 6.6 `sp_save_checkpoint.py`
 
 该脚本显式导出当前 review 的全部受管 Mask 为 gzip 压缩 `.u8.gz`，并写入 checkpoint manifest。它用于 `.mcs`
 损坏后的恢复，不创建提交、不改变标签状态。Mimics 21 资料没有证明存在稳定的项目保存事件
@@ -327,22 +359,22 @@ Resume 时先比较已有 Mask metadata 与当前 target 的 `base_label_id` 和
 
 1. 安装并确认 Mimics Research 21.0 和许可；
 2. 在 `File -> Preferences -> Scripting` 配置 Python 3.5.2；
-3. 把部署后的 `runtime_py35/` 设置为 Scripting Library 目录；
-4. 运行 `sp mimics doctor`；
-5. 用 P04/P05 体模确认该工作站的 buffer 和空间映射。
+3. 把部署后的 `adapters/mimics/scripting_library/` 设置为 Scripting Library 目录；
+4. 复制并填写 `config/mimics_review_console.example.json` 到 `adapters/mimics/scripting_library/sp_review_console.local.json`，或用 Windows setup 脚本自动生成；
+5. 运行 `sp mimics doctor`；
+6. 用 P04/P05 体模确认该工作站的 buffer 和空间映射。
 
 标注者不安装 Python 包，也不修改脚本。
 
 ### 7.2 打开新任务
 
-平台操作者或桌面启动器运行：
+标注者只做：
 
-```bash
-sp mimics prepare D:\review_packages\case_001 --config C:\SegmentationPlatform\config\mimics_workstation.yaml
-sp mimics open D:\review_packages\case_001 --config C:\SegmentationPlatform\config\mimics_workstation.yaml --registry D:\platform_registry
-```
+1. 打开 Mimics。
+2. 运行 `Script -> Scripting Library -> SP Review Console`。
+3. 选择 **Open Next Review**。
 
-Mimics 自动打开任务后，标注者只核对：
+Console 在后台查询任务队列、准备病例、打开 `.mcs` 或导入 DICOM。任务打开后，标注者只核对：
 
 - 病例是否正确；
 - 当前需要处理哪些序列；
@@ -355,17 +387,17 @@ Mimics 自动打开任务后，标注者只核对：
 
 - 使用 Mimics 正常编辑工具修改 Mask；
 - 可以任意多次保存 `.mcs`；
-- 长时间工作后可以保存独立 Mask checkpoint；
-- 关闭后继续时，仍通过 `sp mimics open` 打开同一个病例包；
+- 长时间工作后可在 **SP Review Console** 中保存独立 Mask checkpoint；
+- 关闭后继续时，仍打开 Mimics 并通过 **SP Review Console** 进入任务；
 - 保存只保留进度，不产生提交。
 
 ### 7.4 提交
 
-1. 在 Scripting Library 运行 **SP - Submit Review**；
+1. 在 **SP Review Console** 选择 **Submit Current Review**；
 2. 选择完成、复查、阻塞或取消；
 3. 等待脚本提示导出完成；
-4. 平台操作者或启动器运行带工作站配置和 Registry 路径的 `sp mimics finalize`；
-5. QC 通过后，平台更新任务和标签版本。
+4. 平台后台或管理员批处理独立运行 `sp mimics finalize`；
+5. QC 通过后，平台更新任务和标签版本；QC 失败的任务回到可返修队列。
 
 标注者不手工导出 NIfTI，不选择输出文件名，也不维护生命周期状态。
 
@@ -403,7 +435,7 @@ Mimics 自动打开任务后，标注者只核对：
 | 医学上不能确认 | 标注者 | 选择“提交复查” | 保留草稿并创建复查队列 |
 | 工具或数据导致无法工作 | 标注者 | 选择“报告阻塞” | 平台操作者处理后重开 |
 | 导出后几何 QC 失败 | `finalize` | 查看 `review_report.json`；下次打开显示摘要 | 禁止创建 verified 标签 |
-| `.mcs` 损坏 | `open` | 保留旧文件并提示重建 | 从匹配当前版本的 checkpoint 恢复 |
+| `.mcs` 损坏 | Console/open 内部脚本 | 保留旧文件并提示重建 | 从匹配当前版本的 checkpoint 恢复 |
 
 用户提示只显示任务相关信息。完整堆栈、API 参数和文件路径写入 `reports/`，不直接展示给标注者。
 
@@ -433,8 +465,8 @@ Mimics 自动打开任务后，标注者只核对：
 | 1 | 工作站诊断 | `doctor.py`、`sp_diagnostics.py`、环境报告 | 1-2 人日 |
 | 2 | 能力探针 | P01/P02/P04/P05/P06 脚本和证据 | 3-5 人日 |
 | 3 | 标签桥接 | `bridge.py`、buffer manifest、往返测试 | 3-5 人日 |
-| 4 | 打开任务 | `prepare.py`、`launcher.py`、`sp_open_review.py` | 3-5 人日 |
-| 5 | 保存与提交 | metadata 契约、`sp_submit_review.py` | 2-4 人日 |
+| 4 | 打开任务 | `prepare.py`、`launcher.py`、`sp_review_console.py`、`sp_open_review.py` | 3-5 人日 |
+| 5 | 保存与提交 | metadata 契约、`sp_submit_review.py`、`sp_save_checkpoint.py` | 2-4 人日 |
 | 6 | 收尾与 QC | `finalize.py`、提交报告和失败恢复 | 2-4 人日 |
 | 7 | 真实病例验收 | 3 至 5 例、继续任务、返修和双标注者 | 2-4 人日 |
 

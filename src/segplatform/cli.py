@@ -16,6 +16,7 @@ from segplatform.common import load_data
 from segplatform.errors import SegPlatformError
 from segplatform.ingest import build_case_package_requests, scan_source
 from segplatform.registry import FileRegistry
+from segplatform.reviews import mark_review_started, next_review
 from segplatform.snapshots import create_snapshot, validate_snapshot
 
 
@@ -113,6 +114,15 @@ def build_parser() -> argparse.ArgumentParser:
     review_status = review_sub.add_parser("status")
     review_status.add_argument("--registry", type=Path, required=True)
     review_status.add_argument("--review-id")
+    review_next = review_sub.add_parser("next")
+    review_next.add_argument("--registry", type=Path, required=True)
+    review_next.add_argument("--assignee")
+    review_next.add_argument("--include-status", action="append")
+    review_next.add_argument("--exclude-review-id")
+    review_start = review_sub.add_parser("start")
+    review_start.add_argument("--registry", type=Path, required=True)
+    review_start.add_argument("--review-id", required=True)
+    review_start.add_argument("--actor")
 
     registry = subparsers.add_parser("registry", help="Validate registry records")
     registry_sub = registry.add_subparsers(dest="action", required=True)
@@ -227,6 +237,18 @@ def run(args: argparse.Namespace) -> int:
             print_json(registry.get("reviews", args.review_id))
         else:
             print_json(registry.list("reviews"))
+    elif args.domain == "review" and args.action == "next":
+        statuses = set(args.include_status or []) or None
+        print_json(
+            next_review(
+                args.registry,
+                assignee=args.assignee,
+                include_statuses=statuses,
+                exclude_review_id=args.exclude_review_id,
+            )
+        )
+    elif args.domain == "review" and args.action == "start":
+        print_json(mark_review_started(args.registry, args.review_id, actor=args.actor))
     elif args.domain == "registry" and args.action == "validate":
         validate_registry_record(args.record, args.schema)
         print_json({"status": "passed", "record": str(args.record)})

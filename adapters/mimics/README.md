@@ -18,7 +18,10 @@ src/segplatform/adapters/mimics/
   finalize.py
 
 adapters/mimics/
+  scripting_library/
+    SP_Review_Console.py
   runtime_py35/
+    sp_review_console.py
     sp_common.py
     sp_diagnostics.py
     sp_open_review.py
@@ -40,19 +43,22 @@ adapters/mimics/
 | 位置 | 运行环境 | 职责 |
 | --- | --- | --- |
 | `src/segplatform/adapters/mimics/` | 外部现代 Python | 病例包检查、医学格式读写、启动 Mimics、空间 QC、提交入库 |
-| `adapters/mimics/runtime_py35/` | Mimics Python 3.5.2 | 调用 Mimics API、管理 image set 和 Mask、保存 `.mcs`、导出提交缓冲区 |
+| `adapters/mimics/scripting_library/` | Mimics Scripting Library | 标注者日常可见入口，只放 `SP_Review_Console.py` |
+| `adapters/mimics/runtime_py35/` | Mimics Python 3.5.2 | 内部实现脚本，调用 Mimics API、管理 image set 和 Mask、保存 `.mcs`、导出提交缓冲区 |
 | `adapters/mimics/probes/` | Mimics Python 3.5.2 | 单次会话验证 API、图像绑定、轴顺序、空间往返和选择性导出 |
 
 Mimics 内脚本不实现 Registry、标签生命周期、训练准入或医学格式长期存储。保存 `.mcs` 也不等于提交或验证标签。
 
 ## 当前可用代码
 
-1. `runtime_py35/sp_diagnostics.py`：工作站 API 诊断。
-2. `runtime_py35/sp_open_review.py`：导入或恢复任务、匹配 image set、创建 Mask 和保存 `.mcs`。
-3. `runtime_py35/sp_save_checkpoint.py`：保存不依赖 `.mcs` 内部结构的 Mask 恢复快照。
-4. `runtime_py35/sp_submit_review.py`：组合选择目标组、提交前预检、批量处理空 Mask。
-5. `probes/`：执行 P01、P02、P04、P05、P06。
-6. `src/segplatform/adapters/mimics/`：外部 `doctor/probe/prepare/open/finalize` 和 buffer bridge。
+1. `scripting_library/SP_Review_Console.py`：Mimics 菜单中给标注者使用的唯一入口。
+2. `runtime_py35/sp_review_console.py`：任务领取、保存 checkpoint、提交和可选 finalize 的内部控制台。
+3. `runtime_py35/sp_diagnostics.py`：工作站 API 诊断。
+4. `runtime_py35/sp_open_review.py`：导入或恢复任务、匹配 image set、创建 Mask 和保存 `.mcs`。
+5. `runtime_py35/sp_save_checkpoint.py`：保存不依赖 `.mcs` 内部结构的 Mask 恢复快照。
+6. `runtime_py35/sp_submit_review.py`：组合选择目标组、提交前预检、批量处理空 Mask。
+7. `probes/`：执行 P01、P02、P04、P05、P06。
+8. `src/segplatform/adapters/mimics/`：外部 `doctor/probe/prepare/open/finalize` 和 buffer bridge。
 
 代码存在不代表 Mimics 已通过准入。`sp mimics probe-run` 在一个 Mimics 会话内收集 P01/P02/P04/P05/P06，`sp mimics probe-evaluate` 自动比较 DICOM LPS 几何并生成工作站 verified 配置。初始 Mask 注入和提交回收要求 `buffer_mapping.status=verified`。
 
@@ -70,15 +76,18 @@ Mimics 内脚本不实现 Registry、标签生命周期、训练准入或医学�
 
 ## 标注者入口
 
-稳定后的预期入口是：
+日常入口是 Mimics 内的 `Script -> Scripting Library -> SP Review Console`。管理员把
+`adapters/mimics/scripting_library/` 配置为 Scripting Library 目录，并把
+`config/mimics_review_console.example.json` 复制为
+`adapters/mimics/scripting_library/sp_review_console.local.json`。
 
-```bash
-sp mimics prepare /path/to/case_package --config /path/to/mimics_workstation.yaml
-sp mimics open /path/to/case_package --config /path/to/mimics_workstation.yaml --registry /path/to/registry
-sp mimics finalize /path/to/case_package --config /path/to/mimics_workstation.yaml --registry /path/to/registry
-```
+标注者只做三件事：
 
-标注者只需通过启动器打开任务、在 Mimics 中编辑和保存，并从 `Script -> Scripting Library` 运行 **SP - Submit Review**。路径、文件名、标签编号、格式转换和最终 QC 由平台处理。
+1. 打开 Mimics。
+2. 运行 **SP Review Console**，选择 **Open Next Review**。
+3. 编辑 Mask，并在同一 Console 中选择 **Save Checkpoint** 或 **Submit Current Review**。
+
+`prepare`、`open`、`finalize` 仍保留为平台/管理员命令，用于批量准备、调试和后台收尾，不作为标注者日常步骤。路径、文件名、标签编号、格式转换、Registry 写入和最终 QC 由平台处理。
 
 ## 不属于本目录
 

@@ -6,28 +6,26 @@
 
 ## 第一次使用
 
-工作站管理员负责安装 Mimics、配置 Scripting Library、平台启动器和工作目录，并运行环境诊断。标注者不安装 Python 包，也不修改脚本路径。
+工作站管理员负责安装 Mimics、把平台提供的 `scripting_library/` 配置为 Scripting Library、填写本机 Console 配置并运行环境诊断。标注者不安装 Python 包，也不修改脚本路径。
 
-## 打开任务
+管理员会提前完成数据导入、病例包创建、任务分配、工作站配置和队列配置。提交后的平台 QC、标签版本登记和失败任务回流也由平台处理，不要求标注者运行命令。
 
-1. 从平台任务入口或由平台操作者启动任务。
-2. 不直接双击历史 `.mcs`；继续任务也通过同一入口打开。
-3. 在 Mimics 显示的任务摘要中核对病例、图像序列和目标器官。
-4. 若病例、序列、方向或初始 Mask 明显不符，选择报告阻塞，不继续编辑。
+## 打开和切换任务
 
-阶段 A 尚未封装界面时，平台操作者运行：
+1. 打开 Mimics。
+2. 进入 `Script -> Scripting Library -> SP Review Console`。
+3. 选择 **Open Next Review**。
+4. 在 Mimics 显示的任务摘要中核对病例、图像序列和目标器官。
+5. 若病例、序列、方向或初始 Mask 明显不符，在 **SP Review Console** 中选择提交/阻塞相关操作，不继续编辑。
 
-```bash
-sp mimics prepare /path/to/case_package --config /path/to/mimics_workstation.yaml
-sp mimics open /path/to/case_package --config /path/to/mimics_workstation.yaml --registry /path/to/registry
-```
+不要直接双击历史 `.mcs`。继续任务、返修任务和下一例都从 **SP Review Console** 进入。
 
 ## 标注和保存
 
 - 使用 Mimics 正常工具编辑平台创建的 Mask。
 - 可以随时保存 `.mcs` 并关闭软件。
 - 保存只保留进度，不会提交，也不会创建 verified 标签。
-- 长时间工作或完成一个阶段后，可运行 **SP - Save Checkpoint**，额外保存全部 Mask 的恢复快照。
+- 长时间工作或完成一个阶段后，可在 **SP Review Console** 中选择 **Save Checkpoint**，额外保存全部 Mask 的恢复快照。
 - 不自行改变平台 Mask 的器官名称或删除其任务 metadata。
 - 不手工复制 header、重采样、改标签编号或导出 NIfTI。
 
@@ -35,8 +33,8 @@ sp mimics open /path/to/case_package --config /path/to/mimics_workstation.yaml -
 
 完成本次工作时：
 
-1. 打开 `Script -> Scripting Library`。
-2. 运行 **SP - Submit Review**。
+1. 打开 `Script -> Scripting Library -> SP Review Console`。
+2. 选择 **Submit Current Review**。
 3. 选择一个结果和本次要提交的目标组。2–5 个目标组时可以逐个勾选后一次提交任意组合。
 
 | 选择 | 何时使用 |
@@ -46,7 +44,7 @@ sp mimics open /path/to/case_package --config /path/to/mimics_workstation.yaml -
 | 报告阻塞 | 数据、方向、Mask 绑定或工具错误导致无法继续 |
 | 取消 | 返回 Mimics，不生成提交 |
 
-脚本只导出本次任务管理的 Mask，并提示“已导出，仍需平台检查”。平台随后运行格式转换和空间 QC；只有检查通过的“提交完成”才会生成新的人工确认标签版本。
+脚本只导出本次任务管理的 Mask，并提示“已导出，仍需平台检查”。平台随后独立运行格式转换和空间 QC；只有检查通过的“提交完成”才会生成新的人工确认标签版本。
 
 提交前脚本会聚合检查 Mask 是否齐全、是否绑定正确图像、基础标签版本和 shape。多个空 Mask 会先在一个清单中显示，可以统一选择“全部确认不存在”“全部待复查”，也可以逐项判断。
 
@@ -54,9 +52,9 @@ sp mimics open /path/to/case_package --config /path/to/mimics_workstation.yaml -
 
 ## 继续和返修
 
-- 未提交任务：再次从平台入口打开同一个病例包，继续编辑已有 `.mcs`。
+- 未提交任务：再次从 **SP Review Console** 打开任务，继续编辑已有 `.mcs`。
 - 提交前检查失败：弹窗列出主要问题，完整内容见 `reports/mimics_submit_precheck.json`。
-- 平台 QC 失败：查看 `reports/review_report.json`；下次打开任务时也会显示最近的失败摘要。
+- 平台 QC 失败：下次从 **SP Review Console** 打开任务时会显示最近的失败摘要；完整内容见 `reports/review_report.json`。
 - `.mcs` 损坏：不要删除病例包。管理员保留旧文件并从最近的 checkpoint 重建工作区。
 - 已验证标签再修改：平台创建新的 `review_id`，旧标签作为基础版本；新结果形成新版本，不覆盖旧版本。
 - 多位标注者：每个人使用独立任务和 `.mcs`，不要多人共享写同一项目文件。

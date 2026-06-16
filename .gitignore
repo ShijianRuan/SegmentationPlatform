@@ -5,6 +5,7 @@ __pycache__/
 *.egg-info/
 config/mimics_workstation.local.yaml
 config/mimics_workstation.verified.yaml
+adapters/mimics/scripting_library/sp_review_console.local.json
 outputs/
 hatch-pet-runs/
 pipelines/nnunet/gpu*.sh
