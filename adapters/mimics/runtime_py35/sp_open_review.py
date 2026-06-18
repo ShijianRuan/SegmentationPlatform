@@ -172,10 +172,18 @@ def main():
         "status": "passed_with_warnings" if warnings else "passed",
     }
     write_json(os.path.join(reports_dir, "mimics_open_report.json"), report)
+    qc_summary = previous_qc_summary(runtime)
+    if runtime["mode"] == "resume":
+        # 续标同一 review：标注者已知任务范围，跳过流程性摘要以减少连续标注的确认摩擦。
+        # 仅在上次平台 QC 失败时提示（那是需要标注者注意的错误，不是流程确认）。
+        # 注意：未来若 prepare 阶段后台预导入 .mcs，resume 也可能是标注者首次见到该病例，
+        # 届时不能仅靠 .mcs 是否存在判断，需用 review 状态或显式 seen 标志区分首次核对。
+        if qc_summary:
+            mimics.dialogs.message_box(qc_summary, title="SegmentationPlatform Review", ui_blocking=True)
+        return 0
     summary = "Review: {0}\nCase: {1}\nTargets: {2}\nMasks: {3}".format(
         runtime["review_id"], runtime["case_id"], len(runtime["targets"]), len(mask_records)
     )
-    qc_summary = previous_qc_summary(runtime)
     if qc_summary:
         summary = summary + "\n\n" + qc_summary
     mimics.dialogs.message_box(summary, title="SegmentationPlatform Review", ui_blocking=True)

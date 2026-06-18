@@ -85,7 +85,7 @@ Mimics 内脚本不实现 Registry、标签生命周期、训练准入或医学�
 
 1. 打开 Mimics。
 2. 运行 **SP Review Console**，选择 **Open Next Review**。
-3. 编辑 Mask，并在同一 Console 中选择 **Save Checkpoint** 或 **Submit Current Review**。
+3. 编辑 Mask，并在同一 Console 中选择 **Show Summary**、**Save Checkpoint** 或 **Submit Current Review**。
 
 `prepare`、`open`、`finalize` 仍保留为平台/管理员命令，用于批量准备、调试和后台收尾，不作为标注者日常步骤。路径、文件名、标签编号、格式转换、Registry 写入和最终 QC 由平台处理。
 

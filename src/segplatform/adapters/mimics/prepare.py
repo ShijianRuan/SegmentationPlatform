@@ -49,6 +49,7 @@ def _load_checkpoint_buffers(
         (target["target_id"], target["image_id"], organ)
         for target in review["targets"]
         for organ in target["organs"]
+        if organ not in target.get("known_absent", [])
     }
     checkpoint_bases = checkpoint.get("base_labels", {})
     for target_id, target in targets.items():
@@ -161,6 +162,7 @@ def prepare_case(
                         "name": _runtime_mask_name(target["target_id"], organ),
                     }
                     for organ in target["organs"]
+                    if organ not in target.get("known_absent", [])
                 ],
             }
             for target in manifest["review"]["targets"]

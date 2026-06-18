@@ -75,6 +75,8 @@
 
 文件名不能自动当作患者身份。患者、检查和序列关系来自数据集清单、路径映射或显式导入参数；无法获得时使用平台生成标识，并如实降低防泄漏分组可信度。
 
+阶段 A 的 `sp ingest scan` 已能发现三维 NIfTI 文件。默认启发式是：同一父目录下的文件归为同一个 Case；根目录下的顶层文件各自成为独立 Case。这个规则只适合基础整理后的文件型数据集，不能替代数据集级清单。若一个目录层级同时混有图像、标签和多时间点，必须改写生成的请求文件，或后续使用显式 `dataset_description.yaml` 导入器。
+
 ### 3.3 MetaImage
 
 `.mha` 是单文件，可按文件计算校验值。
@@ -87,6 +89,8 @@
 - 校验值覆盖头文件、数据文件和稳定的相对路径清单。
 
 只复制 `.mhd` 而漏掉 `.raw` 的记录必须判定为不可读取。
+
+阶段 A 的 `sp ingest scan` 会发现 `.mha/.mhd`。`.mhd` 的伴随数据文件参与文件组 hash；单独出现的 `.raw` 不会被猜测解析，除非未来提供明确 sidecar。
 
 ### 3.4 纯 RAW
 
@@ -240,6 +244,8 @@ sp registry rebuild-index registry/
 ```
 
 `scan` 只发现和报告，不写正式记录。`build-requests` 根据人工确认或规则化参数生成可审阅的 Case Package 请求；`package create-many` 才创建 Case Package 和 Registry 记录。这样可以避免批量扫描时错误分组直接污染登记册。
+
+当前扫描覆盖 DICOM Series、三维 NIfTI、MetaImage。DICOM 按元数据分组；NIfTI 和 MetaImage 按文件发现，并使用路径启发式生成低可信度防泄漏分组。扫描报告中的 `status=importable` 只说明平台能读取和登记，不等于所有标注工具都能直接打开。以 Mimics 21 为标注工具时，第一次打开仍要求 DICOM 或已准备好的 `.mcs`；NIfTI/MHD 需要先转换成 Mimics 可接受的表示，或改用支持这些格式的标注工具。
 
 导入器至少要产出：
 

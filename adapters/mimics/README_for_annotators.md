@@ -25,6 +25,7 @@
 - 使用 Mimics 正常工具编辑平台创建的 Mask。
 - 可以随时保存 `.mcs` 并关闭软件。
 - 保存只保留进度，不会提交，也不会创建 verified 标签。
+- 忘记当前病例、序列或目标器官时，在 **SP Review Console** 中选择 **Show Summary**。
 - 长时间工作或完成一个阶段后，可在 **SP Review Console** 中选择 **Save Checkpoint**，额外保存全部 Mask 的恢复快照。
 - 不自行改变平台 Mask 的器官名称或删除其任务 metadata。
 - 不手工复制 header、重采样、改标签编号或导出 NIfTI。

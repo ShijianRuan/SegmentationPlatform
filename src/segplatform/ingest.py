@@ -9,7 +9,7 @@ import pydicom
 
 from segplatform.common import load_data, utc_now, write_json, write_yaml
 from segplatform.errors import ValidationError
-from segplatform.imaging import inspect_dicom_files
+from segplatform.imaging import infer_format, inspect_dicom_files, inspect_image
 from segplatform.vocabulary import AnatomyVocabulary
 
 
@@ -25,8 +25,63 @@ def _relative(path: Path, root: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
 
 
+def _case_seed_for_file(relative_path: str) -> str:
+    relative = Path(relative_path)
+    if str(relative.parent) in ("", "."):
+        return relative.as_posix()
+    return relative.parent.as_posix()
+
+
+def _file_image_record(path: Path, source_root: Path, format_name: str) -> dict[str, Any]:
+    relative = _relative(path, source_root)
+    case_seed = _case_seed_for_file(relative)
+    case_id = "case_" + _short_hash(case_seed)
+    study_id = "study_" + _short_hash(case_seed)
+    image_id = "img_" + _short_hash(relative)
+    record: dict[str, Any] = {
+        "case_id": case_id,
+        "study_id": study_id,
+        "image_id": image_id,
+        "format": format_name,
+        "modality": "UNKNOWN",
+        "source_root": str(source_root),
+        "source_path": str(path),
+        "source_relative_path": relative,
+        "file_count": 1,
+        "leakage_group_id": "source_path_" + _short_hash(case_seed),
+        "leakage_group_basis": "source_path_group",
+        "leakage_group_confidence": "low",
+    }
+    try:
+        geometry, details = inspect_image(path, format_name)
+        record.update(
+            {
+                "status": "importable",
+                "sha256": details["hash"],
+                "hash_scope": details["hash_scope"],
+                "shape": list(geometry.shape),
+                "spacing": list(geometry.spacing),
+                "origin": list(geometry.origin),
+                "direction": list(geometry.direction),
+                "coordinate_system": geometry.coordinate_system,
+                "pixel_type": geometry.pixel_type,
+            }
+        )
+        if details.get("companion_paths"):
+            record["companion_paths"] = details["companion_paths"]
+    except Exception as error:
+        record.update({"status": "blocked", "reason": str(error)})
+    return record
+
+
 def scan_source(source_root: Path) -> dict[str, Any]:
-    """Discover importable DICOM series without creating registry records."""
+    """Discover importable image sets without creating registry records.
+
+    DICOM is grouped by StudyInstanceUID and SeriesInstanceUID. File-based
+    images are grouped by their parent directory as a conservative default.
+    Complex dataset-specific layouts should still use an explicit package
+    request or a future dataset-description importer.
+    """
 
     source_root = source_root.expanduser().resolve()
     if not source_root.is_dir():
@@ -34,7 +89,15 @@ def scan_source(source_root: Path) -> dict[str, Any]:
 
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
     skipped: list[dict[str, Any]] = []
+    file_image_records = []
     for path in sorted(item for item in source_root.rglob("*") if item.is_file()):
+        format_name = infer_format(path)
+        if format_name in {"nifti", "metaimage"}:
+            file_image_records.append(_file_image_record(path, source_root, format_name))
+            continue
+        if format_name == "raw_binary":
+            skipped.append({"path": _relative(path, source_root), "reason": "raw_binary_requires_sidecar"})
+            continue
         try:
             dataset = pydicom.dcmread(str(path), stop_before_pixels=True, force=False)
         except Exception:
@@ -133,6 +196,21 @@ def scan_source(source_root: Path) -> dict[str, Any]:
         )
         case_group["image_ids"].append(image_id)
 
+    for record in sorted(file_image_records, key=lambda item: item["image_id"]):
+        series_records.append(record)
+        case_group = case_groups.setdefault(
+            record["case_id"],
+            {
+                "case_id": record["case_id"],
+                "study_id": record["study_id"],
+                "leakage_group_id": record["leakage_group_id"],
+                "leakage_group_basis": record["leakage_group_basis"],
+                "leakage_group_confidence": record["leakage_group_confidence"],
+                "image_ids": [],
+            },
+        )
+        case_group["image_ids"].append(record["image_id"])
+
     cases = []
     for case in sorted(case_groups.values(), key=lambda item: item["case_id"]):
         case["image_ids"] = sorted(case["image_ids"])
@@ -149,6 +227,7 @@ def scan_source(source_root: Path) -> dict[str, Any]:
             "case_count": len(cases),
             "series_count": len(series_records),
             "importable_series_count": sum(1 for item in series_records if item["status"] == "importable"),
+            "file_image_count": len(file_image_records),
             "skipped_file_count": len(skipped),
         },
     }
@@ -184,6 +263,25 @@ def build_case_package_requests(
         series_items = sorted(series_by_case.get(case_id, []), key=lambda item: item["image_id"])
         if not series_items:
             continue
+        image_sets = []
+        for series in series_items:
+            image_set = {
+                "image_id": series["image_id"],
+                "modality": series["modality"],
+                "format": series["format"],
+                "source": series["source_root"] if series["format"] == "dicom_series" else series["source_path"],
+                "source_type": source_type,
+                "import_batch": import_batch,
+                "source_layout": {
+                    "study": series.get("study_instance_uid_sha256", series["study_id"]),
+                    "series": series.get("series_uid_sha256", series.get("source_relative_path", series["image_id"])),
+                },
+                "allowed_dicom_tags": [],
+            }
+            if series["format"] == "dicom_series":
+                image_set["source_files"] = series["source_files"]
+            image_sets.append(image_set)
+
         request = {
             "schema_version": "case_package_request.v1",
             "package_id": "pkg_" + case_id,
@@ -199,23 +297,7 @@ def build_case_package_requests(
                 "profile_version": governance_profile_version,
                 "direct_identifiers_allowed": False,
             },
-            "image_sets": [
-                {
-                    "image_id": series["image_id"],
-                    "modality": series["modality"],
-                    "format": "dicom_series",
-                    "source": series["source_root"],
-                    "source_files": series["source_files"],
-                    "source_type": source_type,
-                    "import_batch": import_batch,
-                    "source_layout": {
-                        "study": series["study_instance_uid_sha256"],
-                        "series": series["series_uid_sha256"],
-                    },
-                    "allowed_dicom_tags": [],
-                }
-                for series in series_items
-            ],
+            "image_sets": image_sets,
             "review": {
                 "review_id": "review_" + case_id + "_v1",
                 "tool": tool,

@@ -84,3 +84,27 @@ def mark_review_started(
     )
     registry.put("reviews", record, allow_update=True)
     return {"status": "started", "review_id": review_id}
+
+
+def review_stats(registry_root: Path) -> dict[str, Any]:
+    registry = FileRegistry(registry_root)
+    by_status: dict[str, int] = {}
+    by_assignee: dict[str, dict[str, int]] = {}
+    submitted_pending = 0
+    total = 0
+    for record in registry.list("reviews"):
+        total += 1
+        status = str(record.get("status", "unknown"))
+        assignee = str(record.get("assignee") or "unassigned")
+        by_status[status] = by_status.get(status, 0) + 1
+        assignee_counts = by_assignee.setdefault(assignee, {})
+        assignee_counts[status] = assignee_counts.get(status, 0) + 1
+        if _submission_blocks_next(record):
+            submitted_pending += 1
+    return {
+        "status": "ok",
+        "total_reviews": total,
+        "by_status": dict(sorted(by_status.items())),
+        "by_assignee": {key: dict(sorted(value.items())) for key, value in sorted(by_assignee.items())},
+        "submitted_pending_or_completed": submitted_pending,
+    }

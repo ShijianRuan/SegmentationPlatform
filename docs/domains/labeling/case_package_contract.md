@@ -173,7 +173,7 @@ dataset_package/
 6. `base_label_id` 和 `base_label_sha256` 要么同时存在，要么同时省略。
 7. `assignee` 第一阶段可选，多人工作时建议设置。
 8. 不同目标组的标签分别绑定自己的图像空间，不能假设多个序列已配准。
-9. `target_id` 是最小提交单位；组内器官一起完成或一起进入复查。
+9. `target_id` 是最小提交单位；组内器官一起完成或一起进入复查。target 可选 `known_absent`（`organs` 的子集）声明该病例已知缺失的器官：这些器官不建 Mask、不导出、不参与 QC，也不计入"组内全部器官"的完成检查。
 10. `data_governance.deidentification_status` 必须是 `verified`。
 11. `leakage_group_id` 和 `study_id` 对所有来源必填。
 12. `patient_id_hash` 和 `study_instance_uid_hash` 只在来源可靠且已按治理规则伪名化时记录。
@@ -318,7 +318,7 @@ provenance/tool_export.json
 submissions/{review_id}/labels/{image_id}/{organ}.nii.gz
 ```
 
-提交清单必须声明本次提交的 `target_ids`。被声明为完成的目标组必须包含该组全部器官。不同目标组可以分次提交。
+提交清单必须声明本次提交的 `target_ids`。被声明为完成的目标组必须包含该组全部器官（`known_absent` 声明的器官除外，它们不导出也不计入完成检查）。不同目标组可以分次提交。
 
 单个 Mask 导出只用于调试，或目标组本身只有一个器官。
 

@@ -16,7 +16,7 @@ from segplatform.common import load_data
 from segplatform.errors import SegPlatformError
 from segplatform.ingest import build_case_package_requests, scan_source
 from segplatform.registry import FileRegistry
-from segplatform.reviews import mark_review_started, next_review
+from segplatform.reviews import mark_review_started, next_review, review_stats
 from segplatform.snapshots import create_snapshot, validate_snapshot
 
 
@@ -38,6 +38,13 @@ def _request_files(root: Path) -> list[Path]:
         for path in root.glob(pattern)
         if path.name != "request_batch_summary.json"
     )
+
+
+def _case_roots(root: Path) -> list[Path]:
+    root = root.resolve()
+    if (root / "manifest.json").is_file():
+        return [root]
+    return sorted(path.parent for path in root.rglob("manifest.json"))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
     mimics_prepare.add_argument("case_root", type=Path)
     mimics_prepare.add_argument("--config", type=Path, required=True)
     mimics_prepare.add_argument("--rebuild-workspace", action="store_true")
+    mimics_prepare_many = mimics_sub.add_parser("prepare-many")
+    mimics_prepare_many.add_argument("cases_root", type=Path)
+    mimics_prepare_many.add_argument("--config", type=Path, required=True)
+    mimics_prepare_many.add_argument("--rebuild-workspace", action="store_true")
+    mimics_prepare_many.add_argument("--continue-on-error", action="store_true")
     mimics_open = mimics_sub.add_parser("open")
     mimics_open.add_argument("case_root", type=Path)
     mimics_open.add_argument("--config", type=Path, required=True)
@@ -96,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
     mimics_finalize.add_argument("case_root", type=Path)
     mimics_finalize.add_argument("--config", type=Path, required=True)
     mimics_finalize.add_argument("--registry", type=Path, required=True)
+    mimics_finalize_many = mimics_sub.add_parser("finalize-many")
+    mimics_finalize_many.add_argument("cases_root", type=Path)
+    mimics_finalize_many.add_argument("--config", type=Path, required=True)
+    mimics_finalize_many.add_argument("--registry", type=Path, required=True)
+    mimics_finalize_many.add_argument("--continue-on-error", action="store_true")
     mimics_probe_run = mimics_sub.add_parser("probe-run")
     mimics_probe_run.add_argument("case_root", type=Path)
     mimics_probe_run.add_argument("--config", type=Path, required=True)
@@ -114,6 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
     review_status = review_sub.add_parser("status")
     review_status.add_argument("--registry", type=Path, required=True)
     review_status.add_argument("--review-id")
+    review_stats_parser = review_sub.add_parser("stats")
+    review_stats_parser.add_argument("--registry", type=Path, required=True)
     review_next = review_sub.add_parser("next")
     review_next.add_argument("--registry", type=Path, required=True)
     review_next.add_argument("--assignee")
@@ -198,6 +217,23 @@ def run(args: argparse.Namespace) -> int:
     elif args.domain == "mimics" and args.action == "prepare":
         path = prepare_case(args.case_root, args.config, rebuild_workspace=args.rebuild_workspace)
         print_json({"status": "prepared", "runtime_manifest": str(path)})
+    elif args.domain == "mimics" and args.action == "prepare-many":
+        results = []
+        had_error = False
+        for case_root in _case_roots(args.cases_root):
+            try:
+                runtime_path = prepare_case(case_root, args.config, rebuild_workspace=args.rebuild_workspace)
+                results.append(
+                    {"case_root": str(case_root), "status": "prepared", "runtime_manifest": str(runtime_path)}
+                )
+            except Exception as error:
+                had_error = True
+                results.append({"case_root": str(case_root), "status": "failed", "error": str(error)})
+                if not args.continue_on_error:
+                    break
+        print_json({"status": "failed" if had_error else "prepared", "results": results})
+        if had_error:
+            return 2
     elif args.domain == "mimics" and args.action == "open":
         print_json(
             open_case(
@@ -210,6 +246,27 @@ def run(args: argparse.Namespace) -> int:
         )
     elif args.domain == "mimics" and args.action == "finalize":
         print_json(finalize_case(args.case_root, args.config, args.registry))
+    elif args.domain == "mimics" and args.action == "finalize-many":
+        results = []
+        had_error = False
+        for case_root in _case_roots(args.cases_root):
+            try:
+                manifest = load_data(case_root / "manifest.json")
+                review_id = manifest["review"]["review_id"]
+                submission = case_root / "submissions" / review_id / "submission_manifest.json"
+                if not submission.is_file():
+                    results.append({"case_root": str(case_root), "status": "skipped", "reason": "no_submission"})
+                    continue
+                result = finalize_case(case_root, args.config, args.registry)
+                results.append({"case_root": str(case_root), **result})
+            except Exception as error:
+                had_error = True
+                results.append({"case_root": str(case_root), "status": "failed", "error": str(error)})
+                if not args.continue_on_error:
+                    break
+        print_json({"status": "failed" if had_error else "finalized", "results": results})
+        if had_error:
+            return 2
     elif args.domain == "mimics" and args.action == "probe-run":
         result = run_probe(
             args.case_root,
@@ -237,6 +294,8 @@ def run(args: argparse.Namespace) -> int:
             print_json(registry.get("reviews", args.review_id))
         else:
             print_json(registry.list("reviews"))
+    elif args.domain == "review" and args.action == "stats":
+        print_json(review_stats(args.registry))
     elif args.domain == "review" and args.action == "next":
         statuses = set(args.include_status or []) or None
         print_json(
