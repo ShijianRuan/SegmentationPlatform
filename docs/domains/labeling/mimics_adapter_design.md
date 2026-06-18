@@ -238,6 +238,7 @@ sp mimics finalize /path/to/case_package --config /path/to/mimics_workstation.ya
 - **Open Next Review**：读取本机 JSON 配置，调用外部平台 Python 查询 `sp review next`，必要时后台执行 `sp mimics prepare`，然后在当前 Mimics 会话内调用 `sp_open_review.py`。
 - **Submit Current Review**：调用 `sp_submit_review.py` 导出 Mask 和提交意图。默认不阻塞等待最终 QC；平台 watcher 或管理员批处理独立运行 `sp mimics finalize`。
 - **Save Checkpoint**：调用 `sp_save_checkpoint.py` 保存恢复快照。
+- **Show Summary**：重新显示当前 review、case、image set 和目标器官，替代常驻弹窗。
 - **Open Next Review** 可在当前项目保存并关闭后继续下一例，但每个 `.mcs` 仍只对应一个 review/case。
 
 本机配置使用 JSON，而不是 YAML，因为 Mimics 21 内 Python 3.5 只应依赖标准库：
@@ -382,6 +383,8 @@ Console 在后台查询任务队列、准备病例、打开 `.mcs` 或导入 DIC
 - 初始 Mask 是否大致位于正确位置。
 
 如果不一致，直接报告阻塞，不自行换序列或复制 header。
+
+任务摘要不是常驻窗口。标注中途忘记目标范围时，重新运行 **SP Review Console** 并选择 **Show Summary**。
 
 ### 7.3 标注和保存
 

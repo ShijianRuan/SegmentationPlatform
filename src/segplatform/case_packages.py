@@ -260,11 +260,23 @@ def create_case_package(
         target_id = canonical_id(str(target["target_id"]), "target_id")
         image_id = canonical_id(str(target["image_id"]), "image_id")
         organs = vocabulary.require_all([str(item) for item in target["organs"]])
+        known_absent = (
+            vocabulary.require_all([str(item) for item in target["known_absent"]])
+            if target.get("known_absent")
+            else []
+        )
+        unknown_absent = set(known_absent) - set(organs)
+        if unknown_absent:
+            raise ValidationError(
+                f"target {target_id}: known_absent must be a subset of organs; unknown: {sorted(unknown_absent)}"
+            )
         target_record = {
             "target_id": target_id,
             "image_id": image_id,
             "organs": organs,
         }
+        if known_absent:
+            target_record["known_absent"] = known_absent
         if target.get("base_label_id") is not None or target.get("base_label_sha256") is not None:
             if not target.get("base_label_id") or not target.get("base_label_sha256"):
                 raise ValidationError(f"target {target_id}: base_label_id and base_label_sha256 must appear together")
@@ -390,7 +402,8 @@ def create_case_package(
         group["organs"].add(initial["organ"])
     for target in target_records:
         group = initial_groups.get(target["image_id"])
-        if not target.get("base_label_id") and group and set(target["organs"]).issubset(group["organs"]):
+        expected_organs = set(target["organs"]) - set(target.get("known_absent", []))
+        if not target.get("base_label_id") and group and expected_organs.issubset(group["organs"]):
             target["base_label_id"] = group["label_id"]
             target["base_label_sha256"] = group["label_bundle_sha256"]
     data_governance = dict(request["data_governance"])

@@ -19,6 +19,8 @@
 
 [架构决策记录](architecture/architecture_decisions.md)解释重要选择的理由，不要求首次通读。[多角色设计审查](architecture/platform_quality_review.md)记录发现过的问题和整改依据，也不属于首次阅读主线。
 
+围绕具体对话产生的问题处理记录放在 `conversations/`。这些文档用于追踪疑问如何被解释、实现或延后；若与架构主文档冲突，仍以 `architecture/` 和对应域契约为准。
+
 ### 按角色快速进入
 
 | 你现在要做什么 | 先看哪份文档 |
@@ -61,6 +63,7 @@ docs/
   plans/              实施计划和近期任务清单
   research/           跨域研究综述和研究源笔记
   references/         实现时需要查阅的外部手册
+  conversations/      重要对话记录和问题处理清单
   archive/            初始需求和历史会议记录
 ```
 

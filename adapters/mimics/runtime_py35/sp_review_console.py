@@ -186,17 +186,42 @@ def save_current_checkpoint():
     return sp_save_checkpoint.main()
 
 
+def show_current_summary(context):
+    runtime_path = os.path.join(context["package_root"], "working", "mimics_runtime.json")
+    runtime = load_json(runtime_path)
+    lines = [
+        "Review: {0}".format(runtime.get("review_id", "")),
+        "Case: {0}".format(runtime.get("case_id", "")),
+        "Targets:",
+    ]
+    for target in runtime.get("targets", []):
+        lines.append(
+            "- {0} / image {1}: {2}".format(
+                target.get("target_id", ""),
+                target.get("image_id", ""),
+                ", ".join(mask.get("organ", "") for mask in target.get("masks", [])),
+            )
+        )
+    mimics.dialogs.message_box(
+        "\n".join(lines),
+        title="SP Review Summary",
+        ui_blocking=True,
+    )
+    return 0
+
+
 def choose_console_action(has_context):
     if has_context:
         answer = mimics.dialogs.question_box(
             message="Choose the platform action for the current review.",
-            buttons="Submit Current Review;Save Checkpoint;Open Next Review;Cancel",
+            buttons="Submit Current Review;Save Checkpoint;Show Summary;Open Next Review;Cancel",
             title="SP Review Console",
             ui_blocking=True,
         )
         return {
             "Submit Current Review": "submit",
             "Save Checkpoint": "checkpoint",
+            "Show Summary": "summary",
             "Open Next Review": "next",
             "Cancel": "cancel",
         }.get(answer, "cancel")
@@ -219,6 +244,8 @@ def main():
         return submit_current_review(config)
     if action == "checkpoint":
         return save_current_checkpoint()
+    if action == "summary":
+        return show_current_summary(context)
     if action == "next":
         if context is not None:
             close = mimics.dialogs.question_box(

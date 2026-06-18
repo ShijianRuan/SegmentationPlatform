@@ -201,7 +201,10 @@ def finalize_case(
     findings = []
     for target_id in target_ids:
         target = targets[target_id]
+        known_absent = set(target.get("known_absent", []))
         for organ in target["organs"]:
+            if organ in known_absent:
+                continue
             outcome = outcomes.get(target_id, {}).get(organ, "present")
             if (target_id, organ) not in entry_map:
                 findings.append(
@@ -245,10 +248,13 @@ def finalize_case(
     prepared_targets = []
     for target_id in target_ids:
         target = targets[target_id]
+        known_absent = set(target.get("known_absent", []))
         image = next(item for item in manifest["image_sets"] if item["image_id"] == target["image_id"])
         geometry = geometry_from_manifest(image)
         prepared_segments = []
         for organ in target["organs"]:
+            if organ in known_absent:
+                continue
             entry = entry_map[(target_id, organ)]
             array = read_export_buffer(entry, mapping, case_root=case_root)
             outcome = outcomes.get(target_id, {}).get(organ, "present")

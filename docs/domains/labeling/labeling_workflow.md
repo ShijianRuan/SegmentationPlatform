@@ -274,6 +274,7 @@ Mimics 是工具适配器，不承担平台状态机和数据治理。实现采�
 -> Script / Scripting Library / SP Review Console
 -> Open Next Review
 -> 标注者在 Mimics 编辑并保存
+-> 可选：Console / Show Summary
 -> 可选：Console / Save Checkpoint
 -> Console / Submit Current Review
 -> 平台后台 sp mimics finalize 或 watcher
@@ -350,7 +351,7 @@ Windows 工作站的安装、v0.5 目录、探针、checkpoint 和恢复命令�
 
 Mimics Gate A 通过后实现：
 
-- 外部 `prepare`、`open`、`finalize` 命令。
+- 外部 `prepare`、`prepare-many`、`open`、`finalize`、`finalize-many` 命令。
 - Mimics 内 `sp_review_console.py`、`sp_open_review.py`、`sp_submit_review.py` 和 `sp_save_checkpoint.py`。
 - 只暴露给标注者的 `scripting_library/SP_Review_Console.py`。
 - 逐器官布尔缓冲区和 manifest 桥接。

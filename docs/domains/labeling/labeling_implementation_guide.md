@@ -9,7 +9,7 @@
 
 当前代码已经可以在外部现代 Python 环境中完成：
 
-1. 扫描 DICOM 根目录，按患者候选、检查和序列生成可审阅的导入清单。
+1. 扫描来源目录，发现 DICOM Series、三维 NIfTI 和可选 MetaImage，并生成可审阅的导入清单。
 2. 检查 DICOM、NIfTI 和可选 MetaImage 图像的格式、哈希与三维空间。
 3. 从扫描清单批量生成病例包请求，或从单个请求文件创建 Case Package v0.5。
 4. 批量创建病例包，避免逐病例手工运行 `package create`。
@@ -76,7 +76,7 @@
 推荐批量入口：
 
 ```bash
-sp ingest scan /data/source_dicom --output /data/reports/source_scan.json
+sp ingest scan /data/source --output /data/reports/source_scan.json
 
 sp ingest build-requests /data/reports/source_scan.json /data/package_requests \
   --organs liver spleen kidney_left kidney_right \
@@ -88,7 +88,16 @@ sp package create-many /data/package_requests /data/dataset_package \
   --continue-on-error
 ```
 
-这三步分别负责“发现”“生成可审阅请求”“创建病例包”。中间的请求文件允许人工批量检查和修改，比如只保留静脉期、修改 assignee 或调整目标器官。扫描报告不保存原始 PatientID，只保存哈希、相对路径和导入可用性。
+这三步分别负责“发现”“生成可审阅请求”“创建病例包”。中间的请求文件允许人工批量检查和修改，比如只保留静脉期、修改 assignee、补充初始标签或调整目标器官。扫描报告不保存原始 PatientID，只保存哈希、相对路径和导入可用性。
+
+`scan` 的边界要分清：
+
+- DICOM：按 Study/Series 元数据分组，一个 Series 生成一个 `image_set`。
+- NIfTI/MHD/MHA：按文件发现，同一父目录默认归为一个 Case；顶层文件各自成为独立 Case。
+- RAW：没有明确 sidecar 时只报告为不可直接导入。
+- 复杂数据集：自动生成的请求只是草稿，仍需要人工或数据集描述文件补充“哪些文件是标签、标签值对应哪个器官、哪些序列应进入标注”。
+
+病例包可以登记 NIfTI/MHD，但 Mimics 21 主路径的首次打开仍以 DICOM 或已有 `.mcs` 为准。若标注工具选择 Mimics，非 DICOM 图像需要先转换成 Mimics 可接受的 DICOM/`.mcs` 工作区，或改用能原生打开该格式的标注工具。
 
 单例调试入口仍然可用：
 
@@ -98,7 +107,7 @@ sp package create examples/labeling/case_package_request.yaml /data/dataset_pack
 
 **这个命令做的事**：
 
-- 从 DICOM 区读取图像 → 按患者 → 检查 → 序列分组 → 为每个序列创建 `image_id`
+- 从来源区读取图像 → DICOM 按患者/检查/序列分组，文件型图像按路径启发式分组 → 为每个三维体素网格创建 `image_id`
 - 复制图像到 `images/{image_id}/`，检查去标识状态和文件哈希
 - 如有初始候选标签，拆为逐器官 NIfTI 放入 `labels/{image_id}/masks/`
 - 生成 `manifest.json`（image_sets、器官列表、标注目标组、base label 版本）
@@ -188,7 +197,7 @@ sp mimics prepare /data/dataset_package/cases/case_001 --config mimics_workstati
 - 如本例尚未准备，后台调用 `sp mimics prepare`；
 - 标记 Review 为 `in_progress`；
 - 在当前 Mimics 会话里调用 `sp_open_review.py`；
-- `sp_open_review.py` 导入 DICOM 或打开 `.mcs` → 用 UID 哈希 + shape 将 image set 与 `image_id` 一一匹配 → 为每个 target 的每个器官创建/找到 Mask → 写入 7 个 metadata（review_id、target_id、image_id、organ、base_label_id/hash、package_root）→ 如有 import buffer 则在首次创建时注入 → 保存 `.mcs` → 弹出任务摘要对话框。
+- `sp_open_review.py` 导入 DICOM 或打开 `.mcs` → 用 UID 哈希 + shape 将 image set 与 `image_id` 一一匹配 → 为每个 target 中**未声明 `known_absent`** 的器官创建/找到 Mask → 写入 7 个 metadata（review_id、target_id、image_id、organ、base_label_id/hash、package_root）→ 如有 import buffer 则在首次创建时注入 → 保存 `.mcs` → 首次打开（new）弹出任务摘要对话框，续标（resume）不再弹（可随时用 Show Summary 重看）。
 
 **验证方式**：
 
@@ -350,16 +359,16 @@ Mimics 内置 Python 不安装 nibabel、pydicom 或 SimpleITK。它只运行 `s
 大批量数据优先从扫描开始：
 
 ```bash
-sp ingest scan /data/source_dicom --output /data/reports/source_scan.json
+sp ingest scan /data/source --output /data/reports/source_scan.json
 sp ingest build-requests /data/reports/source_scan.json /data/package_requests \
   --organs liver spleen kidney_left kidney_right \
   --import-batch batch_20260616
 sp package create-many /data/package_requests /data/dataset_package --registry /data/platform_registry
 ```
 
-`scan` 会把一个混合 DICOM 根目录拆成候选 Series，并为每个 Series 记录 `source_files`。因此来源目录不必预先人工整理成“一个文件夹一个序列”。`build-requests` 生成的是可审阅 YAML，不直接写 Registry。
+`scan` 会把一个混合 DICOM 根目录拆成候选 Series，并为每个 Series 记录 `source_files`；也会发现三维 NIfTI 和 MetaImage 文件，并用父目录启发式生成 Case。来源目录不必预先人工整理成“一个文件夹一个序列”，但文件型数据集若有复杂含义，仍要审阅并修改生成的请求 YAML。`build-requests` 生成的是可审阅 YAML，不直接写 Registry。
 
-单个病例调试时，可以复制并修改 [病例包请求示例](../../../examples/labeling/case_package_request.yaml)。每个 `image_set` 必须只指向一个 DICOM Series；包含多个 SeriesInstanceUID 的目录会被阻断。
+单个病例调试时，可以复制并修改 [病例包请求示例](../../../examples/labeling/case_package_request.yaml)。每个 DICOM `image_set` 必须只指向一个 Series；包含多个 SeriesInstanceUID 的目录会被阻断。NIfTI/MHD `image_set` 指向单个三维文件或文件组。
 
 ```bash
 sp package create \
@@ -511,12 +520,12 @@ copy C:\SegmentationPlatform\config\mimics_review_console.example.json `
 - 首次任务导入 DICOM；继续任务打开专属 `.mcs`。
 - 使用 Series UID 哈希和 shape 唯一匹配 image set。
 - 每次操作目标前显式 `set_active()`。
-- 每个目标器官建立一个 Mask。
+- 为每个目标器官建立一个 Mask；target 中 `known_absent` 声明的器官跳过（不建 Mask、不导出、不参与 QC）。
 - 写入 `review_id/target_id/image_id/organ/base_label` metadata。
 - 继续任务时先核对已有 Mask 的 `base_label_id + bundle hash`，不一致即阻断。
 - 只在首次创建 Mask 时注入初始缓冲区。
 - `.mcs` 不可用且选择重建时，优先恢复匹配当前任务版本和 mapping evidence 的 checkpoint。
-- 保存任务专属 `.mcs` 并显示一次摘要。
+- 保存任务专属 `.mcs`；首次打开显示一次摘要，续标不再弹（可随时用 Show Summary 重看）。
 
 打开成功后，Registry 中该 Review 和尚未开始的目标组会更新为 `in_progress`，并追加 `open_started` 事件。
 
@@ -616,7 +625,7 @@ sp snapshot validate /data/platform_registry/snapshots/snap_abdomen_v1.json
 | --- | --- |
 | 手写 10000 份 YAML 不可行 | 已提供 `sp ingest scan`、`sp ingest build-requests` 和 `sp package create-many`。扫描和请求生成是批量入口，人工只审阅规则和异常项。 |
 | 一个 `.mcs` 多病例能否减少启动成本 | 阶段 A 不采用。单 `.mcs` 多病例会放大项目损坏、Mask 误绑定、部分提交、多人分派和失败回滚的风险。当前选择一个 review/case 一个 `.mcs`，用批量发现和批量创建降低平台侧成本。 |
-| prepare/open/finalize 是否仍需逐病例 | `prepare` 和 `finalize` 可以由 shell/PowerShell、watcher 或管理员批处理执行；标注者不直接运行 `open`，而是在 Mimics 内通过 **SP Review Console** 领取下一例。 |
+| prepare/open/finalize 是否仍需逐病例 | 已提供 `sp mimics prepare-many`、`sp mimics finalize-many` 和 `sp review stats`。标注者不直接运行 `open`，而是在 Mimics 内通过 **SP Review Console** 领取下一例。 |
 | Registry 标签查询 O(N) | 文件式 Registry 已维护 `_indexes/labels_by_case_image_organ.json`。旧 Registry 可运行 `sp registry rebuild-index /data/platform_registry` 生成索引。 |
 | 空间信息不完整 | 数据导入契约允许 `complete/partial/index_only`，但 Mimics 病例包当前仍要求可控的工具空间。纯 RAW 和无法证明空间的来源应先创建带明确假设的派生图像，或停在导入报告中。 |
 | 部分器官标签 | Snapshot 支持按病例列出实际 segment 子集。不能把未标器官当背景；训练导出层后续要显式实现 ignore/排除策略。 |

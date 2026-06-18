@@ -52,13 +52,16 @@ Mimics 21.0 可以作为人工标注和标签修正工具的候选，但不应�
 
 首选输入是原始 DICOM，因为这是 Mimics 21.0 有明确依据的主路径。
 
-当前资料不能证明 21.0 可直接、稳定地导入 NIfTI 或 MetaImage。只有这些格式时，应先实测：
+Mimics 21.0 的 Scripting API 有两条图像导入路径，但都不能直接保留 NIfTI 的完整几何：`import_dicom_images()` 是 DICOM 主路径，保留完整方向和坐标；`import_standard_images()` / `configure_standard_images()` 面向 BMP、TIFF、JPEG 切片序列，只接受手动指定的 xy/z resolution，不保留 NIfTI 的方向矩阵和 origin（见 `mimics_reference.md`）。图像对象 `ImageData` 有 `get_voxel_buffer()`（读）但没有 `set_voxel_buffer()`（写）——后者只存在于 Mask 对象。因此“用 nibabel 读 NIfTI 成 array，再直接注入成一个 Mimics 图像”这条路 API 不提供：这不是思路限制，是 API 客观没有写入图像体素的口（注入 Mask 体素可以，所以初始标签能进）。
 
-1. 当前安装是否存在可用的直接导入入口；
-2. 若没有，外部转换成 DICOM、raw 或其他受支持格式后能否保持空间信息；
-3. 若空间信息无法无歧义恢复，是否改用原生支持该格式的标注工具。
+但“任意格式数据必须能进入标注流程”是项目既定目标，且不依赖 Mimics 原生 NIfTI API。已确定的实现路径是：
 
-Mimics 21.0 的图像对象没有已确认的任意体素写入接口，因此“外部读取 NIfTI 数组，再直接注入成 Mimics 图像”不能作为既定方案。
+1. 平台侧现代 Python（nibabel / pydicom / SimpleITK）把 DICOM / NIfTI / MetaImage 读成 3D array；
+2. 用 pydicom 写出一个最小可用 DICOM 序列（十几个必需 tag），这是 Mimics `import_dicom_images` 本就接受的输入，不是破解；
+3. 在 prepare 阶段用 Mimics `-background_mode` 启动预导入脚本，完成 import + 创建所有目标 Mask + 注入初始 buffer + `save_project(.mcs)` 后退出；
+4. 标注者打开时只剩 `open_project(.mcs)`（10–30 秒），永远不等任何格式的导入，也不感知格式差异。
+
+`-background_mode` 在探针代码中已用过，不是新机制。前置条件是 Mimics Gate 验证：background_mode 下能否无 UI 串行完成 `import_dicom_images` + `create_mask` + `set_voxel_buffer` + `save_project`。验证通过前，prepare 对非 DICOM 仍保留阻断（见 `prepare.py`），避免给人“已支持”的错觉。空间信息在转换时必须可无歧义恢复，否则改用原生支持该格式的标注工具（见 §9 退出条件）。
 
 ### 4.2 初始标签和导出标签
 
@@ -161,9 +164,9 @@ Mimics 界面可以提供“生成初始标签”的入口，但模型推理仍�
 
 ## 10. 不应提前承诺
 
-- Mimics 21.0 原生支持 NIfTI 或 MetaImage 图像导入导出；
+- Mimics 21.0 原生（Scripting API）支持 NIfTI 或 MetaImage 图像导入导出——任意格式进入标注流程靠 prepare 预导入 + 外部转最小 DICOM 实现（见 §4.1），不靠原生 API；
 - shape 相同就表示图像和标签对齐；
-- 任意图像数组都能通过 `set_voxel_buffer()` 注入；
+- 任意图像数组都能通过 `set_voxel_buffer()` 注入成 Mimics 图像（注入 Mask 体素已验证，注入图像体素未确认）；
 - 一个 `.mcs` 文件可以在任何机器上独立打开；
 - 保存项目就等于标签已经验证；
 - 内置 Python 3.5 可以长期承载平台逻辑。

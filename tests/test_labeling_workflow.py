@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import nibabel as nib
 import pydicom
 import yaml
 from pydicom.dataset import FileDataset, FileMetaDataset
@@ -266,6 +267,160 @@ class LabelingWorkflowTests(unittest.TestCase):
         self.assertEqual("snapshot_001", snapshot["snapshot_id"])
         validate_snapshot(registry_root / "snapshots" / "snapshot_001.json")
 
+    def test_known_absent_organ_skipped_across_prepare_and_finalize(self) -> None:
+        dicom_root = self.make_dicom_series()
+        geometry, _ = inspect_dicom_series(dicom_root)
+        liver_mask = np.zeros(geometry.shape, dtype=np.uint8)
+        liver_mask[1:4, 1:4, 1] = 1
+
+        request = {
+            "schema_version": "case_package_request.v1",
+            "package_id": "pkg_case_002",
+            "case_id": "case_002",
+            "study_id": "study_002",
+            "leakage_group_id": "patient_002",
+            "leakage_group_basis": "patient_pseudonym",
+            "leakage_group_confidence": "high",
+            "data_governance": {
+                "source_zone": "working",
+                "deidentification_status": "verified",
+                "profile": "test",
+                "profile_version": "1",
+                "direct_identifiers_allowed": False,
+            },
+            "image_sets": [
+                {
+                    "image_id": "img_venous",
+                    "modality": "CT",
+                    "format": "dicom_series",
+                    "source": str(dicom_root),
+                    "import_batch": "test",
+                }
+            ],
+            "review": {
+                "review_id": "review_case_002_v1",
+                "tool": "mimics",
+                "assignee": "annotator_01",
+                "targets": [
+                    {
+                        "target_id": "target_abdomen",
+                        "image_id": "img_venous",
+                        "organs": ["liver", "spleen"],
+                        "known_absent": ["spleen"],
+                    }
+                ],
+            },
+            "initial_labels": [],
+        }
+        request_path = self.root / "package_request_known_absent.yaml"
+        request_path.write_text(yaml.safe_dump(request, sort_keys=False), encoding="utf-8")
+
+        registry_root = self.root / "registry_known_absent"
+        case_root = create_case_package(
+            request_path,
+            self.root / "dataset_package_known_absent",
+            registry_root=registry_root,
+        )
+        manifest = load_data(case_root / "manifest.json")
+        self.assertEqual(["spleen"], manifest["review"]["targets"][0]["known_absent"])
+
+        runtime = load_data(prepare_case(case_root, self.workstation_config(verified=True)))
+        self.assertEqual(["liver"], [mask["organ"] for mask in runtime["targets"][0]["masks"]])
+
+        submission_root = case_root / "submissions" / runtime["review_id"]
+        output_buffer = submission_root / "buffers" / "img_venous" / "target_abdomen" / "liver.u8"
+        output_buffer.parent.mkdir(parents=True)
+        output_buffer.write_bytes(liver_mask.tobytes(order="C"))
+        from segplatform.common import prefixed_sha256
+
+        (submission_root / "export_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "mimics_export_manifest.v1",
+                    "review_id": runtime["review_id"],
+                    "mimics_version": "21.0",
+                    "python_version": "3.5.2",
+                    "entries": [
+                        {
+                            "target_id": "target_abdomen",
+                            "image_id": "img_venous",
+                            "organ": "liver",
+                            "path": output_buffer.relative_to(case_root).as_posix(),
+                            "path_base": "package_root",
+                            "sha256": prefixed_sha256(output_buffer),
+                            "byte_count": output_buffer.stat().st_size,
+                            "mimics_shape": list(liver_mask.shape),
+                            "platform_shape": list(liver_mask.shape),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (submission_root / "submission_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "review_submission.v1",
+                    "review_id": runtime["review_id"],
+                    "target_ids": ["target_abdomen"],
+                    "action": "submit_complete",
+                    "assignee": "annotator_01",
+                    "organ_outcomes": {"target_abdomen": {"liver": "present"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = finalize_case(case_root, self.workstation_config(verified=True), registry_root)
+        self.assertEqual("passed", result["status"])
+        self.assertEqual(["liver"], [segment["organ"] for segment in result["records"][0]["segments"]])
+
+    def test_known_absent_not_subset_of_organs_is_rejected(self) -> None:
+        dicom_root = self.make_dicom_series()
+        request = {
+            "schema_version": "case_package_request.v1",
+            "package_id": "pkg_case_003",
+            "case_id": "case_003",
+            "study_id": "study_003",
+            "leakage_group_id": "patient_003",
+            "leakage_group_basis": "patient_pseudonym",
+            "leakage_group_confidence": "high",
+            "data_governance": {
+                "source_zone": "working",
+                "deidentification_status": "verified",
+                "profile": "test",
+                "profile_version": "1",
+                "direct_identifiers_allowed": False,
+            },
+            "image_sets": [
+                {
+                    "image_id": "img_venous",
+                    "modality": "CT",
+                    "format": "dicom_series",
+                    "source": str(dicom_root),
+                    "import_batch": "test",
+                }
+            ],
+            "review": {
+                "review_id": "review_case_003_v1",
+                "tool": "mimics",
+                "assignee": "annotator_01",
+                "targets": [
+                    {
+                        "target_id": "target_abdomen",
+                        "image_id": "img_venous",
+                        "organs": ["liver"],
+                        "known_absent": ["spleen"],
+                    }
+                ],
+            },
+            "initial_labels": [],
+        }
+        request_path = self.root / "package_request_bad_known_absent.yaml"
+        request_path.write_text(yaml.safe_dump(request, sort_keys=False), encoding="utf-8")
+        with self.assertRaisesRegex(ValidationError, "known_absent must be a subset of organs"):
+            create_case_package(request_path, self.root / "dataset_package_bad")
+
     def test_unverified_mapping_blocks_initial_mask_bridge(self) -> None:
         dicom_root = self.make_dicom_series()
         geometry, _ = inspect_dicom_series(dicom_root)
@@ -302,6 +457,42 @@ class LabelingWorkflowTests(unittest.TestCase):
         manifest = load_data(case_root / "manifest.json")
         self.assertEqual(1, len(manifest["image_sets"]))
         self.assertEqual(["liver"], manifest["review"]["targets"][0]["organs"])
+
+    def test_ingest_scan_discovers_nifti_without_manual_image_sets(self) -> None:
+        source_root = self.root / "nifti_dataset" / "patient_a"
+        source_root.mkdir(parents=True)
+        image_path = source_root / "ct_venous.nii.gz"
+        affine = np.diag([1.0, 1.5, 2.0, 1.0])
+        image = nib.Nifti1Image(np.zeros((6, 5, 3), dtype=np.int16), affine)
+        image.set_data_dtype(np.int16)
+        nib.save(image, str(image_path))
+
+        scan = scan_source(self.root / "nifti_dataset")
+        self.assertEqual(1, scan["summary"]["importable_series_count"])
+        self.assertEqual(1, scan["summary"]["file_image_count"])
+        record = scan["series"][0]
+        self.assertEqual("nifti", record["format"])
+        self.assertEqual("source_path_group", record["leakage_group_basis"])
+
+        scan_path = self.root / "nifti_scan.json"
+        scan_path.write_text(json.dumps(scan), encoding="utf-8")
+        requests_dir = self.root / "nifti_requests"
+        batch = build_case_package_requests(
+            scan_path,
+            requests_dir,
+            organs=["liver"],
+            import_batch="nifti_batch",
+            assignee="annotator_01",
+        )
+        request = load_data(Path(batch["requests"][0]))
+        self.assertEqual("nifti", request["image_sets"][0]["format"])
+        self.assertEqual(str(image_path.resolve()), request["image_sets"][0]["source"])
+        self.assertNotIn("source_files", request["image_sets"][0])
+
+        case_root = create_case_package(Path(batch["requests"][0]), self.root / "nifti_package")
+        manifest = load_data(case_root / "manifest.json")
+        self.assertIn("image_path", manifest["image_sets"][0])
+        self.assertEqual("RAS", manifest["image_sets"][0]["coordinate_system"])
 
     def test_review_next_skips_submitted_pending_but_returns_failed_qc(self) -> None:
         registry_root = self.root / "registry"

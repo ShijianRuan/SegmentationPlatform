@@ -164,6 +164,14 @@ $Registry = "D:\SegmentationPlatform\data\registry"
   -CaseRoot $Case
 ```
 
+批量准备一批 Case Package 时优先用平台命令：
+
+```powershell
+sp mimics prepare-many D:\SegmentationPlatform\data\packages\cases `
+  --config $Config `
+  --continue-on-error
+```
+
 平台会校验 Case Package，将已有初始标签转换成 Mimics `.u8` buffer，生成
 `working\mimics_runtime.json`，并在发现既有 `.mcs` 时切换为继续标注模式。
 
@@ -194,9 +202,10 @@ Mimics 启动后会自动：
 3. 选择 **Open Next Review**，核对病例、序列和目标器官。
 4. 使用 Mimics 工具修正对应的 `SP__<target_id>__<organ>` Mask。
 5. 随时保存 `.mcs`，关闭 Mimics 后可以继续。
-6. 长时间工作或完成一个阶段后，在 Console 中选择 **Save Checkpoint**。
-7. 不修改以 `sp.` 开头的 Mask metadata。
-8. 不把 Mask 移到另一个 image set。
+6. 忘记当前任务范围时，在 Console 中选择 **Show Summary** 重新显示病例、序列和目标器官。
+7. 长时间工作或完成一个阶段后，在 Console 中选择 **Save Checkpoint**。
+8. 不修改以 `sp.` 开头的 Mask metadata。
+9. 不把 Mask 移到另一个 image set。
 
 保存 `.mcs` 只代表保存进度，不代表标签已经提交或验证。
 
@@ -250,6 +259,15 @@ sp mimics finalize D:\returned\pkg_case_001 `
   --registry D:\SegmentationPlatform\data\registry
 ```
 
+批量回收多个已提交病例时使用：
+
+```powershell
+sp mimics finalize-many D:\returned\cases `
+  --config .\config\mimics_workstation.verified.yaml `
+  --registry D:\SegmentationPlatform\data\registry `
+  --continue-on-error
+```
+
 该命令应在持有主 Registry 的平台机器执行。verified 配置中的 Windows 可执行文件路径此时不会被调用，Finalize 只使用其中已经冻结的 buffer mapping。
 
 平台会检查 review、target、assignee、base label、相对路径边界、buffer hash 和尺寸、空间映射、图像和器官对应关系、空 Mask outcome，以及最终 NIfTI 的物理几何。
@@ -273,6 +291,12 @@ QC 报告位于 `reports\review_<review_id>_finalize.json`。
 ```
 
 增加 `-ReviewId "review_case_001_v1"` 可查看单个 review。
+
+管理员也可以直接查看队列聚合统计：
+
+```powershell
+sp review stats --registry $Registry
+```
 
 ## 7. 继续修改已经提交的标签
 
