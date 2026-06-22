@@ -21,7 +21,7 @@
     "tool": {"type": "string"},
     "status": {
       "type": "string",
-      "enum": ["ready", "in_progress", "needs_review", "completed", "blocked"]
+      "enum": ["ready", "in_progress", "needs_review", "completed", "blocked", "deferred"]
     },
     "assignee": {"type": ["string", "null"]},
     "package_path": {"type": "string"},
@@ -44,7 +44,7 @@
           },
           "status": {
             "type": "string",
-            "enum": ["ready", "in_progress", "needs_review", "completed", "blocked"]
+            "enum": ["ready", "in_progress", "needs_review", "completed", "blocked", "deferred"]
           },
           "base_label_id": {"type": "string"},
           "base_label_sha256": {"$ref": "_defs.schema.json#/$defs/sha256_hash"},

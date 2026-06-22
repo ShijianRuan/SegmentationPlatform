@@ -4,6 +4,7 @@
 from __future__ import print_function
 
 import os
+import shutil
 import sys
 
 import mimics
@@ -21,6 +22,56 @@ from sp_common import (
     write_error_report,
     write_json,
 )
+
+SUBMIT_TITLE = "Submit Labeling Result"
+BUTTON_COMPLETE = "Complete"
+BUTTON_REVIEW = "Needs Review"
+BUTTON_PROBLEM = "Report Problem"
+BUTTON_CANCEL = "Cancel"
+ACTION_BY_BUTTON = {
+    BUTTON_COMPLETE: "submit_complete",
+    BUTTON_REVIEW: "submit_for_review",
+    BUTTON_PROBLEM: "report_blocked",
+    BUTTON_CANCEL: "cancel",
+}
+ALLOWED_ACTIONS = set(["submit_complete", "submit_for_review", "report_blocked", "cancel"])
+
+BUTTON_USE_SELECTED = "Use Selected"
+BUTTON_ALL_GROUPS = "All Groups"
+
+EMPTY_PREVIEW_LIMIT = 30
+BUTTON_ALL_ABSENT = "All Confirmed Absent"
+BUTTON_ALL_REVIEW = "All Need Review"
+BUTTON_REVIEW_ONE_BY_ONE = "Review One By One"
+BUTTON_CONTINUE_EXPORT = "Continue Export"
+UNMANAGED_PREVIEW_LIMIT = 20
+
+
+def cleanup_staging(submission_root):
+    parent = os.path.dirname(submission_root)
+    base = os.path.basename(submission_root)
+    if not os.path.isdir(parent):
+        return
+    previous = os.path.join(parent, base + ".previous")
+    if (not os.path.exists(submission_root)) and os.path.isdir(previous):
+        os.rename(previous, submission_root)
+    for name in os.listdir(parent):
+        path = os.path.join(parent, name)
+        if name.startswith(base + ".partial_") and os.path.isdir(path):
+            shutil.rmtree(path)
+
+
+def publish_staged_submission(staging_root, submission_root):
+    parent = os.path.dirname(submission_root)
+    base = os.path.basename(submission_root)
+    previous = os.path.join(parent, base + ".previous")
+    if os.path.isdir(previous):
+        shutil.rmtree(previous)
+    if os.path.isdir(submission_root):
+        os.rename(submission_root, previous)
+    os.rename(staging_root, submission_root)
+    if os.path.isdir(previous):
+        shutil.rmtree(previous)
 
 
 def discover_runtime():
@@ -40,21 +91,38 @@ def discover_runtime():
 
 def choose_action():
     answer = mimics.dialogs.question_box(
-        message="Choose what to do with the current review.",
-        buttons="Submit Complete;Submit For Review;Report Blocked;Cancel",
-        title="SP - Submit Review",
+        message="Choose the result for the current work.",
+        buttons=";".join([BUTTON_COMPLETE, BUTTON_REVIEW, BUTTON_PROBLEM, BUTTON_CANCEL]),
+        title=SUBMIT_TITLE,
         ui_blocking=True,
     )
-    return {
-        "Submit Complete": "submit_complete",
-        "Submit For Review": "submit_for_review",
-        "Report Blocked": "report_blocked",
-        "Cancel": "cancel",
-    }.get(answer, "cancel")
+    return ACTION_BY_BUTTON.get(answer, "cancel")
+
+
+def normalize_action(action_override=None):
+    if action_override is None:
+        return choose_action()
+    if action_override not in ALLOWED_ACTIONS:
+        raise RuntimeError("Unsupported submit action: {0}".format(action_override))
+    return action_override
+
+
+def target_display(target):
+    organs = [item.get("organ", "") for item in target.get("masks", [])]
+    preview = ", ".join(organs[:4])
+    if len(organs) > 4:
+        preview = preview + ", ..."
+    return "{0}: {1} organ(s) on image {2}{3}".format(
+        target.get("target_id", ""),
+        len(organs),
+        target.get("image_id", ""),
+        " ({0})".format(preview) if preview else "",
+    )
 
 
 def choose_targets(runtime):
     target_ids = [target["target_id"] for target in runtime["targets"]]
+    target_map = dict((target["target_id"], target) for target in runtime["targets"])
     if len(target_ids) == 1:
         return target_ids
     if 2 <= len(target_ids) <= 5:
@@ -64,29 +132,29 @@ def choose_targets(runtime):
                 (TOGGLE_PREFIX_SELECTED if target_id in selected else TOGGLE_PREFIX_CLEAR) + str(index + 1)
                 for index, target_id in enumerate(target_ids)
             ]
-            buttons = toggle_buttons + ["Use Selected", "All Targets", "Cancel"]
+            buttons = toggle_buttons + [BUTTON_USE_SELECTED, BUTTON_ALL_GROUPS, BUTTON_CANCEL]
             answer = mimics.dialogs.question_box(
-                message="Toggle target groups, then choose Use Selected.\n\n{0}\n\nSelected: {1}".format(
+                message="Toggle image/organ groups, then choose Use Selected.\n\n{0}\n\nSelected: {1}".format(
                     "\n".join(
-                        "{0}. {1}".format(index + 1, target_id)
+                        "{0}. {1}".format(index + 1, target_display(target_map[target_id]))
                         for index, target_id in enumerate(target_ids)
                     ),
                     ", ".join(selected) if selected else "none",
                 ),
                 buttons=";".join(buttons),
-                title="SP - Target Groups",
+                title="Image/Organ Groups",
                 ui_blocking=True,
             )
-            if answer == "All Targets":
+            if answer == BUTTON_ALL_GROUPS:
                 return target_ids
-            if answer == "Cancel":
+            if answer == BUTTON_CANCEL:
                 return []
-            if answer == "Use Selected":
+            if answer == BUTTON_USE_SELECTED:
                 if selected:
                     return selected
                 mimics.dialogs.message_box(
-                    "No target group is selected.",
-                    title="SP - Target Groups",
+                    "No image/organ group is selected.",
+                    title="Image/Organ Groups",
                     ui_blocking=True,
                 )
                 continue
@@ -100,36 +168,36 @@ def choose_targets(runtime):
             else:
                 mimics.dialogs.message_box(
                     "The target selection response was not recognized. Please choose again.",
-                    title="SP - Target Groups",
+                    title="Image/Organ Groups",
                     ui_blocking=True,
                 )
         return []
-    buttons = ["All Targets"] + target_ids + ["Cancel"]
+    buttons = [BUTTON_ALL_GROUPS] + target_ids + [BUTTON_CANCEL]
     answer = mimics.dialogs.question_box(
-        message="Choose the target group to submit.",
+        message="Choose the image/organ group to submit.",
         buttons=";".join(buttons),
-        title="SP - Target Group",
+        title="Image/Organ Group",
         ui_blocking=True,
     )
-    if answer == "All Targets":
+    if answer == BUTTON_ALL_GROUPS:
         return target_ids
-    if answer == "Cancel" or answer not in target_ids:
+    if answer == BUTTON_CANCEL or answer not in target_ids:
         return []
     return [answer]
 
 
 def choose_reason(action):
     if action == "submit_for_review":
-        buttons = "Medical Uncertainty;Image Quality;Missing Context;Other;Cancel"
+        buttons = "Uncertain Anatomy;Image Quality;Need More Context;Other;Cancel"
     else:
-        buttons = "Data Missing;Wrong Image Set;Tool Error;Script Error;Other;Cancel"
+        buttons = "Missing Data;Wrong Image;Tool Error;Script Error;Other;Cancel"
     answer = mimics.dialogs.question_box(
         message="Choose the main reason.",
         buttons=buttons,
-        title="SP - Reason",
+        title="Reason",
         ui_blocking=True,
     )
-    if answer == "Cancel":
+    if answer == BUTTON_CANCEL:
         return None
     return answer.lower().replace(" ", "_")
 
@@ -206,23 +274,92 @@ def show_preflight_failure(runtime, findings):
     )
 
 
-def resolve_empty_masks(empty_masks):
-    if not empty_masks:
-        return {}, False
-    labels = ["{0}/{1}".format(target_id, organ) for target_id, organ in empty_masks]
+def write_text(path, text):
+    directory = os.path.dirname(path)
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory)
+    with open(path, "w") as handle:
+        handle.write(text)
+        handle.write("\n")
+
+
+def unmanaged_mask_names():
+    names = []
+    for mask in mimics.data.masks:
+        if not metadata_get(mask, "sp.review_id", ""):
+            names.append(getattr(mask, "name", "") or "<unnamed>")
+    return names
+
+
+def confirm_unmanaged_masks_ignored(runtime):
+    names = unmanaged_mask_names()
+    if not names:
+        return True
+    report_path = os.path.join(runtime["reports_dir"], "mimics_unmanaged_masks.txt")
+    write_text(report_path, "Unmanaged Masks:\n- " + "\n- ".join(names))
+    preview = names[:UNMANAGED_PREVIEW_LIMIT]
+    lines = [
+        "This Mimics project contains {0} Mask(s) that are not part of this platform task.".format(len(names)),
+        "",
+        "- " + "\n- ".join(preview),
+    ]
+    if len(names) > UNMANAGED_PREVIEW_LIMIT:
+        lines.append("")
+        lines.append("Only the first {0} are shown here.".format(UNMANAGED_PREVIEW_LIMIT))
+    lines.extend(
+        [
+            "",
+            "These Mask(s) will NOT be exported or verified by this submission.",
+            "If one of them should become official, cancel and ask the platform operator for a follow-up task.",
+            "",
+            "Full list: {0}".format(report_path),
+        ]
+    )
     answer = mimics.dialogs.question_box(
-        message="The following Masks are empty:\n- {0}\n\nChoose one outcome for all, or review them individually.".format(
-            "\n- ".join(labels)
-        ),
-        buttons="All Confirmed Absent;All Need Review;Review One By One;Cancel",
-        title="SP - Empty Masks",
+        message="\n".join(lines),
+        buttons=BUTTON_CONTINUE_EXPORT + ";" + BUTTON_CANCEL,
+        title="Unmanaged Masks",
         ui_blocking=True,
     )
-    if answer == "Cancel":
+    return answer == BUTTON_CONTINUE_EXPORT
+
+
+def empty_mask_preview(empty_masks, runtime=None):
+    labels = ["{0}/{1}".format(target_id, organ) for target_id, organ in empty_masks]
+    full_text = "Empty Masks:\n- " + "\n- ".join(labels)
+    report_path = None
+    if runtime is not None:
+        report_path = os.path.join(runtime["reports_dir"], "mimics_empty_masks.txt")
+        write_text(report_path, full_text)
+    preview = labels[:EMPTY_PREVIEW_LIMIT]
+    lines = [
+        "{0} Mask(s) are empty.".format(len(labels)),
+        "",
+        "- " + "\n- ".join(preview),
+    ]
+    if len(labels) > EMPTY_PREVIEW_LIMIT:
+        lines.append("")
+        lines.append("Only the first {0} are shown here.".format(EMPTY_PREVIEW_LIMIT))
+        if report_path:
+            lines.append("Full list: {0}".format(report_path))
+    return "\n".join(lines)
+
+
+def resolve_empty_masks(empty_masks, runtime=None):
+    if not empty_masks:
+        return {}, False
+    answer = mimics.dialogs.question_box(
+        message=empty_mask_preview(empty_masks, runtime)
+        + "\n\nChoose one outcome for all, or review them individually.",
+        buttons=";".join([BUTTON_ALL_ABSENT, BUTTON_ALL_REVIEW, BUTTON_REVIEW_ONE_BY_ONE, BUTTON_CANCEL]),
+        title="Empty Masks",
+        ui_blocking=True,
+    )
+    if answer == BUTTON_CANCEL:
         return None, False
-    if answer == "All Confirmed Absent":
+    if answer == BUTTON_ALL_ABSENT:
         return dict(((target_id, organ), "confirmed_absent") for target_id, organ in empty_masks), False
-    if answer == "All Need Review":
+    if answer == BUTTON_ALL_REVIEW:
         return dict(((target_id, organ), "uncertain") for target_id, organ in empty_masks), True
 
     outcomes = {}
@@ -231,7 +368,7 @@ def resolve_empty_masks(empty_masks):
         item_answer = mimics.dialogs.question_box(
             message="{0}/{1} is empty. Confirm why.".format(target_id, organ),
             buttons="Confirmed Absent;Needs Review;Cancel",
-            title="SP - Empty Mask",
+            title="Empty Mask",
             ui_blocking=True,
         )
         if item_answer == "Confirmed Absent":
@@ -244,9 +381,9 @@ def resolve_empty_masks(empty_masks):
     return outcomes, needs_review
 
 
-def main():
+def main(action_override=None):
     runtime = discover_runtime()
-    action = choose_action()
+    action = normalize_action(action_override)
     if action == "cancel":
         return 0
     target_ids = choose_targets(runtime)
@@ -256,7 +393,12 @@ def main():
     if action in ("submit_for_review", "report_blocked") and reason_code is None:
         return 0
 
-    submission_root = runtime["submissions_dir"]
+    final_submission_root = runtime["submissions_dir"]
+    cleanup_staging(final_submission_root)
+    staging_root = final_submission_root + ".partial_{0}".format(os.getpid())
+    if os.path.isdir(staging_root):
+        shutil.rmtree(staging_root)
+    submission_root = staging_root
     if not os.path.isdir(submission_root):
         os.makedirs(submission_root)
     selected_targets = [target for target in runtime["targets"] if target["target_id"] in target_ids]
@@ -265,11 +407,13 @@ def main():
     organ_outcomes = {}
 
     if action != "report_blocked":
+        if not confirm_unmanaged_masks_ignored(runtime):
+            return 0
         findings, empty_masks = preflight_targets(runtime, selected_targets)
         if findings:
             show_preflight_failure(runtime, findings)
             return 2
-        empty_outcomes, empty_needs_review = resolve_empty_masks(empty_masks)
+        empty_outcomes, empty_needs_review = resolve_empty_masks(empty_masks, runtime)
         if empty_outcomes is None:
             return 0
         if empty_needs_review:
@@ -277,13 +421,13 @@ def main():
                 confirm = mimics.dialogs.question_box(
                     message=(
                         "At least one empty Mask was marked as needing review.\n\n"
-                        "This cannot be submitted as Complete. The submission will be changed to Submit For Review."
+                        "This cannot be submitted as Complete. The submission will be changed to Needs Review."
                     ),
-                    buttons="Submit For Review;Cancel",
-                    title="SP - Submit Type Changed",
+                    buttons=BUTTON_REVIEW + ";" + BUTTON_CANCEL,
+                    title="Submit Type Changed",
                     ui_blocking=True,
                 )
-                if confirm != "Submit For Review":
+                if confirm != BUTTON_REVIEW:
                     return 0
             action = "submit_for_review"
             if reason_code is None:
@@ -346,11 +490,12 @@ def main():
         "reason_code": reason_code,
     }
     write_json(os.path.join(submission_root, "submission_manifest.json"), submission)
+    publish_staged_submission(staging_root, final_submission_root)
     mimics.file.save_project(filename=runtime["mcs_path"], save_as_type="Mimics Project Files")
     mimics.dialogs.message_box(
-        "The review was exported. Platform QC is still required before any label is verified.\n\n"
+        "The result was exported. Platform QC is still required before any label is verified.\n\n"
         "If Finalize fails, read reports/review_report.json. The next Open also shows the latest QC failure.",
-        title="SP - Export Complete",
+        title="Export Complete",
         ui_blocking=True,
     )
     return 0

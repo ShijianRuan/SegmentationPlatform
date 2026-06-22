@@ -99,11 +99,12 @@ if ($RegistryRoot -and $Assignee) {
         workstation_config = $ConfigPath
         assignee = $Assignee
         auto_finalize = [bool]$AutoFinalize
+        checkpoint_keep_count = 3
     }
     $ConsoleConfig | ConvertTo-Json -Depth 4 | Set-Content -Path $ConsoleConfigPath -Encoding UTF8
-    Write-Host "Mimics Review Console configuration written to: $ConsoleConfigPath"
+    Write-Host "Mimics labeling configuration written to: $ConsoleConfigPath"
 } else {
-    Write-Host "Mimics Review Console configuration was not written. Pass -RegistryRoot and -Assignee, or copy config\mimics_review_console.example.json manually."
+    Write-Host "Mimics labeling configuration was not written. Pass -RegistryRoot and -Assignee, or copy config\mimics_review_console.example.json manually."
 }
 
 & $VenvPython -m segplatform mimics doctor --config $ConfigPath

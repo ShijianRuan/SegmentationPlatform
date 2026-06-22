@@ -9,6 +9,8 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 import pydicom
+from pydicom.dataset import FileDataset, FileMetaDataset
+from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, MRImageStorage, SecondaryCaptureImageStorage, generate_uid
 
 from segplatform.common import hash_directory, hash_file_set, prefixed_sha256
 from segplatform.errors import ConfigurationError, ValidationError
@@ -281,6 +283,203 @@ def inspect_metaimage(path: Path) -> tuple[Geometry, dict[str, Any]]:
         "hash_scope": hash_scope,
         "reader": {"name": "SimpleITK", "version": sitk.Version_VersionString()},
         "companion_paths": [str(path) for path in companions],
+    }
+
+
+def read_image_array(path: Path, format_name: str | None = None) -> tuple[np.ndarray, Geometry]:
+    selected_format = format_name or infer_format(path)
+    if selected_format == "nifti":
+        geometry, _ = inspect_nifti(path)
+        array = np.asanyarray(nib.load(str(path)).dataobj)
+    elif selected_format == "metaimage":
+        try:
+            import SimpleITK as sitk
+        except ImportError as error:
+            raise ConfigurationError("MetaImage support requires `pip install -e '.[metaimage]'`") from error
+        geometry, _ = inspect_metaimage(path)
+        array = sitk.GetArrayFromImage(sitk.ReadImage(str(path))).transpose(2, 1, 0)
+    else:
+        raise ValidationError(f"unsupported image format for derived DICOM conversion: {selected_format}")
+    if array.ndim != 3:
+        raise ValidationError(f"image must be 3D for Mimics derived DICOM conversion: {path}")
+    return np.asarray(array), geometry
+
+
+def _lps_geometry_from_geometry(geometry: Geometry) -> Geometry:
+    affine_ras = affine_from_geometry(geometry)
+    ras_to_lps = np.diag([-1.0, -1.0, 1.0, 1.0])
+    affine_lps = ras_to_lps @ affine_ras
+    axes = affine_lps[:3, :3]
+    spacing = np.linalg.norm(axes, axis=0)
+    if np.any(spacing <= 0):
+        raise ValidationError("cannot derive DICOM from image with invalid spacing")
+    direction = axes / spacing
+    if not np.allclose(direction.T @ direction, np.eye(3), atol=1e-5, rtol=0):
+        raise ValidationError("cannot derive DICOM from image with sheared or non-orthogonal affine")
+    if not np.allclose(np.cross(direction[:, 0], direction[:, 1]), direction[:, 2], atol=1e-5, rtol=0):
+        raise ValidationError("cannot derive DICOM from image with unsupported left-handed axis order")
+    return Geometry(
+        shape=geometry.shape,
+        spacing=tuple(float(value) for value in spacing),
+        origin=tuple(float(value) for value in affine_lps[:3, 3]),
+        direction=tuple(float(value) for value in direction.reshape(-1)),
+        coordinate_system="LPS",
+        pixel_type=geometry.pixel_type,
+        source=geometry.source,
+    )
+
+
+def _dicom_pixel_payload(array: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    if np.iscomplexobj(array):
+        raise ValidationError("complex-valued images cannot be converted to derived DICOM")
+    values = np.asarray(array)
+    if not np.all(np.isfinite(values)):
+        raise ValidationError("image contains NaN or Inf values and cannot be converted to derived DICOM")
+    min_value = float(np.min(values))
+    max_value = float(np.max(values))
+    if np.issubdtype(values.dtype, np.integer) and min_value >= -32768 and max_value <= 32767:
+        return values.astype(np.int16, copy=False), {
+            "bits_allocated": 16,
+            "bits_stored": 16,
+            "high_bit": 15,
+            "pixel_representation": 1,
+            "rescale_slope": 1.0,
+            "rescale_intercept": 0.0,
+            "conversion": "integer_int16",
+        }
+    if np.issubdtype(values.dtype, np.integer) and min_value >= 0 and max_value <= 65535:
+        return values.astype(np.uint16, copy=False), {
+            "bits_allocated": 16,
+            "bits_stored": 16,
+            "high_bit": 15,
+            "pixel_representation": 0,
+            "rescale_slope": 1.0,
+            "rescale_intercept": 0.0,
+            "conversion": "integer_uint16",
+        }
+
+    if max_value == min_value:
+        scaled = np.zeros(values.shape, dtype=np.int16)
+        slope = 1.0
+        intercept = min_value
+    else:
+        slope = (max_value - min_value) / 65535.0
+        intercept = min_value + 32768.0 * slope
+        scaled = np.rint((values - intercept) / slope).clip(-32768, 32767).astype(np.int16)
+    return scaled, {
+        "bits_allocated": 16,
+        "bits_stored": 16,
+        "high_bit": 15,
+        "pixel_representation": 1,
+        "rescale_slope": float(slope),
+        "rescale_intercept": float(intercept),
+        "conversion": "scaled_int16",
+        "source_min": min_value,
+        "source_max": max_value,
+    }
+
+
+def write_derived_dicom_series(
+    source: Path,
+    destination: Path,
+    *,
+    format_name: str,
+    modality: str,
+    case_id: str,
+    study_id: str,
+    series_description: str | None = None,
+) -> dict[str, Any]:
+    """Write a deidentified single-series DICOM view for Mimics 21 import.
+
+    The source image remains the platform Image Artifact. This derived DICOM is
+    a tool-specific working representation for Mimics, because Mimics 21 does
+    not expose a confirmed ImageData voxel-write API for arbitrary NIfTI/MHD
+    volumes.
+    """
+
+    array, geometry = read_image_array(source, format_name)
+    lps_geometry = _lps_geometry_from_geometry(geometry)
+    pixel_array, pixel_info = _dicom_pixel_payload(array)
+    destination.mkdir(parents=True, exist_ok=True)
+    for child in destination.iterdir():
+        if child.is_file():
+            child.unlink()
+
+    modality_value = str(modality or "OT").upper()
+    if modality_value == "CT":
+        sop_class_uid = CTImageStorage
+    elif modality_value == "MR":
+        sop_class_uid = MRImageStorage
+    else:
+        sop_class_uid = SecondaryCaptureImageStorage
+    study_uid = generate_uid()
+    series_uid = generate_uid()
+    frame_uid = generate_uid()
+    direction = np.asarray(lps_geometry.direction, dtype=float).reshape(3, 3)
+    spacing = lps_geometry.spacing
+    origin = np.asarray(lps_geometry.origin, dtype=float)
+    rows = int(lps_geometry.shape[1])
+    columns = int(lps_geometry.shape[0])
+    slice_count = int(lps_geometry.shape[2])
+
+    for index in range(slice_count):
+        file_meta = FileMetaDataset()
+        file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+        file_meta.MediaStorageSOPClassUID = sop_class_uid
+        file_meta.MediaStorageSOPInstanceUID = generate_uid()
+        dataset = FileDataset(
+            str(destination / f"slice_{index + 1:04d}.dcm"),
+            {},
+            file_meta=file_meta,
+            preamble=b"\0" * 128,
+        )
+        dataset.SOPClassUID = sop_class_uid
+        dataset.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+        dataset.PatientName = "ANON"
+        dataset.PatientID = case_id[:64]
+        dataset.PatientIdentityRemoved = "YES"
+        dataset.BurnedInAnnotation = "NO"
+        dataset.StudyInstanceUID = study_uid
+        dataset.SeriesInstanceUID = series_uid
+        dataset.FrameOfReferenceUID = frame_uid
+        dataset.StudyID = study_id[:16]
+        dataset.SeriesNumber = 1
+        dataset.InstanceNumber = index + 1
+        dataset.Modality = modality_value if modality_value in {"CT", "MR"} else "OT"
+        dataset.SeriesDescription = (series_description or f"SP derived from {format_name}")[:64]
+        dataset.Rows = rows
+        dataset.Columns = columns
+        dataset.PixelSpacing = [float(spacing[1]), float(spacing[0])]
+        dataset.SliceThickness = float(spacing[2])
+        dataset.SpacingBetweenSlices = float(spacing[2])
+        dataset.ImageOrientationPatient = [
+            *[float(value) for value in direction[:, 0]],
+            *[float(value) for value in direction[:, 1]],
+        ]
+        position = origin + direction[:, 2] * spacing[2] * index
+        dataset.ImagePositionPatient = [float(value) for value in position]
+        dataset.SliceLocation = float(np.dot(position, direction[:, 2]))
+        dataset.SamplesPerPixel = 1
+        dataset.PhotometricInterpretation = "MONOCHROME2"
+        dataset.BitsAllocated = pixel_info["bits_allocated"]
+        dataset.BitsStored = pixel_info["bits_stored"]
+        dataset.HighBit = pixel_info["high_bit"]
+        dataset.PixelRepresentation = pixel_info["pixel_representation"]
+        dataset.RescaleSlope = pixel_info["rescale_slope"]
+        dataset.RescaleIntercept = pixel_info["rescale_intercept"]
+        dataset.PixelData = np.ascontiguousarray(pixel_array[:, :, index].T).tobytes()
+        dataset.save_as(destination / f"slice_{index + 1:04d}.dcm", enforce_file_format=True)
+
+    derived_geometry, derived_inspection = inspect_dicom_series(destination)
+    matches, reasons = geometry_matches(geometry, derived_geometry)
+    if not matches:
+        raise ValidationError("derived DICOM geometry does not match source image: " + "; ".join(reasons))
+    return {
+        **derived_inspection,
+        "derived_geometry": derived_geometry,
+        "source_geometry": geometry,
+        "pixel_conversion": pixel_info,
+        "source_format": format_name,
     }
 
 

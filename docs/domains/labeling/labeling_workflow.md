@@ -99,11 +99,13 @@ Mimics 中的“当前活动图像”只是软件运行时状态。工具适配�
 
 ### 4.1 保存进度
 
-标注者可以反复保存 `.mcs` 或其他工作文件并关闭软件。长时间工作后可以额外运行
-**SP Review Console** 的 **Save Checkpoint**，把全部受管 Mask 保存为病例包内的恢复 buffer；该动作是灾备，
-不等于提交。
+标注者可以反复保存 `.mcs` 或其他工作文件并关闭软件。Ctrl+S / 保存 `.mcs` 是日常进度保存。
+长时间工作后可以额外运行 **Start Labeling** 的 **Save Recovery Backup**，把全部受管 Mask 保存为病例包内的恢复 buffer；
+该动作是灾备，不等于提交，也不是另一个日常保存按钮。
 
-保存进度只说明“工作可以继续”，不会：
+Recovery backup 默认只保留最新 3 份；更旧目录由脚本自动清理，避免长期标注产生大量 checkpoint buffer。
+
+保存进度和 recovery backup 都只说明“工作可以继续”，不会：
 
 - 创建新的正式标签版本。
 - 把草稿升级为人工确认标签。
@@ -271,12 +273,12 @@ Mimics 是工具适配器，不承担平台状态机和数据治理。实现采�
 ```text
 平台批量建包、分配 review，可选提前 sp mimics prepare
 -> 标注者打开 Mimics
--> Script / Scripting Library / SP Review Console
--> Open Next Review
+-> Script / Scripting Library / Start Labeling
+-> Start Next Case
 -> 标注者在 Mimics 编辑并保存
--> 可选：Console / Show Summary
--> 可选：Console / Save Checkpoint
--> Console / Submit Current Review
+-> 可选：Console / Task List
+-> 可选：Console / Save Recovery Backup
+-> Console / Complete、Needs Review 或 Report Problem
 -> 平台后台 sp mimics finalize 或 watcher
 -> 平台 QC 和标签版本登记
 ```
@@ -287,7 +289,13 @@ Mimics 是工具适配器，不承担平台状态机和数据治理。实现采�
 
 一个 `.mcs` 第一阶段只对应一个 `review_id`。多序列图像平等存在，每个目标组绑定明确的 `image_id`，脚本在操作 Mask 前显式切换 image set，不设置默认 primary/reference。
 
-第一阶段允许同一人兼任平台操作者和标注者，但职责仍要分开：平台动作在标注前后批量执行或由 `SP Review Console` 后台调用；标注者的日常动作只发生在 Mimics 内，不直接运行 `prepare/open/finalize`。
+第一阶段允许同一人兼任平台操作者和标注者，但职责仍要分开：平台动作在标注前后批量执行或由 `Start Labeling` 后台调用；标注者的日常动作只发生在 Mimics 内，不直接运行 `prepare/open/finalize`。
+
+目标器官清单不是 `known_absent` 清单。建包阶段只说明“这次希望标哪些器官”，通常不知道扫描实际覆盖和器官是否存在。
+标注者打开病例后，如发现空 Mask、无法确认或上下文不足，在提交时选择 `confirmed_absent`、提交复查或报告阻塞。
+`known_absent` 只在来源数据已有明确事实时作为例外字段使用，不用于根据部位粗略排除器官。
+在 Mimics 内忘记任务范围时，使用 **Start Labeling -> Task List** 查看目标器官和当前 Mask 状态。
+Task List 在 Mimics 弹窗内分页显示，并可按 Missing、Ready、With Initial、Known Absent 筛选；完整清单同时写入 `reports/mimics_task_list.txt` 作为技术记录。一百多个器官时，标注者应优先用 Missing/Ready 筛选定位待处理 Mask，而不是离开 Mimics 手动打开文本文件。
 
 完整代码边界和标注者操作见[Mimics 适配器设计与开发流程](mimics_adapter_design.md)，技术事实见[Mimics 技术参考](mimics_reference.md)，验证步骤见[Mimics POC 计划](mimics_poc_plan.md)。
 
@@ -295,18 +303,20 @@ Mimics 是工具适配器，不承担平台状态机和数据治理。实现采�
 
 Mimics 21.0 官方资料明确支持 DICOM、BMP、TIFF、JPEG 和 raw 图像；当前资料没有证明它原生完整支持 NIfTI 或 MHD/MHA。
 
-因此第一选择是：
+因此图像导入策略是：
 
-- 原始图像优先用 DICOM 创建图像集。
+- 原始 DICOM 优先直接创建图像集。
+- 原始 NIfTI/MHD 由外部现代 Python 读取，并派生成 Mimics 已支持的 DICOM、RAW 或标准图像切片；P03 验证通过后才能批量使用。
+- 不依赖 Mimics Python 3.5 直接把外部数组写成 `ImageData`，因为当前 API 只确认图像体素读取，没有确认图像体素写入。
 - 外部标签必要时由外部 Python 读取，再注入绑定到正确图像集的 Mimics Mask。
 - 提交时可以导出单个 Mask，也可以按目标组导出全部 Mask。
 - 输出目录按 `image_id/organ` 组织，避免多序列混淆。
 
 `.mcs` 保存 Mimics 工作现场，适合作为中间进度文件，但不是平台唯一数据来源。病例包 v0.5
-允许在 `working/checkpoints/{review_id}/` 保存 gzip 压缩的逐器官 Mask 恢复快照；`.mcs` 损坏时可以保留
-旧文件并从最近 checkpoint 重建。跨机器和跨版本能力仍必须实际验证。
+允许在 `working/checkpoints/{review_id}/` 保存 gzip 压缩的逐器官 recovery backup；`.mcs` 损坏时可以保留
+旧文件并从最近 backup 重建。跨机器和跨版本能力仍必须实际验证。
 
-Windows 工作站的安装、v0.5 目录、探针、checkpoint 和恢复命令见
+Windows 工作站的安装、v0.5 目录、探针、recovery backup 和恢复命令见
 [Mimics Research 21 Windows 工作站操作手册](mimics_windows_runbook.md)。
 
 ## 12. 候选标签生成为什么仍是独立域
@@ -353,7 +363,7 @@ Mimics Gate A 通过后实现：
 
 - 外部 `prepare`、`prepare-many`、`open`、`finalize`、`finalize-many` 命令。
 - Mimics 内 `sp_review_console.py`、`sp_open_review.py`、`sp_submit_review.py` 和 `sp_save_checkpoint.py`。
-- 只暴露给标注者的 `scripting_library/SP_Review_Console.py`。
+- 只暴露给标注者的 `scripting_library/Start_Labeling.py`。
 - 逐器官布尔缓冲区和 manifest 桥接。
 - 任务专属 `.mcs`、Mask metadata 和选择性导出。
 

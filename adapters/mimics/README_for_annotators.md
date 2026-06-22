@@ -13,20 +13,22 @@
 ## 打开和切换任务
 
 1. 打开 Mimics。
-2. 进入 `Script -> Scripting Library -> SP Review Console`。
-3. 选择 **Open Next Review**。
+2. 进入 `Script -> Scripting Library -> Start Labeling`。
+3. 选择 **Start Next Case**。
 4. 在 Mimics 显示的任务摘要中核对病例、图像序列和目标器官。
-5. 若病例、序列、方向或初始 Mask 明显不符，在 **SP Review Console** 中选择提交/阻塞相关操作，不继续编辑。
+5. 若病例、序列、方向或初始 Mask 明显不符，在 **Start Labeling** 中选择 **Report Problem**，不继续编辑。
 
-不要直接双击历史 `.mcs`。继续任务、返修任务和下一例都从 **SP Review Console** 进入。
+不要直接双击历史 `.mcs`。继续任务、返修任务和下一例都从 **Start Labeling** 进入。
 
 ## 标注和保存
 
 - 使用 Mimics 正常工具编辑平台创建的 Mask。
 - 可以随时保存 `.mcs` 并关闭软件。
 - 保存只保留进度，不会提交，也不会创建 verified 标签。
-- 忘记当前病例、序列或目标器官时，在 **SP Review Console** 中选择 **Show Summary**。
-- 长时间工作或完成一个阶段后，可在 **SP Review Console** 中选择 **Save Checkpoint**，额外保存全部 Mask 的恢复快照。
+- 忘记当前病例、序列或目标器官时，在 **Start Labeling** 中选择 **Task List**；它会在 Mimics 弹窗内分页显示任务目标和当前 Mask 状态，并可按 Missing、Ready、With Initial、Known Absent 筛选。
+- 长时间工作或完成一个阶段后，可在 **Start Labeling** 中选择 **Save Recovery Backup**，额外保存全部 Mask 的恢复快照。
+- 当前病例暂时不想处理或不适合自己处理时，选择 **Skip Case**。它只把病例移出当前领取队列，不代表病例有问题。
+- 临时观察或试画可以自建 Mask，但它只是草稿参考，不会被平台提交或验证。若这个 Mask 需要成为正式标签，先联系平台管理员创建追加任务，再把内容转入平台创建的正式 Mask。
 - 不自行改变平台 Mask 的器官名称或删除其任务 metadata。
 - 不手工复制 header、重采样、改标签编号或导出 NIfTI。
 
@@ -34,29 +36,35 @@
 
 完成本次工作时：
 
-1. 打开 `Script -> Scripting Library -> SP Review Console`。
-2. 选择 **Submit Current Review**。
-3. 选择一个结果和本次要提交的目标组。2–5 个目标组时可以逐个勾选后一次提交任意组合。
+1. 打开 `Script -> Scripting Library -> Start Labeling`。
+2. 直接选择 **Complete**、**Needs Review** 或 **Report Problem**。
+3. 如果本病例包含多个目标组，再选择本次要提交的目标组。2–5 个目标组时可以逐个勾选后一次提交任意组合。
 
 | 选择 | 何时使用 |
 | --- | --- |
-| 提交完成 | 本次目标已经达到标注要求 |
-| 提交复查 | 已经检查，但医学判断仍不确定 |
-| 报告阻塞 | 数据、方向、Mask 绑定或工具错误导致无法继续 |
-| 取消 | 返回 Mimics，不生成提交 |
+| Complete | 本次目标已经达到标注要求 |
+| Needs Review | 已经检查，但医学判断仍不确定 |
+| Report Problem | 数据、方向、Mask 绑定或工具错误导致无法继续 |
+| Cancel | 返回 Mimics，不生成提交 |
 
-脚本只导出本次任务管理的 Mask，并提示“已导出，仍需平台检查”。平台随后独立运行格式转换和空间 QC；只有检查通过的“提交完成”才会生成新的人工确认标签版本。
+不要用 **Report Problem** 表示“今天先不标”或“想先标别的病例”。这种情况用 **Skip Case**。
 
-提交前脚本会聚合检查 Mask 是否齐全、是否绑定正确图像、基础标签版本和 shape。多个空 Mask 会先在一个清单中显示，可以统一选择“全部确认不存在”“全部待复查”，也可以逐项判断。
+脚本只导出本次任务管理的 Mask，并提示“已导出，仍需平台检查”。如果项目里存在自建或非平台管理的 Mask，提交前会提示这些 Mask 不会被导出。平台随后独立运行格式转换和空间 QC；只有检查通过的“提交完成”才会生成新的人工确认标签版本。
+
+最常见路径是单目标组、无空 Mask、选择 **Complete**：这时不会再追问提交类型，只等待导出完成提示。
+
+提交前脚本会聚合检查 Mask 是否齐全、是否绑定正确图像、基础标签版本和 shape。多个空 Mask 会先显示数量和前若干项，完整清单写入报告文件；可以统一选择“全部确认不存在”“全部待复查”，也可以逐项判断。
+
+任务清单表示“本次希望处理哪些器官”，不表示平台已经提前知道哪些器官存在或不存在。不要因为图像看起来是局部扫描就自行删除目标 Mask；如果无法确认，提交复查或报告阻塞。
 
 一个目标组需要复查或检查失败，不应阻塞同一病例其他已经完成的目标组。
 
 ## 继续和返修
 
-- 未提交任务：再次从 **SP Review Console** 打开任务，继续编辑已有 `.mcs`。
+- 未提交任务：再次从 **Start Labeling** 打开任务，继续编辑已有 `.mcs`。
 - 提交前检查失败：弹窗列出主要问题，完整内容见 `reports/mimics_submit_precheck.json`。
-- 平台 QC 失败：下次从 **SP Review Console** 打开任务时会显示最近的失败摘要；完整内容见 `reports/review_report.json`。
-- `.mcs` 损坏：不要删除病例包。管理员保留旧文件并从最近的 checkpoint 重建工作区。
+- 平台 QC 失败：弹窗会列出主要问题和下一步动作。能修的 Mask 问题回到任务里修；提示版本、序列、几何或 hash 问题时不要手工改文件，联系平台管理员。完整技术报告见 `reports/review_report.json`。
+- `.mcs` 损坏：不要删除病例包。管理员保留旧文件并从最近的 recovery backup 重建工作区。
 - 已验证标签再修改：平台创建新的 `review_id`，旧标签作为基础版本；新结果形成新版本，不覆盖旧版本。
 - 多位标注者：每个人使用独立任务和 `.mcs`，不要多人共享写同一项目文件。
 

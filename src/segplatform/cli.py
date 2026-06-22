@@ -8,16 +8,21 @@ from typing import Any
 
 from segplatform.adapters.mimics.doctor import doctor
 from segplatform.adapters.mimics.finalize import finalize_case
-from segplatform.adapters.mimics.launcher import open_case
+from segplatform.adapters.mimics.launcher import open_case, prebuild_workspace
 from segplatform.adapters.mimics.prepare import prepare_case
 from segplatform.adapters.mimics.probes import evaluate_probe, run_probe
 from segplatform.case_packages import create_case_package, validate_case_package, validate_registry_record
 from segplatform.common import load_data
+from segplatform.dataset_descriptions import build_requests_from_dataset_description
+from segplatform.distribution import collect_submissions, export_assignee_worklist
 from segplatform.errors import SegPlatformError
-from segplatform.ingest import build_case_package_requests, scan_source
+from segplatform.ingest import build_case_package_requests, register_scan, scan_source
+from segplatform.labels import merge_labels, register_label, register_labels_from_table
 from segplatform.registry import FileRegistry
-from segplatform.reviews import mark_review_started, next_review, review_stats
-from segplatform.snapshots import create_snapshot, validate_snapshot
+from segplatform.review_updates import create_followup_reviews, create_followup_reviews_from_findings
+from segplatform.reviews import defer_review, mark_review_started, next_review, reactivate_review, review_stats
+from segplatform.runs import write_run_record
+from segplatform.snapshots import build_snapshot_request, create_snapshot, validate_snapshot
 
 
 def print_json(value: Any) -> None:
@@ -28,6 +33,36 @@ def _split_values(values: list[str]) -> list[str]:
     result: list[str] = []
     for value in values:
         result.extend(item.strip() for item in value.split(",") if item.strip())
+    return result
+
+
+def _parse_label_map(values: list[str] | None) -> dict[str, int] | None:
+    if not values:
+        return None
+    result: dict[str, int] = {}
+    for raw in values:
+        for item in raw.split(","):
+            text = item.strip()
+            if not text:
+                continue
+            if "=" not in text:
+                raise SegPlatformError(f"label map item must use organ=value: {text}")
+            organ, value = text.split("=", 1)
+            result[organ.strip()] = int(value.strip())
+    return result
+
+
+def _parse_key_value(values: list[str] | None, *, name: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for raw in values or []:
+        for item in raw.split(","):
+            text = item.strip()
+            if not text:
+                continue
+            if "=" not in text:
+                raise SegPlatformError(f"{name} item must use key=value: {text}")
+            key, value = text.split("=", 1)
+            result[key.strip()] = value.strip()
     return result
 
 
@@ -56,6 +91,18 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_scan = ingest_sub.add_parser("scan")
     ingest_scan.add_argument("source_root", type=Path)
     ingest_scan.add_argument("--output", type=Path, required=True)
+    ingest_register = ingest_sub.add_parser("register")
+    ingest_register.add_argument("scan", type=Path)
+    ingest_register.add_argument("--registry", type=Path, required=True)
+    ingest_register.add_argument("--import-batch", required=True)
+    ingest_register.add_argument("--source-type", default="ingest_scan")
+    ingest_register.add_argument("--source-name")
+    ingest_register.add_argument("--source-zone", default="working", choices=["restricted_raw", "working"])
+    ingest_register.add_argument("--deidentification-status", default="verified", choices=["pending", "verified", "failed"])
+    ingest_register.add_argument("--governance-profile", default="import_scan_profile")
+    ingest_register.add_argument("--governance-profile-version", default="1")
+    ingest_register.add_argument("--usability", default="allowed", choices=["allowed", "allowed_with_assumptions", "blocked"])
+    ingest_register.add_argument("--allow-existing", action="store_true")
     ingest_build = ingest_sub.add_parser("build-requests")
     ingest_build.add_argument("scan", type=Path)
     ingest_build.add_argument("output_dir", type=Path)
@@ -67,6 +114,9 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_build.add_argument("--deidentification-status", default="verified")
     ingest_build.add_argument("--governance-profile", default="import_scan_profile")
     ingest_build.add_argument("--governance-profile-version", default="1")
+    ingest_description = ingest_sub.add_parser("from-description")
+    ingest_description.add_argument("description", type=Path)
+    ingest_description.add_argument("output_dir", type=Path)
 
     package = subparsers.add_parser("package", help="Create and validate Case Packages")
     package_sub = package.add_subparsers(dest="action", required=True)
@@ -98,6 +148,18 @@ def build_parser() -> argparse.ArgumentParser:
     mimics_prepare_many.add_argument("--config", type=Path, required=True)
     mimics_prepare_many.add_argument("--rebuild-workspace", action="store_true")
     mimics_prepare_many.add_argument("--continue-on-error", action="store_true")
+    mimics_prebuild = mimics_sub.add_parser("prebuild-workspace")
+    mimics_prebuild.add_argument("case_root", type=Path)
+    mimics_prebuild.add_argument("--config", type=Path, required=True)
+    mimics_prebuild.add_argument("--rebuild-workspace", action="store_true")
+    mimics_prebuild.add_argument("--dry-run", action="store_true")
+    mimics_prebuild.add_argument("--no-wait", action="store_true")
+    mimics_prebuild_many = mimics_sub.add_parser("prebuild-many")
+    mimics_prebuild_many.add_argument("cases_root", type=Path)
+    mimics_prebuild_many.add_argument("--config", type=Path, required=True)
+    mimics_prebuild_many.add_argument("--rebuild-workspace", action="store_true")
+    mimics_prebuild_many.add_argument("--dry-run", action="store_true")
+    mimics_prebuild_many.add_argument("--continue-on-error", action="store_true")
     mimics_open = mimics_sub.add_parser("open")
     mimics_open.add_argument("case_root", type=Path)
     mimics_open.add_argument("--config", type=Path, required=True)
@@ -113,6 +175,12 @@ def build_parser() -> argparse.ArgumentParser:
     mimics_finalize_many.add_argument("--config", type=Path, required=True)
     mimics_finalize_many.add_argument("--registry", type=Path, required=True)
     mimics_finalize_many.add_argument("--continue-on-error", action="store_true")
+    mimics_collect = mimics_sub.add_parser("collect-submissions")
+    mimics_collect.add_argument("returned_root", type=Path)
+    mimics_collect.add_argument("central_cases_root", type=Path)
+    mimics_collect.add_argument("--registry", type=Path, required=True)
+    mimics_collect.add_argument("--overwrite", action="store_true")
+    mimics_collect.add_argument("--include-working", action="store_true")
     mimics_probe_run = mimics_sub.add_parser("probe-run")
     mimics_probe_run.add_argument("case_root", type=Path)
     mimics_probe_run.add_argument("--config", type=Path, required=True)
@@ -142,6 +210,97 @@ def build_parser() -> argparse.ArgumentParser:
     review_start.add_argument("--registry", type=Path, required=True)
     review_start.add_argument("--review-id", required=True)
     review_start.add_argument("--actor")
+    review_defer = review_sub.add_parser("defer")
+    review_defer.add_argument("--registry", type=Path, required=True)
+    review_defer.add_argument("--review-id", required=True)
+    review_defer.add_argument("--actor")
+    review_defer.add_argument("--reason")
+    review_reactivate = review_sub.add_parser("reactivate")
+    review_reactivate.add_argument("--registry", type=Path, required=True)
+    review_reactivate.add_argument("--review-id", required=True)
+    review_reactivate.add_argument("--actor")
+    review_followup = review_sub.add_parser("create-followup")
+    review_followup.add_argument("--registry", type=Path, required=True)
+    review_followup.add_argument("--output-root", type=Path, required=True)
+    review_followup.add_argument("--organs", nargs="+", required=True)
+    review_followup.add_argument("--assignee")
+    review_followup.add_argument("--case-id", action="append")
+    review_followup.add_argument("--source-cases-root", type=Path)
+    review_followup.add_argument("--review-suffix", default="followup")
+    review_followup.add_argument("--allow-no-base", action="store_true")
+    review_followup.add_argument("--overwrite", action="store_true")
+    review_from_finding = review_sub.add_parser("create-from-finding")
+    review_from_finding.add_argument("finding", type=Path)
+    review_from_finding.add_argument("--registry", type=Path, required=True)
+    review_from_finding.add_argument("--output-root", type=Path, required=True)
+    review_from_finding.add_argument("--assignee")
+    review_from_finding.add_argument("--source-cases-root", type=Path)
+    review_from_finding.add_argument("--review-suffix", default="finding")
+    review_from_finding.add_argument("--allow-no-base", action="store_true")
+    review_from_finding.add_argument("--overwrite", action="store_true")
+    review_export = review_sub.add_parser("export-worklist")
+    review_export.add_argument("--registry", type=Path, required=True)
+    review_export.add_argument("--assignee", required=True)
+    review_export.add_argument("--output-root", type=Path, required=True)
+    review_export.add_argument("--local-cases-root", type=Path)
+    review_export.add_argument("--include-status", action="append")
+    review_export.add_argument("--limit", type=int)
+    review_export.add_argument("--merge", action="store_true")
+    review_export.add_argument("--overwrite", action="store_true")
+
+    label = subparsers.add_parser("label", help="Register and merge Label Artifacts")
+    label_sub = label.add_subparsers(dest="action", required=True)
+    label_register = label_sub.add_parser("register")
+    label_register.add_argument("--registry", type=Path, required=True)
+    label_register.add_argument("--case-id", required=True)
+    label_register.add_argument("--image-id", required=True)
+    label_register.add_argument("--mask", type=Path, required=True)
+    label_register.add_argument("--organ")
+    label_register.add_argument("--label-map", action="append")
+    label_register.add_argument(
+        "--lifecycle-status",
+        default="source_label",
+        choices=["source_label", "candidate_label", "draft_label", "verified_label", "rejected_label"],
+    )
+    label_register.add_argument(
+        "--source-type",
+        default="imported_dataset",
+        choices=["imported_dataset", "manual_review", "model", "external_algorithm", "rule_script"],
+    )
+    label_register.add_argument("--source-name")
+    label_register.add_argument("--generator-id")
+    label_register.add_argument("--label-id")
+    label_register.add_argument("--model-training", default="needs_policy")
+    label_register.add_argument("--commercial-use", default="needs_policy")
+    label_register.add_argument("--redistribution", default="needs_policy")
+    label_register_many = label_sub.add_parser("register-many")
+    label_register_many.add_argument("table", type=Path)
+    label_register_many.add_argument("--registry", type=Path, required=True)
+    label_register_many.add_argument(
+        "--lifecycle-status",
+        default="source_label",
+        choices=["source_label", "candidate_label", "draft_label", "verified_label", "rejected_label"],
+    )
+    label_register_many.add_argument(
+        "--source-type",
+        default="imported_dataset",
+        choices=["imported_dataset", "manual_review", "model", "external_algorithm", "rule_script"],
+    )
+    label_register_many.add_argument("--source-name")
+    label_register_many.add_argument("--model-training", default="needs_policy")
+    label_register_many.add_argument("--commercial-use", default="needs_policy")
+    label_register_many.add_argument("--redistribution", default="needs_policy")
+    label_register_many.add_argument("--continue-on-error", action="store_true")
+    label_merge = label_sub.add_parser("merge")
+    label_merge.add_argument("--registry", type=Path, required=True)
+    label_merge.add_argument("--label-id", action="append", required=True)
+    label_merge.add_argument("--output-label-id")
+    label_merge.add_argument("--organ-source", action="append")
+    label_merge.add_argument(
+        "--lifecycle-status",
+        choices=["source_label", "candidate_label", "draft_label", "verified_label", "rejected_label"],
+    )
+    label_merge.add_argument("--supersede-inputs", action="store_true")
 
     registry = subparsers.add_parser("registry", help="Validate registry records")
     registry_sub = registry.add_subparsers(dest="action", required=True)
@@ -153,6 +312,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     snapshot = subparsers.add_parser("snapshot", help="Create the immutable pre-training dataset snapshot")
     snapshot_sub = snapshot.add_subparsers(dest="action", required=True)
+    snapshot_build = snapshot_sub.add_parser("build-request")
+    snapshot_build.add_argument("--registry", type=Path, required=True)
+    snapshot_build.add_argument("--output", type=Path, required=True)
+    snapshot_build.add_argument("--snapshot-id", required=True)
+    snapshot_build.add_argument("--task-id", required=True)
+    snapshot_build.add_argument("--organs", nargs="+", required=True)
+    snapshot_build.add_argument("--split-plan", type=Path)
+    snapshot_build.add_argument("--default-split", choices=["train", "val", "test"], default="train")
+    snapshot_build.add_argument("--allow-lifecycle-status", action="append")
+    snapshot_build.add_argument("--require-all-organs", action="store_true")
+    snapshot_build.add_argument("--preprocess-name", default="none")
+    snapshot_build.add_argument("--created-by", default="offline_operator")
     snapshot_create = snapshot_sub.add_parser("create")
     snapshot_create.add_argument("request", type=Path)
     snapshot_create.add_argument("--registry", type=Path, required=True)
@@ -168,6 +339,22 @@ def run(args: argparse.Namespace) -> int:
 
         write_json(args.output, report)
         print_json({"status": "scanned", "output": str(args.output), **report["summary"]})
+    elif args.domain == "ingest" and args.action == "register":
+        print_json(
+            register_scan(
+                args.scan,
+                args.registry,
+                import_batch=args.import_batch,
+                source_type=args.source_type,
+                source_name=args.source_name,
+                source_zone=args.source_zone,
+                deidentification_status=args.deidentification_status,
+                governance_profile=args.governance_profile,
+                governance_profile_version=args.governance_profile_version,
+                usability=args.usability,
+                allow_existing=args.allow_existing,
+            )
+        )
     elif args.domain == "ingest" and args.action == "build-requests":
         print_json(
             build_case_package_requests(
@@ -183,6 +370,8 @@ def run(args: argparse.Namespace) -> int:
                 governance_profile_version=args.governance_profile_version,
             )
         )
+    elif args.domain == "ingest" and args.action == "from-description":
+        print_json(build_requests_from_dataset_description(args.description, args.output_dir))
     elif args.domain == "package" and args.action == "create":
         path = create_case_package(args.request, args.output_root, registry_root=args.registry, overwrite=args.overwrite)
         print_json({"status": "created", "case_root": str(path)})
@@ -234,6 +423,42 @@ def run(args: argparse.Namespace) -> int:
         print_json({"status": "failed" if had_error else "prepared", "results": results})
         if had_error:
             return 2
+    elif args.domain == "mimics" and args.action == "prebuild-workspace":
+        result = prebuild_workspace(
+            args.case_root,
+            args.config,
+            rebuild_workspace=args.rebuild_workspace,
+            dry_run=args.dry_run,
+            wait=not args.no_wait,
+        )
+        print_json(result)
+        if result.get("returncode") not in (None, 0):
+            return 2
+    elif args.domain == "mimics" and args.action == "prebuild-many":
+        results = []
+        had_error = False
+        for case_root in _case_roots(args.cases_root):
+            try:
+                result = prebuild_workspace(
+                    case_root,
+                    args.config,
+                    rebuild_workspace=args.rebuild_workspace,
+                    dry_run=args.dry_run,
+                    wait=True,
+                )
+                results.append({"case_root": str(case_root), **result})
+                if result.get("returncode") not in (None, 0):
+                    had_error = True
+                    if not args.continue_on_error:
+                        break
+            except Exception as error:
+                had_error = True
+                results.append({"case_root": str(case_root), "status": "failed", "error": str(error)})
+                if not args.continue_on_error:
+                    break
+        print_json({"status": "failed" if had_error else "prebuilt", "results": results})
+        if had_error:
+            return 2
     elif args.domain == "mimics" and args.action == "open":
         print_json(
             open_case(
@@ -267,6 +492,16 @@ def run(args: argparse.Namespace) -> int:
         print_json({"status": "failed" if had_error else "finalized", "results": results})
         if had_error:
             return 2
+    elif args.domain == "mimics" and args.action == "collect-submissions":
+        print_json(
+            collect_submissions(
+                args.returned_root,
+                args.central_cases_root,
+                registry_root=args.registry,
+                overwrite=args.overwrite,
+                include_working=args.include_working,
+            )
+        )
     elif args.domain == "mimics" and args.action == "probe-run":
         result = run_probe(
             args.case_root,
@@ -308,6 +543,118 @@ def run(args: argparse.Namespace) -> int:
         )
     elif args.domain == "review" and args.action == "start":
         print_json(mark_review_started(args.registry, args.review_id, actor=args.actor))
+    elif args.domain == "review" and args.action == "defer":
+        print_json(defer_review(args.registry, args.review_id, actor=args.actor, reason=args.reason))
+    elif args.domain == "review" and args.action == "reactivate":
+        print_json(reactivate_review(args.registry, args.review_id, actor=args.actor))
+    elif args.domain == "review" and args.action == "create-followup":
+        print_json(
+            create_followup_reviews(
+                args.registry,
+                args.output_root,
+                organs=_split_values(args.organs),
+                assignee=args.assignee,
+                case_ids=args.case_id,
+                source_cases_root=args.source_cases_root,
+                review_suffix=args.review_suffix,
+                allow_no_base=args.allow_no_base,
+                overwrite=args.overwrite,
+            )
+        )
+    elif args.domain == "review" and args.action == "create-from-finding":
+        result = create_followup_reviews_from_findings(
+            args.registry,
+            args.output_root,
+            args.finding,
+            assignee=args.assignee,
+            source_cases_root=args.source_cases_root,
+            review_suffix=args.review_suffix,
+            allow_no_base=args.allow_no_base,
+            overwrite=args.overwrite,
+        )
+        run = write_run_record(
+            args.registry,
+            action="review.create-from-finding",
+            status=result["status"],
+            inputs={"finding": str(args.finding), "output_root": str(args.output_root)},
+            outputs={"review_count": result.get("review_count", 0)},
+            result={"unsupported_count": len(result.get("unsupported", []))},
+        )
+        print_json({**result, "run_id": run["run_id"], "run_record_path": run["run_record_path"]})
+    elif args.domain == "review" and args.action == "export-worklist":
+        statuses = set(args.include_status or []) or None
+        print_json(
+            export_assignee_worklist(
+                args.registry,
+                args.output_root,
+                assignee=args.assignee,
+                local_cases_root=args.local_cases_root,
+                include_statuses=statuses,
+                overwrite=args.overwrite,
+                merge=args.merge,
+                limit=args.limit,
+            )
+        )
+    elif args.domain == "label" and args.action == "register":
+        print_json(
+            register_label(
+                args.registry,
+                case_id=args.case_id,
+                image_id=args.image_id,
+                mask_path=args.mask,
+                organ=args.organ,
+                label_map=_parse_label_map(args.label_map),
+                lifecycle_status=args.lifecycle_status,
+                source_type=args.source_type,
+                source_name=args.source_name,
+                generator_id=args.generator_id,
+                label_id=args.label_id,
+                model_training=args.model_training,
+                commercial_use=args.commercial_use,
+                redistribution=args.redistribution,
+            )
+        )
+    elif args.domain == "label" and args.action == "register-many":
+        result = register_labels_from_table(
+            args.registry,
+            args.table,
+            lifecycle_status=args.lifecycle_status,
+            source_type=args.source_type,
+            source_name=args.source_name,
+            model_training=args.model_training,
+            commercial_use=args.commercial_use,
+            redistribution=args.redistribution,
+            continue_on_error=args.continue_on_error,
+        )
+        run = write_run_record(
+            args.registry,
+            action="label.register-many",
+            status=result["status"],
+            inputs={"table": str(args.table)},
+            outputs={"registered_count": result.get("registered_count", 0)},
+            result={"failed_count": result.get("failed_count", 0)},
+        )
+        print_json({**result, "run_id": run["run_id"], "run_record_path": run["run_record_path"]})
+        if result["status"] == "failed":
+            return 2
+    elif args.domain == "label" and args.action == "merge":
+        result = merge_labels(
+            args.registry,
+            label_ids=args.label_id,
+            label_id=args.output_label_id,
+            organ_sources=_parse_key_value(args.organ_source, name="organ-source"),
+            lifecycle_status=args.lifecycle_status,
+            supersede_inputs=args.supersede_inputs,
+        )
+        run = write_run_record(
+            args.registry,
+            action="label.merge",
+            status=result["status"],
+            inputs={"label_ids": args.label_id},
+            outputs={"label_id": result["label_id"]},
+            result={"superseded_label_ids": result.get("superseded_label_ids", [])},
+        )
+        print_json({**result, "run_id": run["run_id"], "run_record_path": run["run_record_path"]})
     elif args.domain == "registry" and args.action == "validate":
         validate_registry_record(args.record, args.schema)
         print_json({"status": "passed", "record": str(args.record)})
@@ -319,6 +666,22 @@ def run(args: argparse.Namespace) -> int:
                 "status": "rebuilt",
                 "label_index_items": len(label_index.get("items", {})),
             }
+        )
+    elif args.domain == "snapshot" and args.action == "build-request":
+        print_json(
+            build_snapshot_request(
+                args.registry,
+                args.output,
+                snapshot_id=args.snapshot_id,
+                task_id=args.task_id,
+                organs=_split_values(args.organs),
+                split_plan=args.split_plan,
+                default_split=args.default_split,
+                allow_lifecycle_status=_split_values(args.allow_lifecycle_status or []) or None,
+                require_all_organs=args.require_all_organs,
+                preprocess_name=args.preprocess_name,
+                created_by=args.created_by,
+            )
         )
     elif args.domain == "snapshot" and args.action == "create":
         print_json(create_snapshot(args.request, args.registry))

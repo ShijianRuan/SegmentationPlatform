@@ -99,6 +99,31 @@ flowchart LR
     generation --> labels
 ```
 
+### 3.1 平台底层是对象图，不是一条线性流水线
+
+上一节按常见顺序讲，是为了让读者先理解最小闭环；它不表示每批数据都必须按同一条直线走完。平台真正冻结的是 Registry 中的对象和对象关系：
+
+```text
+Case / Image Artifact
+-> Review Task 或 Candidate Generation Job
+-> Label Artifact
+-> Dataset Snapshot
+-> Model Record
+-> Candidate Label
+```
+
+因此，允许出现以下非线性情况：
+
+| 情况 | 合法做法 | 当前阶段边界 |
+| --- | --- | --- |
+| 同一批图像分给不同工具 | 同一 Image Artifact 可创建多个 Review Task，分别交给 Mimics、Slicer 或其他工具适配器 | 阶段 A 以病例包和 review package 表达分支，不引入通用 DAG 调度器 |
+| 同一病例不同器官分给不同人 | 每个标注者产出独立 Label Artifact；后续用受控合并动作生成新的 active Label Artifact | 自动仲裁和多标签合并工具仍是后续项；不要在同一 `.mcs` 中多人混写 |
+| QC 失败后返修 | Review Task 回到 `in_progress`，标注者修正后再次提交 | 已支持 Mimics finalize 失败回环 |
+| Snapshot 阶段发现标签或划分问题 | 划分问题修正 split plan 后重建 Snapshot；标签问题创建 follow-up review | 当前没有“一键从 Snapshot finding 创建返修任务”的命令 |
+| 图像已有可信外部标签 | 用 `sp label register` 直接登记为 `source_label`，Snapshot 的 `label_policy` 决定是否采用 | 阶段 A 支持单文件注册和空间检查；复杂批量标签接入仍建议先走 dataset description 或 custom importer |
+
+阶段 A 的原则是：**不要先实现复杂编排引擎，但必须让 Registry 能表达分支、回环和多版本来源。** 脚本可以按顺序运行，数据模型不能被顺序绑死。
+
 ## 4. 三大实现域
 
 目录按工程责任分为三个实现域。它们共同完成一条流程，不是三个独立平台。

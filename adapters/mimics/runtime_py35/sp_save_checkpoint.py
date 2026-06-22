@@ -4,12 +4,14 @@
 from __future__ import print_function
 
 import os
+import shutil
 import sys
 import time
 
 import mimics
 
 from sp_common import (
+    buffer_mapping_evidence_for_image,
     expected_mimics_shape,
     export_mask_u8_gzip,
     find_mask,
@@ -20,6 +22,8 @@ from sp_common import (
     write_error_report,
     write_json,
 )
+
+DEFAULT_CHECKPOINT_KEEP_COUNT = 3
 
 
 def discover_runtime():
@@ -36,8 +40,41 @@ def discover_runtime():
     return load_json(os.path.join(package_root, "working", "mimics_runtime.json"))
 
 
-def main():
+def cleanup_old_checkpoints(runtime, keep_count):
+    try:
+        keep_count = int(keep_count)
+    except Exception:
+        keep_count = DEFAULT_CHECKPOINT_KEEP_COUNT
+    if keep_count < 1:
+        keep_count = 1
+    checkpoints_root = os.path.join(
+        runtime["package_root"],
+        "working",
+        "checkpoints",
+        runtime["review_id"],
+    )
+    if not os.path.isdir(checkpoints_root):
+        return []
+    candidates = []
+    for name in os.listdir(checkpoints_root):
+        path = os.path.join(checkpoints_root, name)
+        if name == "latest.json" or not os.path.isdir(path):
+            continue
+        manifest = os.path.join(path, "checkpoint_manifest.json")
+        if os.path.isfile(manifest):
+            candidates.append((name, path))
+    candidates.sort(reverse=True)
+    removed = []
+    for _name, path in candidates[keep_count:]:
+        shutil.rmtree(path)
+        removed.append(path)
+    return removed
+
+
+def main(keep_count=None):
     runtime = discover_runtime()
+    if keep_count is None:
+        keep_count = os.environ.get("SP_CHECKPOINT_KEEP_COUNT", DEFAULT_CHECKPOINT_KEEP_COUNT)
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "_{0}".format(os.getpid())
     checkpoint_root = os.path.join(
         runtime["package_root"],
@@ -48,8 +85,10 @@ def main():
     )
     entries = []
     base_labels = {}
+    evidence_by_image_id = {}
     image_map = match_images(mimics, runtime["image_sets"])
     for target in runtime["targets"]:
+        evidence_by_image_id[target["image_id"]] = buffer_mapping_evidence_for_image(runtime, target["image_id"])
         base_labels[target["target_id"]] = {
             "label_id": target.get("base_label_id", ""),
             "sha256": target.get("base_label_sha256", ""),
@@ -105,6 +144,7 @@ def main():
             "mimics_version": str(mimics.get_version()),
             "python_version": sys.version,
             "buffer_mapping_evidence_id": runtime.get("buffer_mapping", {}).get("evidence_id", ""),
+            "buffer_mapping_evidence_by_image_id": evidence_by_image_id,
             "base_labels": base_labels,
             "entries": entries,
         },
@@ -126,10 +166,15 @@ def main():
             ).replace("\\", "/"),
         },
     )
+    removed_checkpoints = cleanup_old_checkpoints(runtime, keep_count)
     mimics.file.save_project(filename=runtime["mcs_path"], save_as_type="Mimics Project Files")
     mimics.dialogs.message_box(
-        "Checkpoint saved.\n\n{0}".format(checkpoint_manifest),
-        title="SP - Checkpoint Saved",
+        "Recovery backup saved.\n\n{0}\n\nKept latest {1}; removed {2} older backup(s).".format(
+            checkpoint_manifest,
+            keep_count,
+            len(removed_checkpoints),
+        ),
+        title="Recovery Backup Saved",
         ui_blocking=True,
     )
     return 0

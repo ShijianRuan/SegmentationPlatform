@@ -189,6 +189,13 @@ spacing、origin 和 direction 可以未知，但尺寸、像素类型和字节�
 
 具体任务仍可设置更严格规则，但不能放宽底层“无法解码”或“无法证明独立评估”的阻断结论。
 
+Snapshot 创建必须执行这些限制，而不是只记录它们：
+
+- `split=train` 时检查 `Image Artifact.usability.training`；
+- `split=val/test` 时检查 `Image Artifact.usability.evaluation`；
+- 对应字段为 `blocked` 时不得进入 Dataset Snapshot；
+- `allowed_with_assumptions` 可以进入，但假设和原因必须保留给后续审计。
+
 ## 7. 患者和检查信息缺失时怎样处理
 
 `case_id` 和 `study_id` 是平台标识，不要求直接来自 DICOM。来源没有检查标识时，平台可以生成 `study_id`。
@@ -238,14 +245,33 @@ spacing、origin 和 direction 可以未知，但尺寸、像素类型和字节�
 
 ```bash
 sp ingest scan /data/source --output reports/source_scan.json
+sp ingest register reports/source_scan.json --registry registry/ --import-batch batch_001
 sp ingest build-requests reports/source_scan.json package_requests/ --organs liver spleen --import-batch batch_001
 sp package create-many package_requests/ dataset_package/ --registry registry/
 sp registry rebuild-index registry/
 ```
 
-`scan` 只发现和报告，不写正式记录。`build-requests` 根据人工确认或规则化参数生成可审阅的 Case Package 请求；`package create-many` 才创建 Case Package 和 Registry 记录。这样可以避免批量扫描时错误分组直接污染登记册。
+`scan` 只发现和报告，不写正式记录。`register` 把 scan 中 `status=importable` 的 Case 和 Image Artifact 写入 Registry，但不创建病例包、不创建 Review Task。`build-requests` 根据人工确认或规则化参数生成可审阅的 Case Package 请求；`package create-many` 创建具体标注工作目录，并可同时登记 Case、Image、初始 Label 和 Review Task。
 
-当前扫描覆盖 DICOM Series、三维 NIfTI、MetaImage。DICOM 按元数据分组；NIfTI 和 MetaImage 按文件发现，并使用路径启发式生成低可信度防泄漏分组。扫描报告中的 `status=importable` 只说明平台能读取和登记，不等于所有标注工具都能直接打开。以 Mimics 21 为标注工具时，第一次打开仍要求 DICOM 或已准备好的 `.mcs`；NIfTI/MHD 需要先转换成 Mimics 可接受的表示，或改用支持这些格式的标注工具。
+这两条路径服务不同目的：
+
+- **资产登记路径**：`scan -> register -> Registry`。适合先把稳定只读数据根目录登记成 Image Artifact，几周后再决定标注哪些器官或是否进入训练候选。
+- **标注工作包路径**：`scan -> build-requests -> package create-many`。适合已经确定标注目标和工具，需要给标注者生成离线病例包。
+
+独立登记的 Image Artifact 不复制文件，`path` 指向原始数据位置，并冻结 hash、来源布局和空间信息。因此它要求来源根目录稳定、只读、可被后续平台步骤访问。需要给 Mimics 或离线工作站使用时，再由病例包或派生图像步骤复制/转换。
+
+当前扫描覆盖 DICOM Series、三维 NIfTI、MetaImage。DICOM 按元数据分组；NIfTI 和 MetaImage 按文件发现，并使用路径启发式生成低可信度防泄漏分组。扫描报告中的 `status=importable` 只说明平台能读取和登记，不等于所有标注工具都能直接打开。以 Mimics 21 为标注工具时，平台会把 NIfTI/MHD 转成派生 DICOM 或其他经 POC 证明的可导入表示；通过 `sp mimics prebuild-workspace` 预生成 `.mcs` 后，标注者首次打开不需要等待格式导入。未预生成时，Console 仍会在当前 Mimics 会话内导入 DICOM。
+
+复杂外部数据集不要继续加重 `scan`。例如 TotalSegmentator 的逐器官文件、MSD 的多标签文件、或医院批次的 CSV 配对关系，应优先使用[数据集描述契约](dataset_description_contract.md)：
+
+```bash
+sp ingest from-description dataset_description.yaml package_requests/
+sp package create-many package_requests/ dataset_package/ --registry registry/
+```
+
+这一层负责把“标签在哪里、怎样匹配图像、label value 对应哪个器官”变成标准 `case_package_request.v1`。`scan` 仍只负责通用图像发现。复杂数据集如果只想先登记图像，可以先用 `scan -> register`；标签配对和标注目标等语义稍后再由 dataset description、custom importer 或 follow-up review 处理。
+
+如果正则、CSV 和预整理脚本仍表达不了，不要把特殊规则写进 `scan`。按[专用数据集 Importer 契约](custom_importer_contract.md)写 L4 importer：输出 `requests/`、`reports/import_summary.json`、`reports/import_issues.csv` 和 `reports/importer_manifest.json`，然后仍走 `sp package create-many`。无法确认配对、器官语义、空间关系或脱敏状态的病例进入 issues，不进入病例包。
 
 导入器至少要产出：
 

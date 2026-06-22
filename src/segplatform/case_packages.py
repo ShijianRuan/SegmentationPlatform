@@ -27,6 +27,7 @@ from segplatform.imaging import (
     inspect_dicom_files,
     inspect_image,
     read_mask,
+    write_derived_dicom_series,
     write_mask_nifti,
 )
 from segplatform.registry import FileRegistry
@@ -248,6 +249,13 @@ def create_case_package(
     package_root = output_root.resolve()
     case_root = package_root / "cases" / case_id
     if case_root.exists():
+        if not (case_root / "manifest.json").is_file():
+            shutil.rmtree(case_root)
+        elif not overwrite:
+            raise ValidationError(f"case package already exists: {case_root}")
+        else:
+            shutil.rmtree(case_root)
+    if case_root.exists():
         if not overwrite:
             raise ValidationError(f"case package already exists: {case_root}")
         shutil.rmtree(case_root)
@@ -350,9 +358,37 @@ def create_case_package(
             "sha256": copied_inspection["hash"],
             **copied_geometry.as_manifest(),
         }
+        if str(review_request.get("tool", "mimics")) == "mimics" and format_name in {"nifti", "metaimage"}:
+            derived_dicom_path = case_root / "images" / image_id / "dicom"
+            derived_inspection = write_derived_dicom_series(
+                copied_path,
+                derived_dicom_path,
+                format_name=format_name,
+                modality=str(image_request.get("modality", "UNKNOWN")),
+                case_id=case_id,
+                study_id=str(request["study_id"]),
+                series_description=str(image_request.get("series_description", f"SP derived {image_id}")),
+            )
+            manifest_record["dicom_path"] = derived_dicom_path.relative_to(case_root).as_posix()
+            manifest_record["dicom_sha256"] = derived_inspection["hash"]
+            manifest_record["mimics_import"] = {
+                "strategy": "derived_dicom_series",
+                "source_image_path": manifest_record[manifest_path_field],
+                "source_format": format_name,
+                "pixel_conversion": derived_inspection["pixel_conversion"],
+            }
         for key in ("dicom_series_uid_sha256", "series_description", "study_instance_uid_sha256"):
             if key in copied_inspection:
                 manifest_record[key] = copied_inspection[key]
+        if "dicom_path" in manifest_record:
+            derived_dicom_geometry, derived_dicom_inspection = inspect_image(
+                case_root / manifest_record["dicom_path"],
+                "dicom_series",
+            )
+            manifest_record["dicom_series_uid_sha256"] = derived_dicom_inspection["dicom_series_uid_sha256"]
+            manifest_record["study_instance_uid_sha256"] = derived_dicom_inspection["study_instance_uid_sha256"]
+            if "series_description" not in manifest_record:
+                manifest_record["series_description"] = derived_dicom_inspection.get("series_description", "")
         image_records.append(manifest_record)
         image_artifacts.append(
             _image_artifact(

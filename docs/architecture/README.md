@@ -7,6 +7,8 @@
 | [平台蓝图](platform_blueprint.md) | 第一次了解项目时阅读。它说明平台目标、完整流程、三大实现域和不能省掉的安全规则。 |
 | [核心数据与操作模型](platform_data_model.md) | 准备实现数据登记、训练快照、模型记录或工具适配器时阅读。 |
 | [数据导入与规范化契约](data_ingestion_contract.md) | 处理 DICOM、NIfTI、MHD+RAW、纯 RAW、多层级目录或缺失元数据时阅读。 |
+| [数据集描述契约](dataset_description_contract.md) | 需要用正则或 CSV 显式描述图像、标签和 label map 时阅读。 |
+| [专用数据集 Importer 契约](custom_importer_contract.md) | 正则、CSV 和预整理仍表达不了，需要写 L4 importer 时阅读。 |
 | [架构决策记录](architecture_decisions.md) | 需要追溯某个重要决定为什么这样定时查阅。 |
 | [多角色设计审查](platform_quality_review.md) | 需要查看架构曾发现哪些风险、哪些问题仍需验证时查阅。 |
 

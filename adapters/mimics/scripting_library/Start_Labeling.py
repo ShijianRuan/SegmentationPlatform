@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Mimics Scripting Library entry point for daily annotation work."""
+"""Mimics Scripting Library entry point for daily annotation work.
+
+The file name is intentionally user-facing: Mimics registers scripts in this
+folder directly in Script -> Scripting Library.
+"""
 
 from __future__ import print_function
 

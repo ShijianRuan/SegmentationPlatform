@@ -17,7 +17,7 @@ REQUIRED_CONFIG_FILES = [
     "review_label_map.yaml",
 ]
 
-REVIEW_STATUSES = {"ready", "in_progress", "needs_review", "completed", "blocked"}
+REVIEW_STATUSES = {"ready", "in_progress", "needs_review", "completed", "blocked", "deferred"}
 SUBMISSION_ACTIONS = {
     "save_progress",
     "submit_complete",
@@ -403,6 +403,13 @@ def validate_manifest(root: Path, findings: list[Finding]) -> dict[str, Any] | N
                 findings.append(Finding("error", "manifest_image_sha_missing", f"{prefix}.sha256 is required"))
             else:
                 validate_sha256(image.get("sha256"), f"{prefix}.sha256", findings, placeholder_allowed=True)
+            if "dicom_sha256" in image:
+                validate_sha256(
+                    image.get("dicom_sha256"),
+                    f"{prefix}.dicom_sha256",
+                    findings,
+                    placeholder_allowed=True,
+                )
 
             if (
                 resolved_image
@@ -423,15 +430,26 @@ def validate_manifest(root: Path, findings: list[Finding]) -> dict[str, Any] | N
                         )
                     )
 
+            expected_dicom_sha = image.get("dicom_sha256")
+            if dicom_path and resolved_image and not expected_dicom_sha:
+                findings.append(
+                    Finding(
+                        "error",
+                        "manifest_dicom_sha_missing",
+                        f"{prefix}.dicom_sha256 is required when image_path and dicom_path are both present",
+                    )
+                )
+            elif dicom_path and not expected_dicom_sha:
+                expected_dicom_sha = image.get("sha256")
             if (
                 dicom_path
                 and resolved_dicom
                 and resolved_dicom.is_dir()
-                and image.get("sha256")
-                and image.get("sha256") != "TO_BE_FILLED"
-                and SHA256_PATTERN.fullmatch(str(image.get("sha256")))
+                and expected_dicom_sha
+                and expected_dicom_sha != "TO_BE_FILLED"
+                and SHA256_PATTERN.fullmatch(str(expected_dicom_sha))
             ):
-                expected_digest = normalized_sha256(str(image["sha256"]))
+                expected_digest = normalized_sha256(str(expected_dicom_sha))
                 actual_digest = sha256_directory(resolved_dicom)
                 if actual_digest.lower() != expected_digest.lower():
                     findings.append(
@@ -439,7 +457,7 @@ def validate_manifest(root: Path, findings: list[Finding]) -> dict[str, Any] | N
                             "error",
                             "manifest_dicom_sha_mismatch",
                             f"{prefix}.dicom_path sha256 mismatch: "
-                            f"expected {image.get('sha256')}, got {actual_digest}",
+                            f"expected {expected_dicom_sha}, got {actual_digest}",
                         )
                     )
 

@@ -10,7 +10,7 @@
 1. [平台蓝图](architecture/platform_blueprint.md)：先理解平台为什么存在、完整流程是什么、三大实现域怎样协作。
 2. [常用词说明](glossary.md)：遇到不熟悉的英文名称或缩写时查阅，不需要提前背诵。
 3. [核心数据与操作模型](architecture/platform_data_model.md)：准备实现时，再查看各种记录的字段、创建时机和相互关系。
-4. 处理 DICOM、NIfTI、MHD+RAW、纯 RAW 或缺失元数据时阅读[数据导入与规范化契约](architecture/data_ingestion_contract.md)。
+4. 处理 DICOM、NIfTI、MHD+RAW、纯 RAW 或缺失元数据时阅读[数据导入与规范化契约](architecture/data_ingestion_contract.md)。外部数据集已有复杂图像-标签配对或多标签值映射时，继续阅读[数据集描述契约](architecture/dataset_description_contract.md)。
 5. 根据当前工作进入对应实现域：
    - [人工标注与复查](domains/labeling/README.md)
    - [模型训练](domains/training/README.md)
@@ -27,6 +27,8 @@
 | --- | --- |
 | 理解平台整体设计 | [平台蓝图](architecture/platform_blueprint.md) |
 | 导入不同格式或信息不完整的数据 | [数据导入与规范化契约](architecture/data_ingestion_contract.md) |
+| 接入复杂外部数据集、CSV 配对或多标签 mask | [数据集描述契约](architecture/dataset_description_contract.md) |
+| 正则/CSV 仍表达不了，需要写专用 importer | [专用数据集 Importer 契约](architecture/custom_importer_contract.md) |
 | 准备一批病例给标注者 | [标注工作流](domains/labeling/labeling_workflow.md) |
 | 直接安装和运行训练前闭环 | [标注闭环实现与运行指南](domains/labeling/labeling_implementation_guide.md) |
 | 在 Windows 上实际运行 Mimics 21 | [Mimics Research 21 Windows 工作站操作手册](domains/labeling/mimics_windows_runbook.md) |
@@ -82,10 +84,10 @@ docs/
 | `pipelines/nnunet/` | 已有可复用的转换、预处理、训练、预测和评估管线 |
 | `scripts/check_case_package.py` | 已支持病例包 v0.5 的提交前检查 |
 | `scripts/hash_package.py` | 可选的目录传输校验值工具 |
-| `src/segplatform/` | 已实现病例包、文件式 Registry、Mimics 外部适配、提交 QC 和 Dataset Snapshot |
+| `src/segplatform/` | 已实现病例包、文件式 Registry、Mimics 外部适配、提交 QC、离线工作包分发/提交收集和 Dataset Snapshot |
 | `adapters/mimics/` | Python 3.5 正式脚本与 P01/P02/P04/P05/P06 探针已实现；真实 Mimics 21 验收待执行 |
 | `adapters/label_generation/` | 只有输入输出边界，尚未实现 |
-| 数据导入、登记册和训练数据快照 | 已有 DICOM/NIfTI/可选 MetaImage 的阶段 A 文件式实现；纯 RAW 通用入口、数据库和服务化后置 |
+| 数据导入、登记册和训练数据快照 | 已有 DICOM/NIfTI/可选 MetaImage 的阶段 A 文件式实现，并支持从 Registry 生成 Snapshot request 草稿；纯 RAW 通用入口、数据库和服务化后置 |
 
 计划中提到但仓库尚不存在的脚本必须写明“待实现”，不能让读者误以为已经可以运行。
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,19 +13,89 @@ from segplatform.imaging import BufferMapping, geometry_from_manifest, geometry_
 from segplatform.vocabulary import AnatomyVocabulary
 
 
-def load_mapping(path: Path) -> BufferMapping:
+DEFAULT_BUFFER_MAPPING = {
+    "schema_version": "mimics_buffer_mapping.v1",
+    "status": "unverified",
+    "evidence_id": "",
+    "platform_to_mimics_axes": [0, 1, 2],
+    "platform_to_mimics_flips": [False, False, False],
+}
+
+
+def _mapping_payload(value: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(value or DEFAULT_BUFFER_MAPPING)
+    payload.setdefault("schema_version", "mimics_buffer_mapping.v1")
+    payload.setdefault("status", "unverified")
+    payload.setdefault("evidence_id", "")
+    payload.setdefault("platform_to_mimics_axes", [0, 1, 2])
+    payload.setdefault("platform_to_mimics_flips", [False, False, False])
+    BufferMapping.from_config(payload)
+    return payload
+
+
+@dataclass(frozen=True)
+class BufferMappingSet:
+    default_data: dict[str, Any]
+    by_image_id: dict[str, dict[str, Any]]
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "BufferMappingSet":
+        mapping_file = config.get("buffer_mapping_file")
+        if mapping_file:
+            data = load_mapping_data(Path(mapping_file).expanduser())
+            if data.get("schema_version") == "mimics_buffer_mapping_set.v1":
+                default_data = data.get("default") or data.get("buffer_mapping")
+                by_image_id = data.get("by_image_id") or data.get("buffer_mapping_by_image_id") or {}
+                return cls(
+                    default_data=_mapping_payload(default_data),
+                    by_image_id={str(key): _mapping_payload(value) for key, value in by_image_id.items()},
+                )
+            return cls(
+                default_data=_mapping_payload(data),
+                by_image_id={
+                    str(key): _mapping_payload(value)
+                    for key, value in (config.get("buffer_mapping_by_image_id") or {}).items()
+                },
+            )
+        return cls(
+            default_data=_mapping_payload(config.get("buffer_mapping")),
+            by_image_id={
+                str(key): _mapping_payload(value)
+                for key, value in (config.get("buffer_mapping_by_image_id") or {}).items()
+            },
+        )
+
+    def data_for_image(self, image_id: str) -> dict[str, Any]:
+        return self.by_image_id.get(str(image_id), self.default_data)
+
+    def for_image(self, image_id: str) -> BufferMapping:
+        return BufferMapping.from_config(self.data_for_image(image_id))
+
+    def evidence_by_image_id(self, image_ids: list[str]) -> dict[str, str]:
+        return {image_id: self.data_for_image(image_id).get("evidence_id", "") for image_id in image_ids}
+
+
+def load_mapping_data(path: Path) -> dict[str, Any]:
     from segplatform.common import load_data
 
     data = load_data(path)
+    if data.get("schema_version") not in {"mimics_buffer_mapping.v1", "mimics_buffer_mapping_set.v1"}:
+        raise ValidationError("buffer mapping schema_version must be mimics_buffer_mapping.v1 or mimics_buffer_mapping_set.v1")
+    return data
+
+
+def load_mapping(path: Path) -> BufferMapping:
+    data = load_mapping_data(path)
     if data.get("schema_version") != "mimics_buffer_mapping.v1":
-        raise ValidationError("buffer mapping schema_version must be mimics_buffer_mapping.v1")
+        raise ValidationError("load_mapping requires a single mimics_buffer_mapping.v1 file")
     return BufferMapping.from_config(data)
 
 
-def prepare_import_buffers(case_root: Path, runtime: dict[str, Any], mapping: BufferMapping) -> list[dict[str, Any]]:
+def prepare_import_buffers(case_root: Path, runtime: dict[str, Any], mapping_set: BufferMappingSet) -> list[dict[str, Any]]:
     manifest = json.loads((case_root / "manifest.json").read_text(encoding="utf-8"))
     entries = []
     for label in manifest.get("initial_labels", []):
+        mapping = mapping_set.for_image(label["image_id"])
         mapping.require_verified()
         source_path = case_root / label["path"]
         array, geometry = read_mask(source_path)
@@ -50,6 +121,7 @@ def prepare_import_buffers(case_root: Path, runtime: dict[str, Any], mapping: Bu
                 "path": str(destination.resolve()),
                 "sha256": prefixed_sha256(destination),
                 "byte_count": destination.stat().st_size,
+                "buffer_mapping_evidence_id": mapping.evidence_id,
                 "source_label_id": label.get("label_id"),
                 "source_label_sha256": label["sha256"],
             }
@@ -98,6 +170,7 @@ def write_buffer_manifest(case_root: Path, runtime: dict[str, Any], entries: lis
             "review_id": runtime["review_id"],
             "created_at": utc_now(),
             "mapping": runtime.get("buffer_mapping"),
+            "mapping_by_image_id": runtime.get("buffer_mapping_by_image_id", {}),
             "entries": entries,
         },
     )

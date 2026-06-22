@@ -183,8 +183,14 @@ def match_images(mimics, expected_images):
 
 def expected_mimics_shape(runtime, image_id):
     image = next(item for item in runtime["image_sets"] if item["image_id"] == image_id)
-    axes = runtime.get("buffer_mapping", {}).get("platform_to_mimics_axes", [0, 1, 2])
+    mapping = runtime.get("buffer_mapping_by_image_id", {}).get(image_id, runtime.get("buffer_mapping", {}))
+    axes = mapping.get("platform_to_mimics_axes", [0, 1, 2])
     return [int(image["platform_shape"][int(axis)]) for axis in axes]
+
+
+def buffer_mapping_evidence_for_image(runtime, image_id):
+    mapping = runtime.get("buffer_mapping_by_image_id", {}).get(image_id, runtime.get("buffer_mapping", {}))
+    return mapping.get("evidence_id", "")
 
 
 def apply_predefined_answers(mimics, answers):
