@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -92,7 +94,20 @@ def scan_source(source_root: Path) -> dict[str, Any]:
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
     skipped: list[dict[str, Any]] = []
     file_image_records = []
-    for path in sorted(item for item in source_root.rglob("*") if item.is_file()):
+    all_files = sorted(item for item in source_root.rglob("*") if item.is_file())
+    total = len(all_files)
+    last_log = 0.0
+    log_interval = 2.0
+    for idx, path in enumerate(all_files):
+        now = time.time()
+        if now - last_log >= log_interval:
+            pct = (idx + 1) / total * 100 if total else 100
+            print(
+                f"[scan] {idx + 1}/{total} files ({pct:.0f}%)  "
+                f"DICOM groups: {len(groups)}  skipped: {len(skipped)}",
+                file=sys.stderr,
+            )
+            last_log = now
         format_name = infer_format(path)
         if format_name in {"nifti", "metaimage"}:
             file_image_records.append(_file_image_record(path, source_root, format_name))
@@ -136,7 +151,17 @@ def scan_source(source_root: Path) -> dict[str, Any]:
 
     series_records = []
     case_groups: dict[str, dict[str, Any]] = {}
-    for (patient_key, study_uid, series_uid), group in sorted(groups.items(), key=lambda item: item[0]):
+    total_series = len(groups)
+    for series_idx, (patient_key, study_uid, series_uid) in enumerate(
+        sorted(groups.keys(), key=lambda item: item[0])
+    ):
+        group = groups[(patient_key, study_uid, series_uid)]
+        print(
+            f"[scan] inspecting series {series_idx + 1}/{total_series}: "
+            f"{group['modalities'] or '?'} - {series_uid[:12]}..."
+            f"  ({len(group['files'])} files)",
+            file=sys.stderr,
+        )
         case_seed = (patient_key or "unknown_patient") + "|" + study_uid
         case_id = "case_" + _short_hash(case_seed)
         study_id = "study_" + _short_hash(study_uid)
@@ -234,6 +259,13 @@ def scan_source(source_root: Path) -> dict[str, Any]:
             "skipped_file_count": len(skipped),
         },
     }
+    s = report["summary"]
+    print(
+        f"[scan] done: {s['case_count']} cases, {s['series_count']} DICOM series, "
+        f"{s['file_image_count']} file-based images, {s['skipped_file_count']} skipped",
+        file=sys.stderr,
+    )
+    return report
 
 
 def _data_governance(
