@@ -5,12 +5,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from segplatform.adapters.mimics.bridge import load_mapping, prepare_import_buffers, write_buffer_manifest
+from segplatform.adapters.mimics.bridge import BufferMappingSet, prepare_import_buffers, write_buffer_manifest
 from segplatform.adapters.mimics.doctor import load_workstation_config
 from segplatform.case_packages import validate_case_package
 from segplatform.common import ensure_within, load_data, prefixed_sha256, utc_now, write_json
 from segplatform.errors import ConfigurationError, ValidationError
-from segplatform.imaging import BufferMapping, voxel_count
+from segplatform.imaging import voxel_count
 
 
 def _runtime_mask_name(target_id: str, organ: str) -> str:
@@ -20,7 +20,7 @@ def _runtime_mask_name(target_id: str, organ: str) -> str:
 def _load_checkpoint_buffers(
     case_root: Path,
     manifest: dict[str, Any],
-    mapping_data: dict[str, Any],
+    mapping_set: BufferMappingSet,
 ) -> list[dict[str, Any]]:
     review = manifest["review"]
     pointer_path = case_root / "working" / "checkpoints" / review["review_id"] / "latest.json"
@@ -40,9 +40,23 @@ def _load_checkpoint_buffers(
         or checkpoint.get("package_id") != manifest["package_id"]
     ):
         raise ValidationError(f"Mimics checkpoint does not match the current package: {checkpoint_path}")
-    expected_evidence = str(mapping_data.get("evidence_id", ""))
-    if checkpoint.get("buffer_mapping_evidence_id") != expected_evidence:
-        raise ValidationError("Mimics checkpoint buffer mapping evidence does not match the workstation config")
+    checkpoint_evidence_by_image = checkpoint.get("buffer_mapping_evidence_by_image_id", {})
+    image_ids = sorted(
+        {
+            str(entry.get("image_id"))
+            for entry in checkpoint.get("entries", [])
+            if entry.get("image_id")
+        }
+    )
+    expected_evidence_by_image = mapping_set.evidence_by_image_id(image_ids)
+    if checkpoint_evidence_by_image:
+        for image_id, expected_evidence in expected_evidence_by_image.items():
+            if checkpoint_evidence_by_image.get(image_id) != expected_evidence:
+                raise ValidationError(f"Mimics checkpoint buffer mapping evidence does not match image {image_id}")
+    else:
+        expected_evidence = str(mapping_set.default_data.get("evidence_id", ""))
+        if checkpoint.get("buffer_mapping_evidence_id") != expected_evidence:
+            raise ValidationError("Mimics checkpoint buffer mapping evidence does not match the workstation config")
 
     targets = {target["target_id"]: target for target in review["targets"]}
     expected_keys = {
@@ -62,7 +76,6 @@ def _load_checkpoint_buffers(
 
     entries = []
     seen = set()
-    axes = [int(value) for value in mapping_data["platform_to_mimics_axes"]]
     images = {image["image_id"]: image for image in manifest["image_sets"]}
     for entry in checkpoint.get("entries", []):
         key = (entry.get("target_id"), entry.get("image_id"), entry.get("organ"))
@@ -74,6 +87,7 @@ def _load_checkpoint_buffers(
         path = ensure_within(case_root, case_root / entry["path"])
         if not path.is_file() or prefixed_sha256(path) != entry.get("sha256"):
             raise ValidationError(f"Mimics checkpoint buffer is missing or changed: {path}")
+        axes = [int(value) for value in mapping_set.data_for_image(key[1])["platform_to_mimics_axes"]]
         expected_shape = [int(images[key[1]]["shape"][axis]) for axis in axes]
         if [int(value) for value in entry["mimics_shape"]] != expected_shape:
             raise ValidationError(f"Mimics checkpoint shape mismatch: {key}")
@@ -104,27 +118,22 @@ def prepare_case(
 
     manifest = json.loads((case_root / "manifest.json").read_text(encoding="utf-8"))
     config = load_workstation_config(workstation_config_path)
-    mapping_data = config.get(
-        "buffer_mapping",
-        {
-            "status": "unverified",
-            "evidence_id": "",
-            "platform_to_mimics_axes": [0, 1, 2],
-            "platform_to_mimics_flips": [False, False, False],
-        },
-    )
-    mapping = BufferMapping.from_config(mapping_data)
+    mapping_set = BufferMappingSet.from_config(config)
 
     existing_mcs = case_root / "working" / f"{manifest['review']['review_id']}.mcs"
+    prebuilt_marker = case_root / "working" / "prebuilt_workspace.json"
     if rebuild_workspace and existing_mcs.exists():
         backup = existing_mcs.with_name(existing_mcs.name + f".backup.{uuid.uuid4().hex[:8]}")
         existing_mcs.replace(backup)
+        if prebuilt_marker.exists():
+            prebuilt_marker.unlink()
     image_sets = []
     for image in manifest["image_sets"]:
         dicom_path = image.get("dicom_path")
         if not dicom_path and not existing_mcs.exists():
             raise ConfigurationError(
-                f"Mimics 21 production path currently requires DICOM or an existing .mcs; image {image['image_id']} has neither"
+                f"Mimics 21 production path requires image_sets[].dicom_path or an existing .mcs; "
+                f"image {image['image_id']} has neither. For NIfTI/MHD, create a Mimics package with derived DICOM first."
             )
         image_sets.append(
             {
@@ -141,6 +150,9 @@ def prepare_case(
             }
         )
 
+    runtime_mode = "new"
+    if existing_mcs.exists():
+        runtime_mode = "prebuilt" if prebuilt_marker.is_file() else "resume"
     runtime = {
         "schema_version": "mimics_runtime.v1",
         "created_at": utc_now(),
@@ -150,7 +162,8 @@ def prepare_case(
         "review_id": manifest["review"]["review_id"],
         "assignee": manifest["review"].get("assignee"),
         "mcs_path": str(existing_mcs),
-        "mode": "resume" if existing_mcs.exists() else "new",
+        "mode": runtime_mode,
+        "prebuilt_marker_path": str(prebuilt_marker),
         "dicom_import_root": str((case_root / "images").resolve()),
         "image_sets": image_sets,
         "targets": [
@@ -167,15 +180,16 @@ def prepare_case(
             }
             for target in manifest["review"]["targets"]
         ],
-        "buffer_mapping": mapping_data,
+        "buffer_mapping": mapping_set.default_data,
+        "buffer_mapping_by_image_id": mapping_set.by_image_id,
         "predefined_dialog_answers": config.get("predefined_dialog_answers", {}),
         "reports_dir": str((case_root / "reports").resolve()),
         "submissions_dir": str((case_root / "submissions" / manifest["review"]["review_id"]).resolve()),
     }
-    entries = prepare_import_buffers(case_root, runtime, mapping)
+    entries = prepare_import_buffers(case_root, runtime, mapping_set)
     runtime["import_buffers"] = entries
     runtime["checkpoint_buffers"] = (
-        _load_checkpoint_buffers(case_root, manifest, mapping_data)
+            _load_checkpoint_buffers(case_root, manifest, mapping_set)
         if not existing_mcs.exists()
         else []
     )

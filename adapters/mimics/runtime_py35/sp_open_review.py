@@ -80,13 +80,14 @@ def main():
     if len(sys.argv) < 2:
         raise RuntimeError("usage: sp_open_review.py MIMICS_RUNTIME_JSON")
     runtime_path = os.path.abspath(sys.argv[1])
+    background_prebuild = "--background-prebuild" in sys.argv[2:]
     runtime = load_json(runtime_path)
     reports_dir = runtime["reports_dir"]
     if not os.path.isdir(reports_dir):
         os.makedirs(reports_dir)
 
     apply_predefined_answers(mimics, runtime.get("predefined_dialog_answers", {}))
-    if runtime["mode"] == "resume" and os.path.isfile(runtime["mcs_path"]):
+    if runtime["mode"] in ("resume", "prebuilt") and os.path.isfile(runtime["mcs_path"]):
         mimics.file.open_project(filename=runtime["mcs_path"])
     else:
         mimics.file.import_dicom_images(source_folder=runtime["dicom_import_root"])
@@ -172,12 +173,24 @@ def main():
         "status": "passed_with_warnings" if warnings else "passed",
     }
     write_json(os.path.join(reports_dir, "mimics_open_report.json"), report)
+    if background_prebuild:
+        write_json(
+            runtime.get("prebuilt_marker_path") or os.path.join(os.path.dirname(runtime_path), "prebuilt_workspace.json"),
+            {
+                "schema_version": "mimics_prebuilt_workspace.v1",
+                "review_id": runtime["review_id"],
+                "package_id": runtime["package_id"],
+                "case_id": runtime["case_id"],
+                "mcs_path": runtime["mcs_path"],
+                "runtime_manifest": runtime_path,
+                "status": "prebuilt",
+            },
+        )
+        return 0
     qc_summary = previous_qc_summary(runtime)
     if runtime["mode"] == "resume":
         # 续标同一 review：标注者已知任务范围，跳过流程性摘要以减少连续标注的确认摩擦。
         # 仅在上次平台 QC 失败时提示（那是需要标注者注意的错误，不是流程确认）。
-        # 注意：未来若 prepare 阶段后台预导入 .mcs，resume 也可能是标注者首次见到该病例，
-        # 届时不能仅靠 .mcs 是否存在判断，需用 review 状态或显式 seen 标志区分首次核对。
         if qc_summary:
             mimics.dialogs.message_box(qc_summary, title="SegmentationPlatform Review", ui_blocking=True)
         return 0
@@ -187,6 +200,10 @@ def main():
     if qc_summary:
         summary = summary + "\n\n" + qc_summary
     mimics.dialogs.message_box(summary, title="SegmentationPlatform Review", ui_blocking=True)
+    if runtime["mode"] == "prebuilt":
+        marker = runtime.get("prebuilt_marker_path")
+        if marker and os.path.isfile(marker):
+            os.remove(marker)
     return 0
 
 
@@ -197,11 +214,13 @@ if __name__ == "__main__":
     except Exception as error:
         report_path = os.path.join(os.path.dirname(runtime_json), "..", "reports", "mimics_open_error.json")
         write_error_report(os.path.abspath(report_path), "open_review", error)
-        try:
-            mimics.dialogs.message_box(
-                "The review could not be opened. See mimics_open_error.json.\n\n{0}".format(str(error)),
-                title="SegmentationPlatform - Blocked",
-                ui_blocking=True,
-            )
-        finally:
-            raise
+        if "--background-prebuild" not in sys.argv[2:]:
+            try:
+                mimics.dialogs.message_box(
+                    "The review could not be opened. See mimics_open_error.json.\n\n{0}".format(str(error)),
+                    title="SegmentationPlatform - Blocked",
+                    ui_blocking=True,
+                )
+            finally:
+                raise
+        raise

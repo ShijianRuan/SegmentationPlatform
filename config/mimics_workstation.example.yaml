@@ -26,3 +26,13 @@ buffer_mapping:
   evidence_id: ""
   platform_to_mimics_axes: [0, 1, 2]
   platform_to_mimics_flips: [false, false, false]
+
+# Optional escape hatch when P05 proves that one image_id needs a different mapping.
+# Keep this empty for the normal one-mapping-per-workstation path.
+# buffer_mapping_by_image_id:
+#   img_venous:
+#     schema_version: mimics_buffer_mapping.v1
+#     status: verified
+#     evidence_id: P05_WORKSTATION_01_IMG_VENOUS_20260615
+#     platform_to_mimics_axes: [2, 1, 0]
+#     platform_to_mimics_flips: [false, false, false]

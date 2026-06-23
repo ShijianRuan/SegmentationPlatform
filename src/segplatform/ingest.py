@@ -10,6 +10,7 @@ import pydicom
 from segplatform.common import load_data, utc_now, write_json, write_yaml
 from segplatform.errors import ValidationError
 from segplatform.imaging import infer_format, inspect_dicom_files, inspect_image
+from segplatform.registry import FileRegistry
 from segplatform.vocabulary import AnatomyVocabulary
 
 
@@ -59,6 +60,7 @@ def _file_image_record(path: Path, source_root: Path, format_name: str) -> dict[
                 "status": "importable",
                 "sha256": details["hash"],
                 "hash_scope": details["hash_scope"],
+                "reader": details["reader"],
                 "shape": list(geometry.shape),
                 "spacing": list(geometry.spacing),
                 "origin": list(geometry.origin),
@@ -171,6 +173,7 @@ def scan_source(source_root: Path) -> dict[str, Any]:
                     "status": "importable",
                     "sha256": details["hash"],
                     "hash_scope": details["hash_scope"],
+                    "reader": details["reader"],
                     "shape": list(geometry.shape),
                     "spacing": list(geometry.spacing),
                     "origin": list(geometry.origin),
@@ -230,6 +233,200 @@ def scan_source(source_root: Path) -> dict[str, Any]:
             "file_image_count": len(file_image_records),
             "skipped_file_count": len(skipped),
         },
+    }
+
+
+def _data_governance(
+    *,
+    source_zone: str,
+    deidentification_status: str,
+    governance_profile: str,
+    governance_profile_version: str,
+) -> dict[str, Any]:
+    if source_zone == "working" and deidentification_status != "verified":
+        raise ValidationError("source_zone=working requires deidentification_status=verified")
+    return {
+        "source_zone": source_zone,
+        "deidentification_status": deidentification_status,
+        "profile": governance_profile,
+        "profile_version": governance_profile_version,
+        "direct_identifiers_allowed": False,
+    }
+
+
+def _registry_leakage_basis(value: str) -> str:
+    if value == "source_path_group":
+        return "case"
+    if value in {"patient_pseudonym", "source_subject", "study", "case", "import_batch_unknown"}:
+        return value
+    return "case"
+
+
+def _scan_geometry_evidence(record: dict[str, Any]) -> dict[str, Any]:
+    source = "dicom" if record.get("format") == "dicom_series" else "header"
+    return {
+        "coordinate_system": record.get("coordinate_system", "unknown"),
+        "shape": source,
+        "spacing": source,
+        "origin": source,
+        "direction": source,
+        "assumptions": [],
+    }
+
+
+def _scan_source_layout(record: dict[str, Any]) -> dict[str, Any]:
+    layout: dict[str, Any] = {
+        "study": record.get("study_instance_uid_sha256", record.get("study_id", "")),
+        "series": record.get("series_uid_sha256", record.get("source_relative_path", record.get("image_id", ""))),
+    }
+    if record.get("source_relative_path"):
+        layout["relative_path"] = record["source_relative_path"]
+    if record.get("source_files"):
+        layout["source_files"] = list(record["source_files"])
+    return {key: value for key, value in layout.items() if value}
+
+
+def _scan_image_artifact(
+    scan: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    import_batch: str,
+    source_type: str,
+    source_name: str | None,
+    usability: str,
+) -> dict[str, Any]:
+    if record.get("status") != "importable":
+        raise ValidationError(f"image {record.get('image_id')} is not importable")
+    image_path = record["source_root"] if record["format"] == "dicom_series" else record["source_path"]
+    source = {
+        "type": source_type,
+        "import_batch": import_batch,
+        "source_layout": _scan_source_layout(record),
+        "reader": record.get("reader") or scan.get("reader") or {"name": "unknown", "version": "unknown"},
+    }
+    if source_name:
+        source["name"] = source_name
+    artifact = {
+        "schema_version": "image_artifact.v1",
+        "image_id": record["image_id"],
+        "case_id": record["case_id"],
+        "modality": record.get("modality", "UNKNOWN"),
+        "format": record["format"],
+        "path": str(image_path),
+        "hash": record["sha256"],
+        "hash_scope": record["hash_scope"],
+        "pixel_type": record["pixel_type"],
+        "shape": record["shape"],
+        "spacing": record["spacing"],
+        "origin": record["origin"],
+        "direction": record["direction"],
+        "geometry_status": record.get("geometry_status", "complete"),
+        "geometry_evidence": record.get("geometry_evidence", _scan_geometry_evidence(record)),
+        "source": source,
+        "usability": {
+            "annotation": usability,
+            "training": usability,
+            "evaluation": usability,
+            "reasons": [],
+        },
+    }
+    if record.get("companion_paths"):
+        artifact["companion_paths"] = list(record["companion_paths"])
+    return artifact
+
+
+def register_scan(
+    scan_path: Path,
+    registry_root: Path,
+    *,
+    import_batch: str,
+    source_type: str = "ingest_scan",
+    source_name: str | None = None,
+    source_zone: str = "working",
+    deidentification_status: str = "verified",
+    governance_profile: str = "import_scan_profile",
+    governance_profile_version: str = "1",
+    usability: str = "allowed",
+    allow_existing: bool = False,
+) -> dict[str, Any]:
+    """Register scan-discovered Case and Image Artifacts without creating case packages."""
+
+    scan = load_data(scan_path)
+    if scan.get("schema_version") != "ingest_scan.v1":
+        raise ValidationError("scan file schema_version must be ingest_scan.v1")
+    if usability not in {"allowed", "allowed_with_assumptions", "blocked"}:
+        raise ValidationError(f"invalid usability value: {usability}")
+
+    governance = _data_governance(
+        source_zone=source_zone,
+        deidentification_status=deidentification_status,
+        governance_profile=governance_profile,
+        governance_profile_version=governance_profile_version,
+    )
+    registry = FileRegistry(registry_root)
+    importable_by_case: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in scan.get("series", []):
+        if record.get("status") == "importable":
+            importable_by_case[str(record["case_id"])].append(record)
+
+    registered_cases = 0
+    registered_images = 0
+    skipped: list[dict[str, Any]] = []
+    for case in scan.get("cases", []):
+        case_id = str(case["case_id"])
+        records = sorted(importable_by_case.get(case_id, []), key=lambda item: item["image_id"])
+        if not records:
+            skipped.append({"case_id": case_id, "reason": "no_importable_images"})
+            continue
+        case_record = {
+            "schema_version": "case_manifest.v1",
+            "case_id": case_id,
+            "leakage_group_id": str(case["leakage_group_id"]),
+            "leakage_group_basis": _registry_leakage_basis(str(case.get("leakage_group_basis", "case"))),
+            "leakage_group_confidence": str(case.get("leakage_group_confidence", "low")),
+            "study_id": str(case["study_id"]),
+            "image_ids": [str(record["image_id"]) for record in records],
+            "data_governance": governance,
+        }
+        try:
+            registry.put("cases", case_record)
+            registered_cases += 1
+        except ValidationError as error:
+            if not allow_existing:
+                raise
+            skipped.append({"case_id": case_id, "reason": "case_exists", "message": str(error)})
+
+        for record in records:
+            artifact = _scan_image_artifact(
+                scan,
+                record,
+                import_batch=import_batch,
+                source_type=source_type,
+                source_name=source_name,
+                usability=usability,
+            )
+            try:
+                registry.put("images", artifact)
+                registered_images += 1
+            except ValidationError as error:
+                if not allow_existing:
+                    raise
+                skipped.append(
+                    {
+                        "case_id": case_id,
+                        "image_id": artifact["image_id"],
+                        "reason": "image_exists",
+                        "message": str(error),
+                    }
+                )
+
+    return {
+        "status": "registered",
+        "scan_path": str(scan_path.resolve()),
+        "registry_root": str(registry_root.resolve()),
+        "registered_cases": registered_cases,
+        "registered_images": registered_images,
+        "skipped": skipped,
     }
 
 

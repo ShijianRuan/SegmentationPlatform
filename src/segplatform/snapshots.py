@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import csv
 
-from segplatform.common import load_data, utc_now
+from segplatform.common import load_data, utc_now, write_yaml
 from segplatform.errors import ValidationError
 from segplatform.registry import FileRegistry
 from segplatform.schema import validate_schema
@@ -17,6 +18,8 @@ CONSTRAINT_ORDER = {
     "needs_review": 3,
     "forbidden": 4,
 }
+
+USABILITY_VALUES = {"allowed", "allowed_with_assumptions", "blocked"}
 
 
 def _merge_constraints(values: list[dict[str, str]]) -> dict[str, str]:
@@ -52,6 +55,38 @@ def _segment_from_label(record: dict[str, Any], organ: str) -> dict[str, Any]:
     if len(segments) != 1:
         raise ValidationError(f"label {record['label_id']} must contain exactly one segment for {organ}")
     return segments[0]
+
+
+def _snapshot_usability_purpose(split: str) -> str:
+    return "training" if split == "train" else "evaluation"
+
+
+def _image_record_for_snapshot(
+    registry: FileRegistry,
+    case_record: dict[str, Any],
+    image_id: str,
+) -> dict[str, Any]:
+    image_record = registry.get("images", image_id)
+    if image_record.get("case_id") != case_record["case_id"]:
+        raise ValidationError(f"image {image_id} belongs to another case")
+    return image_record
+
+
+def _image_usability_for_split(image_record: dict[str, Any], split: str) -> tuple[str, str]:
+    purpose = _snapshot_usability_purpose(split)
+    usability = image_record.get("usability")
+    if not isinstance(usability, dict):
+        raise ValidationError(f"image {image_record['image_id']} is missing usability metadata")
+    value = usability.get(purpose)
+    if value not in USABILITY_VALUES:
+        raise ValidationError(f"image {image_record['image_id']} has invalid usability.{purpose}: {value!r}")
+    return purpose, value
+
+
+def _format_blocked_image_message(image_record: dict[str, Any], purpose: str) -> str:
+    reasons = image_record.get("usability", {}).get("reasons", [])
+    suffix = "" if not reasons else ": " + "; ".join(str(reason) for reason in reasons)
+    return f"image {image_record['image_id']} usability.{purpose} is blocked{suffix}"
 
 
 def create_snapshot(request_path: Path, registry_root: Path) -> dict[str, Any]:
@@ -94,6 +129,10 @@ def create_snapshot(request_path: Path, registry_root: Path) -> dict[str, Any]:
             raise ValidationError(
                 f"{case_record['case_id']}: low-confidence leakage group cannot be used for {split}"
             )
+        image_record = _image_record_for_snapshot(registry, case_record, image_id)
+        usability_purpose, usability_value = _image_usability_for_split(image_record, split)
+        if usability_value == "blocked":
+            raise ValidationError(_format_blocked_image_message(image_record, usability_purpose))
         if not requested_case.get("segments"):
             raise ValidationError(f"{case_record['case_id']}/{image_id}: snapshot segments cannot be empty")
         requested_segments = []
@@ -151,6 +190,12 @@ def create_snapshot(request_path: Path, registry_root: Path) -> dict[str, Any]:
                 "leakage_group_id": leakage_group,
                 "leakage_group_basis": case_record["leakage_group_basis"],
                 "leakage_group_confidence": case_record["leakage_group_confidence"],
+                "image_hash": image_record["hash"],
+                "image_usability": {
+                    "purpose": usability_purpose,
+                    "value": usability_value,
+                    "reasons": image_record["usability"].get("reasons", []),
+                },
                 "segments": requested_segments,
             }
         )
@@ -201,3 +246,173 @@ def validate_snapshot(path: Path) -> dict[str, Any]:
             raise ValidationError(f"leakage group {group} crosses {seen[group]} and {split}")
         seen[group] = split
     return snapshot
+
+
+def _load_split_plan(path: Path | None) -> dict[tuple[str, str | None], str]:
+    if path is None:
+        return {}
+    result: dict[tuple[str, str | None], str] = {}
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        required = {"case_id", "split"}
+        if not required.issubset(set(reader.fieldnames or [])):
+            raise ValidationError("split plan CSV must contain at least case_id and split columns")
+        for row in reader:
+            case_id = str(row["case_id"]).strip()
+            image_id = str(row.get("image_id") or "").strip() or None
+            split = str(row["split"]).strip()
+            if split not in {"train", "val", "test"}:
+                raise ValidationError(f"invalid split in split plan: {split}")
+            result[(case_id, image_id)] = split
+    return result
+
+
+def build_snapshot_request(
+    registry_root: Path,
+    output_path: Path,
+    *,
+    snapshot_id: str,
+    task_id: str,
+    organs: list[str],
+    split_plan: Path | None = None,
+    default_split: str = "train",
+    allow_lifecycle_status: list[str] | None = None,
+    require_all_organs: bool = False,
+    preprocess_name: str = "none",
+    created_by: str = "offline_operator",
+) -> dict[str, Any]:
+    """Generate a snapshot_request.v1 draft from active Registry labels."""
+
+    if default_split not in {"train", "val", "test"}:
+        raise ValidationError(f"default_split must be train, val or test: {default_split}")
+    registry = FileRegistry(registry_root)
+    vocabulary = AnatomyVocabulary()
+    normalized_organs = vocabulary.require_all(organs)
+    allowed_statuses = allow_lifecycle_status or ["verified_label"]
+    splits = _load_split_plan(split_plan)
+    label_map = {"background": 0}
+    for index, organ in enumerate(normalized_organs, start=1):
+        label_map[organ] = index
+
+    cases = []
+    skipped = []
+    for case_record in registry.list("cases"):
+        case_id = case_record["case_id"]
+        for image_id in case_record["image_ids"]:
+            split = splits.get((case_id, image_id)) or splits.get((case_id, None)) or default_split
+            try:
+                image_record = _image_record_for_snapshot(registry, case_record, image_id)
+                usability_purpose, usability_value = _image_usability_for_split(image_record, split)
+            except ValidationError as error:
+                skipped.append(
+                    {
+                        "case_id": case_id,
+                        "image_id": image_id,
+                        "reason": "image_usability_invalid",
+                        "message": str(error),
+                    }
+                )
+                continue
+            if usability_value == "blocked":
+                skipped.append(
+                    {
+                        "case_id": case_id,
+                        "image_id": image_id,
+                        "reason": "image_usability_blocked",
+                        "usability_purpose": usability_purpose,
+                        "usability_value": usability_value,
+                        "reasons": image_record["usability"].get("reasons", []),
+                    }
+                )
+                continue
+            segments = []
+            missing = []
+            ambiguous = []
+            rejected_status = []
+            for organ in normalized_organs:
+                candidates = registry.find_labels(case_id=case_id, image_id=image_id, organ=organ)
+                accepted = []
+                for candidate in candidates:
+                    for segment in candidate.get("segments", []):
+                        if segment.get("organ") == organ:
+                            if segment.get("lifecycle_status") in allowed_statuses:
+                                accepted.append(candidate)
+                            else:
+                                rejected_status.append(
+                                    {
+                                        "organ": organ,
+                                        "label_id": candidate["label_id"],
+                                        "lifecycle_status": segment.get("lifecycle_status"),
+                                    }
+                                )
+                            break
+                if len(accepted) == 1:
+                    segments.append({"organ": organ, "label_id": accepted[0]["label_id"]})
+                elif len(accepted) > 1:
+                    ambiguous.append({"organ": organ, "label_ids": [item["label_id"] for item in accepted]})
+                else:
+                    missing.append(organ)
+            if ambiguous:
+                skipped.append(
+                    {
+                        "case_id": case_id,
+                        "image_id": image_id,
+                        "reason": "ambiguous_labels",
+                        "ambiguous": ambiguous,
+                    }
+                )
+                continue
+            if require_all_organs and missing:
+                skipped.append(
+                    {
+                        "case_id": case_id,
+                        "image_id": image_id,
+                        "reason": "missing_required_organs",
+                        "missing_organs": missing,
+                    }
+                )
+                continue
+            if not segments:
+                skipped.append(
+                    {
+                        "case_id": case_id,
+                        "image_id": image_id,
+                        "reason": "no_allowed_labels",
+                        "missing_organs": missing,
+                        "rejected_status": rejected_status,
+                    }
+                )
+                continue
+            cases.append(
+                {
+                    "case_id": case_id,
+                    "image_id": image_id,
+                    "split": split,
+                    "segments": segments,
+                }
+            )
+
+    request = {
+        "schema_version": "snapshot_request.v1",
+        "snapshot_id": snapshot_id,
+        "task_id": task_id,
+        "created_by": created_by,
+        "task_label_map": label_map,
+        "label_policy": {"allow_lifecycle_status": allowed_statuses},
+        "cases": cases,
+        "preprocess_profile": {"name": preprocess_name},
+        "usage_constraints": {
+            "model_training": "needs_policy",
+            "commercial_use": "needs_policy",
+            "redistribution": "needs_policy",
+        },
+    }
+    write_yaml(output_path, request)
+    report = {
+        "status": "built",
+        "output": str(output_path.resolve()),
+        "case_image_count": len(cases),
+        "skipped_count": len(skipped),
+        "skipped": skipped,
+    }
+    return report

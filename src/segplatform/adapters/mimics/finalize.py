@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any
 
-from segplatform.adapters.mimics.bridge import load_mapping, normalize_submission_entries, read_export_buffer
+from segplatform.adapters.mimics.bridge import BufferMappingSet, normalize_submission_entries, read_export_buffer
 from segplatform.common import hash_directory, load_data, prefixed_sha256, utc_now, write_json
 from segplatform.errors import ValidationError
 from segplatform.imaging import geometry_from_manifest, write_mask_nifti
@@ -238,19 +239,14 @@ def finalize_case(
         raise ValidationError("submission QC failed:\n- " + "\n- ".join(item["message"] for item in findings))
 
     config = load_data(workstation_config_path)
-    mapping_path = config.get("buffer_mapping_file")
-    if mapping_path:
-        mapping = load_mapping(Path(mapping_path).expanduser())
-    else:
-        from segplatform.imaging import BufferMapping
-
-        mapping = BufferMapping.from_config(config["buffer_mapping"])
+    mapping_set = BufferMappingSet.from_config(config)
     prepared_targets = []
     for target_id in target_ids:
         target = targets[target_id]
         known_absent = set(target.get("known_absent", []))
         image = next(item for item in manifest["image_sets"] if item["image_id"] == target["image_id"])
         geometry = geometry_from_manifest(image)
+        mapping = mapping_set.for_image(target["image_id"])
         prepared_segments = []
         for organ in target["organs"]:
             if organ in known_absent:
@@ -274,6 +270,7 @@ def finalize_case(
                 "target_id": target_id,
                 "target": target,
                 "geometry": geometry,
+                "buffer_mapping_evidence_id": mapping.evidence_id,
                 "segments": prepared_segments,
             }
         )
@@ -289,10 +286,13 @@ def finalize_case(
         target_id = prepared["target_id"]
         target = prepared["target"]
         geometry = prepared["geometry"]
+        buffer_mapping_evidence_id = prepared["buffer_mapping_evidence_id"]
         output_root = submission_root / "labels" / target["image_id"] / target_id
         output_root.mkdir(parents=True, exist_ok=True)
         segments = []
+        segment_organs = set()
         generators_by_organ: dict[str, list[str]] = {}
+        base_record = None
         usage_constraints = {
             "model_training": "needs_policy",
             "commercial_use": "needs_policy",
@@ -302,14 +302,14 @@ def finalize_case(
             base_record = registry.get("labels", target["base_label_id"])
             usage_constraints = base_record.get("usage_constraints", usage_constraints)
             for base_segment in base_record["segments"]:
-                if base_segment["organ"] in target["organs"]:
-                    generators_by_organ[base_segment["organ"]] = list(
-                        base_segment["lineage"]["contributing_generators"]
-                    )
+                generators_by_organ[base_segment["organ"]] = list(
+                    base_segment["lineage"]["contributing_generators"]
+                )
         for prepared_segment in prepared["segments"]:
             organ = prepared_segment["organ"]
             destination = output_root / f"{organ}.nii.gz"
             write_mask_nifti(destination, prepared_segment["array"], geometry)
+            segment_organs.add(organ)
             segments.append(
                 {
                     "organ": organ,
@@ -322,6 +322,33 @@ def finalize_case(
                     },
                 }
             )
+        if base_record:
+            for base_segment in base_record["segments"]:
+                organ = base_segment["organ"]
+                if organ in segment_organs:
+                    continue
+                source_path = Path(base_segment["path"])
+                destination = output_root / f"{organ}.nii.gz"
+                shutil.copy2(source_path, destination)
+                segment_organs.add(organ)
+                segments.append(
+                    {
+                        "organ": organ,
+                        "path": str(destination.resolve()),
+                        "lifecycle_status": base_segment["lifecycle_status"],
+                        "source": {
+                            "type": "manual_review",
+                            "review_id": review_id,
+                            "name": "carried_forward_from_base_label",
+                        },
+                        "lineage": {
+                            "derived_from_label_ids": [base_record["label_id"]],
+                            "contributing_generators": list(
+                                base_segment["lineage"]["contributing_generators"]
+                            ),
+                        },
+                    }
+                )
         label_id = f"label_{target['image_id']}_{uuid.uuid4().hex[:12]}"
         label_record = {
             "schema_version": "label_artifact.v1",
@@ -346,7 +373,7 @@ def finalize_case(
                     "origin": "sidecar",
                     "direction": "sidecar",
                     "assumptions": [
-                        f"Mimics buffer mapping verified by {mapping.evidence_id}",
+                        f"Mimics buffer mapping verified by {buffer_mapping_evidence_id}",
                     ],
                 },
                 "alignment_checked": True,
@@ -359,6 +386,9 @@ def finalize_case(
         }
         validate_schema(label_record, "label_artifact.schema.json")
         registry.put("labels", label_record)
+        if action == "submit_complete" and base_record and base_record.get("artifact_lifecycle") == "active":
+            base_record["artifact_lifecycle"] = "superseded"
+            registry.put("labels", base_record, allow_update=True)
         label_ids[target_id] = label_id
         created_records.append(label_record)
 
@@ -380,7 +410,10 @@ def finalize_case(
             "tool": "Mimics Research",
             "tool_version": export_manifest.get("mimics_version"),
             "runtime": export_manifest.get("python_version"),
-            "buffer_mapping_evidence_id": mapping.evidence_id,
+            "buffer_mapping_evidence_id": mapping_set.default_data.get("evidence_id", ""),
+            "buffer_mapping_evidence_by_image_id": mapping_set.evidence_by_image_id(
+                [image["image_id"] for image in manifest["image_sets"]]
+            ),
             "submission_manifest_sha256": prefixed_sha256(submission_path),
             "export_manifest_sha256": prefixed_sha256(export_path),
             "created_at": utc_now(),

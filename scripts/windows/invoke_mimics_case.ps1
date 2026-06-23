@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Doctor", "ProbeRun", "ProbeEvaluate", "Prepare", "Open", "Finalize", "Status")]
+    [ValidateSet("Doctor", "ProbeRun", "ProbeEvaluate", "Prepare", "Prebuild", "Open", "Finalize", "Status")]
     [string]$Action,
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [Parameter(Mandatory = $true)]
@@ -51,6 +51,15 @@ switch ($Action) {
             & $Python -m segplatform mimics prepare $CaseRoot --config $ConfigPath --rebuild-workspace
         } else {
             & $Python -m segplatform mimics prepare $CaseRoot --config $ConfigPath
+        }
+    }
+    "Prebuild" {
+        Require-Value "CaseRoot" $CaseRoot
+        & $Python -m segplatform package validate $CaseRoot
+        if ($RebuildWorkspace) {
+            & $Python -m segplatform mimics prebuild-workspace $CaseRoot --config $ConfigPath --rebuild-workspace
+        } else {
+            & $Python -m segplatform mimics prebuild-workspace $CaseRoot --config $ConfigPath
         }
     }
     "Open" {

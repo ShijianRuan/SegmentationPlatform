@@ -129,9 +129,9 @@ test_images(...)
 - BMP；
 - TIFF；
 - JPEG；
-- raw images。
+- `test_images(..., force_raw_import=True)` 形式的 raw import 入口。
 
-`import_standard_images()` 面向 BMP、TIFF 和 JPEG。raw 导入需要调用者提供尺寸、数据类型、字节序和 spacing 等信息。
+`import_standard_images()` 明确面向 BMP、TIFF 和 JPEG，脚本参数只暴露 `xy_resolution`、`z_resolution`、单位、患者名和机构名。API 文档没有给出完整的 RAW header 参数契约（例如维度、数据类型、字节序、origin、direction），因此 RAW 只能作为待验证路径，不能直接进入默认设计。
 
 ### 4.2 未确认支持
 
@@ -149,8 +149,46 @@ test_images(...)
 因此：
 
 - “外部读取 NIfTI 后直接写成新的 Mimics 图像”不是已成立能力；
-- 只有 NIfTI 或 MetaImage 图像时，优先验证受控格式转换；
+- 第三方库可以在外部 Python 中读取 NIfTI/MHD，但读出的数组不能直接注入为 Mimics `ImageData`；
+- 只有 NIfTI 或 MetaImage 图像时，必须先生成 Mimics 已支持的导入表示；
 - 无法可靠恢复方向和坐标时，应改用原生支持该格式的工具。
+
+### 4.4 NIfTI/MHD 进入 Mimics 的最佳实践
+
+推荐顺序：
+
+1. **外部现代 Python 读取来源**：NIfTI 用 nibabel，MHD/MHA 用 SimpleITK。读取并记录 shape、spacing、origin、direction、像素类型和 hash。
+2. **优先派生 DICOM Series**：把体数据转换为最小、去标识、单 SeriesUID 的 DICOM 切片。这样 Mimics 走已验证的 `import_dicom_images()`，并保留更完整的医学空间语义。当前平台实现已经在病例包创建阶段为 Mimics review 自动生成 `images/{image_id}/dicom/`。
+3. **备选标准图像导入**：若不生成 DICOM，可派生 BMP/TIFF 切片，再通过 `test_images()`、`configure_standard_images()`、`open_images_as_project()` 或 `import_standard_images()` 导入。该路径只能显式提供 xy/z resolution，并必须单独验证方向和灰度值。
+4. **RAW 路径单独 POC**：API 有 `force_raw_import=True` 入口，但当前文档没有完整 RAW header 参数说明。只有在实机证明维度、像素类型、字节序、spacing、方向和 Mask 往返都可自动化后，RAW 才能作为优化路径。
+5. **保存 `.mcs` 作为工作区**：导入成功后保存任务专属 `.mcs`。`.mcs` 是 Mimics 工作检查点，不是平台长期标签格式。
+6. **做 P03 级验证**：记录导入后的 image set 数量、logical dimensions、spacing/origin/direction 可观察信息、角点灰度值和人工方向标记。验证通过前，不能批量交给标注者。
+
+因此，转换成 DICOM 不是唯一选择，但“某种受控中间表示”是必要的。直接依赖 Mimics 内 Python 3.5 安装 nibabel/SimpleITK 并写入 `ImageData` 不是推荐路径：依赖老、难部署，而且缺少图像体素写入 API。Mimics 内 Python 应只负责调用 Mimics API 导入已准备好的文件、创建/读取 Mask、保存 `.mcs` 和显示少量对话框。平台记录原始 `image_path` 的哈希和派生 `dicom_sha256`，避免把工具工作格式误认为原始数据。
+
+### 4.5 为什么 RAW/MHD 不是默认主路径
+
+RAW 支持要理解为“API 存在强制 raw import 的入口”，不等于“已有完整、可复现、可无人值守的医学体数据导入契约”。Mimics 21 API 暴露的标准图像导入参数主要是 `xy_resolution` 和 `z_resolution`；资料没有证明 RAW 路径可以稳定写入并恢复 NIfTI/MHD 中的完整 `origin`、`direction`、坐标系和每层位置，也没有在当前文档中说明如何脚本化提供 RAW 的维度、数据类型和字节序。
+
+MHD/MHA 确实通常用 `.mhd + .raw` 表示体数据，但 `.raw` 本身只是裸字节。关键空间信息在 `.mhd` header 中，例如尺寸、spacing、TransformMatrix、Offset 和 ElementDataFile。若 Mimics 只按 RAW 字节和手工 spacing 导入，就等于绕过了 header 中最关键的空间约束。平台可以用 SimpleITK 读取 MHD，然后写 RAW；但这并不能自动证明 Mimics 里的 image set 与平台 Image Artifact 仍处于同一物理空间。
+
+因此当前默认选择派生 DICOM，不是因为 RAW 不可行，而是因为 DICOM 可以把下面信息放进 Mimics 已验证的主导入链：
+
+- `ImageOrientationPatient`；
+- `ImagePositionPatient`；
+- `PixelSpacing` 和 `SpacingBetweenSlices`；
+- `SeriesInstanceUID` / `StudyInstanceUID`；
+- `Modality`、RescaleSlope/Intercept 等显示和灰度相关信息。
+
+RAW 路径可以作为后续优化，但进入主流程前必须满足更窄条件：
+
+- 图像是规则三维体，非剪切、非斜切；
+- RAW 的维度、像素类型、字节序和 slice 顺序可以由脚本唯一确定并传入 Mimics；
+- 方向可由 Mimics 的方向对话框或 API 预答唯一确定；
+- 导入后 P03/P05 证明角点坐标、轴顺序、翻转和 Mask 往返完全一致；
+- 文档明确该 RAW 是 Mimics 工作格式，不是原始数据替代品。
+
+DICOM 的代价也是真实存在的：代码要维护派生 DICOM 写入逻辑；存储上比 `.nii.gz` 更大，通常接近未压缩体素大小再加每层 DICOM header。阶段 A 接受这个代价，是为了优先降低静默错位风险。大规模运行时可优化为“按分配病例生成派生 DICOM”“派生 DICOM 放入可重建缓存”“`.mcs` 验证生成后按策略清理派生 DICOM”，但这些优化不能牺牲空间可验证性。
 
 ## 5. 空间坐标
 
@@ -272,7 +310,7 @@ Mask 具有名称、颜色、关联图像、metadata、选中状态和可见状�
 - 有损 JPEG 压缩会改变图像，不应作为默认标注方案。
 
 跨机器使用仍取决于兼容版本、edition、license 和环境。`.mcs` 只作为工作现场，平台仍保存
-病例包、原始文件和提交结果。实现另外提供显式 Mask checkpoint；它不依赖 `.mcs` 内部结构，
+病例包、原始文件和提交结果。实现另外提供显式 Mask recovery backup；它不依赖 `.mcs` 内部结构，
 但仍要求相同 review、基础标签和 buffer mapping evidence。
 
 ## 10. 对话框
@@ -291,7 +329,26 @@ Mimics API 提供：
 
 只有平台预检查已经证明答案唯一时，才能自动关闭或预答对话框。方向、raw 参数和序列选择存在歧义时必须阻断。
 
-## 11. 文件交换边界
+Scripting Library 的入口由脚本目录中的 `.py` 文件自动注册。当前 21.0 文档只确认“脚本可一键运行”，没有找到为 Scripting Library 条目配置自定义图标、工具栏按钮或持久面板的接口。
+因此标注者入口通过脚本文件名表达为 **Start Labeling**，交互通过少量 `question_box()` 和 `message_box()` 完成。
+
+## 11. 任务清单和 Project Tree 注释
+
+已确认的稳定方式是通过 Scripting Library 运行 **Start Labeling**，用 `message_box()` 显示当前任务清单摘要。
+当前实现的 **Task List** 会读取任务运行清单和受管 Mask metadata，列出器官总数、ready/missing 数量，并在 Mimics 弹窗内分页展示。标注者可用固定按钮按 Missing、Ready、With Initial、Known Absent 筛选；完整清单同时写入 `reports/mimics_task_list.txt` 作为技术记录。
+这样一百多个器官不会被塞进不可读的弹窗。
+
+未确认能力：
+
+- 是否能通过 Mimics 21 API 创建不影响图像视图的项目级 Custom/注释对象；
+- 该对象是否能稳定保存在 `.mcs` 中并显示在 Project Tree 的合适位置；
+- 该对象是否需要 Analyze 等额外模块许可。
+
+官方 21.0 API 文档能确认 `mimics.data` 暴露 masks、parts、measurements、planes、points、spheres、splines 等对象，也确认对象 metadata 可写；
+但没有在当前资料中找到“创建项目备注/任务注释对象”的明确接口。因此生产流程不能依赖 Project Tree 注释。
+若要采用该界面形态，应新增一个单独探针验证：创建任务清单对象、保存重开、检查 Project Tree 可见性、确认不会遮挡图像或被提交脚本误当成标签对象。
+
+## 12. 文件交换边界
 
 只有直接导入导出不足时，才增加外部与内部的文件交换：
 
@@ -304,7 +361,7 @@ Mimics API 提供：
 
 具体脚本、启动命令、Mask metadata 和标注者操作见 [Mimics 适配器设计与开发流程](mimics_adapter_design.md)。
 
-## 12. 本机验证问题索引
+## 13. 本机验证问题索引
 
 | 编号 | 必须回答的问题 |
 |---|---|
@@ -322,10 +379,11 @@ Mimics API 提供：
 | P12 | 多标注者提交能否避免明显覆盖 |
 | P13 | 异常能否生成可操作反馈 |
 | P14 | 提交结果能否进入平台登记和训练快照 |
+| P15 | 是否能创建 Project Tree 中的非阻塞任务清单对象 |
 
 详细操作只在 [可行性验证计划](mimics_poc_plan.md) 中维护。
 
-## 13. 外部版本依据
+## 14. 外部版本依据
 
 - [Python 3.5.10 发布与停止维护说明](https://www.python.org/downloads/release/python-3510/)
 - [nibabel 3.0.2](https://pypi.org/project/nibabel/3.0.2/)

@@ -78,8 +78,9 @@ dataset_package/
 
 单序列病例也使用 `image_sets` 数组，只包含一个元素。平台不维护另一套“单图像病例”格式。
 
-`working/checkpoints/` 是可选灾备内容。它保存全部受管 Mask 的 gzip 压缩 `.u8.gz` 快照和 manifest，
-用于 `.mcs` 损坏时重建，不代表提交，也不进入标签生命周期。
+`working/checkpoints/` 是可选灾备内容。它保存全部受管 Mask 的 gzip 压缩 `.u8.gz` recovery backup 和 manifest，
+用于 `.mcs` 损坏时重建，不代表提交，也不进入标签生命周期。Mimics 脚本默认只保留最新 3 份 recovery backup，
+更旧目录可自动清理。
 
 ## 3. 三种名称和编号表
 
@@ -120,6 +121,11 @@ dataset_package/
       "image_path": "images/img_noncontrast/image.nii.gz",
       "dicom_path": "images/img_noncontrast/dicom",
       "sha256": "TO_BE_FILLED",
+      "dicom_sha256": "TO_BE_FILLED",
+      "mimics_import": {
+        "strategy": "derived_dicom_series",
+        "source_image_path": "images/img_noncontrast/image.nii.gz"
+      },
       "shape": [512, 512, 300],
       "spacing": [0.8, 0.8, 1.0],
       "origin": [-200.0, -180.0, -300.0],
@@ -173,7 +179,9 @@ dataset_package/
 6. `base_label_id` 和 `base_label_sha256` 要么同时存在，要么同时省略。
 7. `assignee` 第一阶段可选，多人工作时建议设置。
 8. 不同目标组的标签分别绑定自己的图像空间，不能假设多个序列已配准。
-9. `target_id` 是最小提交单位；组内器官一起完成或一起进入复查。target 可选 `known_absent`（`organs` 的子集）声明该病例已知缺失的器官：这些器官不建 Mask、不导出、不参与 QC，也不计入"组内全部器官"的完成检查。
+9. `target_id` 是最小提交单位；组内器官一起完成或一起进入复查。
+   `known_absent` 只是兼容字段，仅在数据来源已有明确事实时使用，例如外部结构化记录已说明某器官不存在。
+   它不能用于根据扫描部位猜测“哪些器官不需要标”。正常流程里，标注者打开病例后才判断目标器官是存在、无法确认还是需要复查；这些结果写入提交清单的 `organ_outcomes`。
 10. `data_governance.deidentification_status` 必须是 `verified`。
 11. `leakage_group_id` 和 `study_id` 对所有来源必填。
 12. `patient_id_hash` 和 `study_instance_uid_hash` 只在来源可靠且已按治理规则伪名化时记录。
@@ -185,6 +193,7 @@ dataset_package/
 `manifest.json` 中以下文件要记录校验值：
 
 - 图像。
+- Mimics 派生 DICOM：仅当同一个 image set 同时有 `image_path` 和 `dicom_path` 时，使用 `dicom_sha256` 单独记录。
 - 器官名称表。
 - 标注交换编号表。
 - 基础标签。
@@ -201,6 +210,7 @@ dataset_package/
 - `needs_review`
 - `completed`
 - `blocked`
+- `deferred`
 
 固定用户动作：
 
@@ -318,7 +328,9 @@ provenance/tool_export.json
 submissions/{review_id}/labels/{image_id}/{organ}.nii.gz
 ```
 
-提交清单必须声明本次提交的 `target_ids`。被声明为完成的目标组必须包含该组全部器官（`known_absent` 声明的器官除外，它们不导出也不计入完成检查）。不同目标组可以分次提交。
+提交清单必须声明本次提交的 `target_ids`。被声明为完成的目标组必须包含该组全部器官。
+只有来源数据在建包前已经明确给出 `known_absent` 时，这些器官才不导出也不计入完成检查；
+普通标注任务不能为了减少工作量预先填 `known_absent`。不同目标组可以分次提交。
 
 单个 Mask 导出只用于调试，或目标组本身只有一个器官。
 

@@ -65,6 +65,18 @@
 
 纯 RAW 通用 sidecar、数据库服务和完整反向引用索引仍后置。当前闭环支持实际所需的 DICOM/NIfTI，MHD/MHA 通过可选 SimpleITK 依赖支持。
 
+### 对象图能力状态
+
+当前命令已经能跑通最小闭环，并补齐了部分非线性对象图能力。仍然不引入 Airflow/Celery 或数据库调度层。
+
+| 能力 | 当前状态 | 说明 |
+| --- | --- | --- |
+| `sp label merge` | 已实现 | 同一 case/image 下的多个 active Label Artifact 可合并；同器官冲突必须用 `--organ-source organ=label_id` 显式选择 |
+| `sp review create-from-finding` | 已实现 | 可从 Snapshot/QC 报告中的 `skipped`、`findings` 或 `results` 生成 follow-up review |
+| 批量 `sp label register` | 已实现 | `sp label register-many` 支持 CSV/JSON/YAML 表格批量注册外部标签 |
+| 最小 run record | 部分实现 | 新增对象图命令会写入 Registry `_runs/run_*.json`；历史批处理命令尚未全部接入 |
+| `adopt unmanaged mask` | 未实现 | Mimics 中临时自建 Mask 仍只警告“不导出”；正式纳管仍需 follow-up 或后续专门命令 |
+
 ## 4. Mimics 工具适配器
 
 > 首次闭环不必等 Mimics：先用 ITK-SNAP 或 3D Slicer 完成人工修正，Mimics 验证并行进行（见[实施计划](platform_implementation_plan_2026-10-30.md) M3）。
@@ -102,7 +114,7 @@
 | 文件 | 作用 | 进入条件 |
 | --- | --- | --- |
 | `adapters/mimics/runtime_py35/sp_common.py` | 已实现 | 在 Python 3.5.2 实测 memoryview/NumPy 路径 |
-| `adapters/mimics/scripting_library/SP_Review_Console.py` | 已实现 | 配置为标注者唯一可见 Scripting Library 入口 |
+| `adapters/mimics/scripting_library/Start_Labeling.py` | 已实现 | 配置为标注者唯一可见 Scripting Library 入口 |
 | `adapters/mimics/runtime_py35/sp_review_console.py` | 已实现 | 在 Mimics 内领取任务、保存 checkpoint、提交当前 review |
 | `adapters/mimics/runtime_py35/sp_diagnostics.py` | 已实现 | 运行本机诊断 |
 | `adapters/mimics/runtime_py35/sp_open_review.py` | 已实现 | Gate A/B 真实病例验收 |
@@ -153,7 +165,7 @@
 | 多标签文件与 Mimics 多 Mask 映射错误 | P0 | 使用同一份 `review_label_map.yaml` |
 | 候选标签误当人工真值 | P0 | 保持候选状态，训练采用结果只写入训练数据快照 |
 | 多位标注者覆盖彼此结果 | P0 | 检查任务、目标组、标注者和基础标签校验值 |
-| 标注者操作负担过重 | P1 | 标注者只使用 Mimics 内 **SP Review Console**；准备和收尾由平台后台、管理员批处理或 Console 内部调用 |
+| 标注者操作负担过重 | P1 | 标注者只使用 Mimics 内 **Start Labeling**；准备和收尾由平台后台、管理员批处理或 Console 内部调用 |
 | Windows 与服务器路径不同 | P1 | 清单优先使用相对路径 |
 | 过早扩展训练框架 | P2 | 先完成 nnUNet 小闭环 |
 

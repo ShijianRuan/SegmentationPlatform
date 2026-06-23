@@ -86,6 +86,58 @@ def mark_review_started(
     return {"status": "started", "review_id": review_id}
 
 
+def defer_review(
+    registry_root: Path,
+    review_id: str,
+    *,
+    actor: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    registry = FileRegistry(registry_root)
+    record = registry.get("reviews", review_id)
+    record["status"] = "deferred"
+    for target in record["targets"]:
+        if target["status"] in {"ready", "in_progress", "needs_review"}:
+            target["status"] = "deferred"
+    event = {
+        "at": utc_now(),
+        "action": "deferred",
+        "actor": actor or record.get("assignee") or "offline_operator",
+        "target_ids": [target["target_id"] for target in record["targets"]],
+    }
+    if reason:
+        event["detail"] = reason
+    record.setdefault("events", []).append(event)
+    registry.put("reviews", record, allow_update=True)
+    return {"status": "deferred", "review_id": review_id}
+
+
+def reactivate_review(
+    registry_root: Path,
+    review_id: str,
+    *,
+    actor: str | None = None,
+) -> dict[str, Any]:
+    registry = FileRegistry(registry_root)
+    record = registry.get("reviews", review_id)
+    if record.get("status") != "deferred":
+        return {"status": "unchanged", "review_id": review_id, "current_status": record.get("status")}
+    record["status"] = "ready"
+    for target in record["targets"]:
+        if target["status"] == "deferred":
+            target["status"] = "ready"
+    record.setdefault("events", []).append(
+        {
+            "at": utc_now(),
+            "action": "reactivated",
+            "actor": actor or record.get("assignee") or "offline_operator",
+            "target_ids": [target["target_id"] for target in record["targets"]],
+        }
+    )
+    registry.put("reviews", record, allow_update=True)
+    return {"status": "ready", "review_id": review_id}
+
+
 def review_stats(registry_root: Path) -> dict[str, Any]:
     registry = FileRegistry(registry_root)
     by_status: dict[str, int] = {}

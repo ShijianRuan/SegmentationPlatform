@@ -3,5 +3,6 @@
   "registry_root": "D:\\platform_registry",
   "workstation_config": "C:\\SegmentationPlatform\\config\\mimics_workstation.verified.yaml",
   "assignee": "annotator_01",
-  "auto_finalize": false
+  "auto_finalize": false,
+  "checkpoint_keep_count": 3
 }

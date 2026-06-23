@@ -67,11 +67,36 @@
 
 ---
 
-### 阶段 2：创建病例包
+### 阶段 2A：登记图像资产
+
+**谁做**：平台操作者或后台脚本；可在确定标注任务之前执行。
+
+**目标**：把可读取的 Case 和 Image Artifact 先写入 Registry，但不创建病例包、不创建 Review Task。
+
+```bash
+sp ingest scan /data/source --output /data/reports/source_scan.json
+
+sp ingest register /data/reports/source_scan.json \
+  --registry /data/platform_registry \
+  --import-batch batch_20260616 \
+  --source-type hospital_inventory \
+  --source-name hospital_ct_batch_001
+```
+
+这条路径适合“先盘点和登记图像，稍后再决定标注哪些器官”。登记后的 Image Artifact 指向原始数据路径并冻结 hash、来源布局和空间信息；它不复制图像，也不保证 Mimics 能直接打开。来源根目录必须稳定、只读、可被后续平台步骤访问。
+
+**验证方式**：
+
+- Registry 中出现 `cases/{case_id}.json` 和 `images/{image_id}.json`
+- Registry 中没有新增 `reviews/`
+- `Image Artifact.source.import_batch` 与本次批次一致
+- `Image Artifact.usability` 能被后续 Snapshot 检查使用
+
+### 阶段 2B：创建标注病例包
 
 **谁做**：平台操作者，每批标注任务执行一次。
 
-**目标**：把原始数据整理成标注者可以直接使用的离线工作目录，同时在 Registry 中登记所有资产。
+**目标**：把原始数据整理成标注者可以直接使用的离线工作目录，并创建 Review Task。若图像已通过阶段 2A 登记，病例包仍负责复制/派生标注工具所需文件和生成任务现场。
 
 推荐批量入口：
 
@@ -90,14 +115,30 @@ sp package create-many /data/package_requests /data/dataset_package \
 
 这三步分别负责“发现”“生成可审阅请求”“创建病例包”。中间的请求文件允许人工批量检查和修改，比如只保留静脉期、修改 assignee、补充初始标签或调整目标器官。扫描报告不保存原始 PatientID，只保存哈希、相对路径和导入可用性。
 
+注意：`package create-many --registry` 仍会登记 Case 和 Image Artifact，这是为了兼容“一步创建标注工作包”的路径。但从架构上，Registry 中的图像资产不应依赖病例包存在；只想登记图像时使用阶段 2A。
+
+复杂外部数据集不要强行依赖 `scan`。若标签和图像混放、标签目录独立、一个文件含多个标签值，或配对关系来自 CSV，使用数据集描述入口：
+
+```bash
+sp ingest from-description /data/dataset_description.yaml /data/package_requests
+
+sp package create-many /data/package_requests /data/dataset_package \
+  --registry /data/platform_registry \
+  --continue-on-error
+```
+
+`dataset_description.yaml` 负责显式写清图像 pattern、标签 pattern、CSV 配对、`organ` 或 `label_map`。这样 TotalSegmentator、MSD Liver 和医院 CSV 批次都能先收敛成同一种 `case_package_request.v1`，再进入病例包创建。
+
+如果正则和 CSV 仍表达不了，不要继续扩大 `scan`。按[数据集描述契约](../../architecture/dataset_description_contract.md)的 L0-L5 分级处理：先尝试预整理成 `images.csv/labels.csv`，仍不行再按[专用数据集 Importer 契约](../../architecture/custom_importer_contract.md)写 L4 importer，输出标准 request、`import_summary.json`、`import_issues.csv` 和 `importer_manifest.json`；无法确认配对、器官语义或空间关系的病例进入 issues，不进入病例包。
+
 `scan` 的边界要分清：
 
 - DICOM：按 Study/Series 元数据分组，一个 Series 生成一个 `image_set`。
 - NIfTI/MHD/MHA：按文件发现，同一父目录默认归为一个 Case；顶层文件各自成为独立 Case。
 - RAW：没有明确 sidecar 时只报告为不可直接导入。
-- 复杂数据集：自动生成的请求只是草稿，仍需要人工或数据集描述文件补充“哪些文件是标签、标签值对应哪个器官、哪些序列应进入标注”。
+- 复杂数据集：不要让 scan 猜标签语义；使用 `sp ingest from-description` 将“哪些文件是标签、标签值对应哪个器官、哪些序列应进入标注”显式写进数据集描述。
 
-病例包可以登记 NIfTI/MHD，但 Mimics 21 主路径的首次打开仍以 DICOM 或已有 `.mcs` 为准。若标注工具选择 Mimics，非 DICOM 图像需要先转换成 Mimics 可接受的 DICOM/`.mcs` 工作区，或改用能原生打开该格式的标注工具。
+病例包可以登记 NIfTI/MHD。若标注工具选择 Mimics，非 DICOM 图像需要在外部 Python 中读取，并派生成 Mimics 已支持的导入表示。首选去标识 DICOM Series；BMP/TIFF 切片导入可作为降级路径；RAW 只能作为单独 POC 路径，因为 API 文档有 `force_raw_import` 入口但没有完整 RAW header 参数契约。任何非 DICOM 路径都必须用 P03 验证维度、灰度、spacing 和方向。不要依赖 Mimics Python 3.5 直接把 NIfTI/MHD 数组写成 `ImageData`。
 
 单例调试入口仍然可用：
 
@@ -105,13 +146,13 @@ sp package create-many /data/package_requests /data/dataset_package \
 sp package create examples/labeling/case_package_request.yaml /data/dataset_package --registry /data/platform_registry
 ```
 
-**这个命令做的事**：
+**病例包创建做的事**：
 
 - 从来源区读取图像 → DICOM 按患者/检查/序列分组，文件型图像按路径启发式分组 → 为每个三维体素网格创建 `image_id`
 - 复制图像到 `images/{image_id}/`，检查去标识状态和文件哈希
 - 如有初始候选标签，拆为逐器官 NIfTI 放入 `labels/{image_id}/masks/`
 - 生成 `manifest.json`（image_sets、器官列表、标注目标组、base label 版本）
-- 在 Registry 中创建 Case、Image Artifact、Label Artifact、Review Task 记录
+- 在 Registry 中创建或补充 Case、Image Artifact、Label Artifact、Review Task 记录
 
 **产出物目录**：
 
@@ -146,14 +187,14 @@ sp package validate /data/dataset_package/cases/case_001
 
 **谁做**：平台操作者或后台脚本。
 
-**目标**：把病例包和 Registry 变成 Mimics 内 `SP Review Console` 可以领取的任务队列。这个阶段不要求标注者参与。
+**目标**：把病例包和 Registry 变成 Mimics 内 `Start Labeling` 可以领取的任务队列。这个阶段不要求标注者参与。
 
 ```bash
 sp review next --registry /data/platform_registry --assignee annotator_01
 sp mimics prepare /data/dataset_package/cases/case_001 --config mimics_workstation.yaml
 ```
 
-平台可以提前批量运行 `prepare`，也可以让 `SP Review Console` 在标注者点击 **Open Next Review** 后后台调用 `prepare`。两种方式都不能暴露给标注者。
+平台可以提前批量运行 `prepare`，也可以让 `Start Labeling` 在标注者点击 **Start Next Case** 后后台调用 `prepare`。两种方式都不能暴露给标注者。
 
 **平台提前做的事**：
 
@@ -190,19 +231,20 @@ sp mimics prepare /data/dataset_package/cases/case_001 --config mimics_workstati
   submissions_dir: submissions/review_case001_001/
   ```
 
-**`SP Review Console` 打开任务时做的事**：
+**`Start Labeling` 打开任务时做的事**：
 
 - 在 Mimics 内调用 `sp_review_console.py`；
 - 通过外部 Python 查询 `sp review next`；
-- 如本例尚未准备，后台调用 `sp mimics prepare`；
+- 如本例尚未准备，后台调用 `sp mimics prepare`；如平台已提前预生成工作区，则直接打开 `.mcs`；
 - 标记 Review 为 `in_progress`；
 - 在当前 Mimics 会话里调用 `sp_open_review.py`；
-- `sp_open_review.py` 导入 DICOM 或打开 `.mcs` → 用 UID 哈希 + shape 将 image set 与 `image_id` 一一匹配 → 为每个 target 中**未声明 `known_absent`** 的器官创建/找到 Mask → 写入 7 个 metadata（review_id、target_id、image_id、organ、base_label_id/hash、package_root）→ 如有 import buffer 则在首次创建时注入 → 保存 `.mcs` → 首次打开（new）弹出任务摘要对话框，续标（resume）不再弹（可随时用 Show Summary 重看）。
+- `sp_open_review.py` 导入 DICOM 或打开 `.mcs` → 用 UID 哈希 + shape 将 image set 与 `image_id` 一一匹配 → 为任务目标创建/找到平台受管 Mask → 写入 7 个 metadata（review_id、target_id、image_id、organ、base_label_id/hash、package_root）→ 如有 import buffer 则在首次创建时注入 → 保存 `.mcs`。background prebuild 模式不弹窗，只写 `working/prebuilt_workspace.json`；标注者首次打开预生成 `.mcs` 时显示一次摘要并清除 marker；续标（resume）不再弹（可随时用 Task List 重看）。`known_absent` 只在建包前已有明确事实时跳过对应 Mask；不能用于根据扫描部位预猜器官不存在。
 
 **验证方式**：
 
 - `prepare` 后检查 `working/mimics_runtime.json` 和 `working/bridge/import/` 是否有内容
-- `SP Review Console` 打开后 Mimics 弹窗显示任务摘要（病例号、序列数、目标器官列表）
+- `sp mimics prebuild-workspace CASE --config CONFIG --dry-run` 应生成包含 `-background_mode` 和 `--background-prebuild` 的命令；Windows 实机运行成功后应生成 `working/prebuilt_workspace.json`
+- `Start Labeling` 打开后 Mimics 弹窗显示任务摘要（病例号、序列数、器官统计和少量预览）
 - Registry 中 Review 状态更新为 `in_progress`
 - 报告写入 `reports/mimics_open_report.json`
 
@@ -215,13 +257,15 @@ sp mimics prepare /data/dataset_package/cases/case_001 --config mimics_workstati
 **标注者看到的流程**：
 
 1. 打开 Mimics。
-2. 运行 `Script → Scripting Library → SP Review Console`。
-3. 选择 **Open Next Review**，弹窗显示任务摘要。**核对**：病例是否正确、有哪些序列、每个序列要标哪些器官。
-4. 如不一致 → 通过 `SP Review Console` 进入提交动作并报告阻塞，不编辑。
+2. 运行 `Script → Scripting Library → Start Labeling`。
+3. 选择 **Start Next Case**，弹窗显示任务摘要。**核对**：病例是否正确、序列数量是否合理、目标器官统计是否符合本次任务。
+4. 如不一致 → 通过 `Start Labeling` 进入提交动作并报告阻塞，不编辑。
 5. 如一致 → 使用 Mimics 正常工具编辑每个 Mask。每个 Mask 的名称、metadata 由平台管理，标注者不改。
 6. 随时 Ctrl+S 保存 `.mcs`。保存只保留进度，不触发提交。
-7. 长时间工作后可在 `SP Review Console` 里选择 **Save Checkpoint**，额外保存一份独立于 `.mcs` 的 Mask 恢复快照。
-8. 关闭软件后，下次仍打开 Mimics 并进入 `SP Review Console` 继续。
+7. 长时间工作、完成一大段器官或准备离开工作站前，可在 `Start Labeling` 里选择 **Save Recovery Backup**，额外保存一份独立于 `.mcs` 的 Mask 恢复快照。它是灾备，不是日常保存。
+8. 关闭软件后，下次仍打开 Mimics 并进入 `Start Labeling` 继续。
+
+任务器官很多时，**Task List** 在 Mimics 弹窗内分页显示，并可按 Missing、Ready、With Initial、Known Absent 筛选；完整清单仍写入 `reports/mimics_task_list.txt` 作为技术记录。标注者优先在 Mimics 内用筛选定位待处理 Mask，不需要为了看完整清单手动打开 TXT。
 
 **标注者不需要知道的事**：标签生命周期、文件哈希、NIfTI 格式、训练编号、Registry 路径。
 
@@ -233,20 +277,25 @@ sp mimics prepare /data/dataset_package/cases/case_001 --config mimics_workstati
 
 **标注者的操作**：
 
-1. `Script → Scripting Library → SP Review Console`
-2. 选择 **Submit Current Review**
-3. 第一个对话框：选择提交意图 — **提交完成 / 提交复查 / 报告阻塞 / 取消**
-4. 第二个对话框：选择要提交的目标组 — 一个、多个（2–5 个时模拟勾选）或全部
-5. 如有空 Mask，弹出聚合清单 — 可统一选择"全部确认不存在""全部待复查"或逐项判断
-6. 等待脚本提示 "已导出，仍需平台检查"
+1. `Script → Scripting Library → Start Labeling`
+2. 直接选择 **Complete**、**Needs Review** 或 **Report Problem**
+3. 如果有多个目标组，选择要提交的目标组 — 一个、多个（2–5 个时模拟勾选）或全部
+4. 如有空 Mask，弹出聚合清单 — 只显示数量和前若干项，完整清单写入报告；可统一选择"全部确认不存在""全部待复查"或逐项判断
+5. 等待脚本提示 "已导出，仍需平台检查"
+
+单目标组、无空 Mask 的常见完成路径只有一个业务选择：**Complete**。后续等待来自 Mask buffer 读取和文件写出，不能完全消除，但不应再增加无意义确认。
+
+当前病例暂时不处理时，标注者选择 **Skip Case**，不是 **Report Problem**。Skip 会把 review 设为 `deferred` 并打开下一例；管理员可用 `sp review reactivate` 放回队列。
 
 **脚本在后台做的事**（`sp_submit_review.py`）：
 
-- **提交完成**：检查所有 Mask 存在且绑定正确 → 空 Mask 确认语义 → `get_voxel_buffer()` 导出每个 Mask 为 `.u8` → 写入 `submissions/{review_id}/buffers/` → 生成 `export_manifest.json` 和 `submission_manifest.json`（action=submit_complete）→ 保存 `.mcs` → 弹窗提示
+- **提交完成**：检查所有 Mask 存在且绑定正确 → 空 Mask 确认语义 → `get_voxel_buffer()` 导出每个 Mask 为 `.u8` 到 staging 目录 → 生成 `export_manifest.json` 和 `submission_manifest.json`（action=submit_complete）→ 一次性发布到 `submissions/{review_id}/` → 保存 `.mcs` → 弹窗提示
 - **提交复查**：同提交完成，action=submit_for_review，记录不确定原因
 - **报告阻塞**：不要求所有 Mask 完成，写入阻塞类型和原因
 
-**验证方式**：检查 `submissions/{review_id}/` 下是否出现了 `submission_manifest.json`、`export_manifest.json` 和 `buffers/` 中的 `.u8` 文件。
+提交过程中 Mimics 崩溃时，半成品留在 `.partial_*` staging 目录，下一次提交会自动清理。`finalize` 只处理正式 `submissions/{review_id}/`，不会误收半截 buffer。
+
+**验证方式**：检查 `submissions/{review_id}/` 下是否出现了 `submission_manifest.json`、`export_manifest.json` 和 `buffers/` 中的 `.u8` 文件，且不存在需要人工处理的 `.partial_*` 目录。
 
 ---
 
@@ -256,6 +305,15 @@ sp mimics prepare /data/dataset_package/cases/case_001 --config mimics_workstati
 
 ```bash
 sp mimics finalize /data/dataset_package/cases/case_001 --config mimics_workstation.yaml --registry /data/platform_registry
+```
+
+批量收尾使用：
+
+```bash
+sp mimics finalize-many /data/dataset_package/cases \
+  --config mimics_workstation.verified.yaml \
+  --registry /data/platform_registry \
+  --continue-on-error
 ```
 
 **`finalize` 做的事**（这是最关键的 QC 闸门，全部检查通过才写 Registry）：
@@ -275,7 +333,49 @@ sp mimics finalize /data/dataset_package/cases/case_001 --config mimics_workstat
 | submit_for_review | 创建新的 `draft_label`，目标组标记 needs_review | 同上 |
 | report_blocked | 不创建标签，目标组标记 blocked | — |
 
-`sp_review_console.py` 支持 `auto_finalize=true`，可以在提交后立即调用 `finalize`；阶段 A 推荐默认 `false`，由平台独立 watcher 或批处理收尾，避免标注者等待长时间 QC。
+如果提交基于旧 `base_label_id`，`submit_complete` 会把 base 中未重标的器官 carry-forward 到新 Label Artifact，并把旧 base 标记为 `superseded`。因此“补标 kidney”不会丢掉已完成的 liver/spleen；Snapshot 默认只看到新的 active 标签。`submit_for_review` 产生 draft，不会 supersede 旧 verified 标签。
+
+`sp_review_console.py` 支持 `auto_finalize=true`，可以在提交后立即调用 `finalize`；阶段 A 推荐默认 `false`，由平台独立 watcher 或批处理收尾，避免标注者等待长时间 QC。确需开启时，Console 会把 `review_report.json` 中的主要 finding 翻译成弹窗动作建议：可修的 Mask 问题提示返修，base label、序列、几何、hash 等平台问题提示联系管理员。
+
+多标注者不要求统一等所有人完成后一次性处理。每个标注者或每批返回的病例都可以独立运行 `collect-submissions` 和 `finalize-many`，通过的标签会追加到中央 Registry；未返回或 QC 失败的病例留在原状态，不影响其他病例。
+
+无共享盘时，中央机和工作站之间使用离线工作包：
+
+```bash
+# 中央机或工作站初始化时，为某个标注者导出本地工作包
+sp review export-worklist \
+  --registry /data/platform_registry \
+  --assignee annotator_01 \
+  --output-root /transfer/annotator_01_worklist \
+  --overwrite
+
+# 标注者完成后，把返回目录中的 submissions 收回中央病例包
+sp mimics collect-submissions \
+  /transfer/annotator_01_returned/cases \
+  /data/dataset_package/cases \
+  --registry /data/platform_registry \
+  --overwrite
+
+# 中央机再批量 finalize
+sp mimics finalize-many /data/dataset_package/cases \
+  --config mimics_workstation.verified.yaml \
+  --registry /data/platform_registry \
+  --continue-on-error
+```
+
+共享盘时不需要导出和收集工作包：所有工作站指向同一病例包目录和 Registry，中央机定期运行 `finalize-many`。阶段 A 仍要求 Registry 单写者，避免多人直接编辑 JSON。
+
+数据集标注中继续增加病例时，不覆盖标注者本地工作包。中央机创建新增病例包后，使用增量分发：
+
+```bash
+sp review export-worklist \
+  --registry /data/platform_registry \
+  --assignee annotator_01 \
+  --output-root /transfer/annotator_01_worklist \
+  --merge
+```
+
+如果只想先给标注者一部分病例，加 `--limit 30`。未分发的 review 仍留在中央队列，不需要用 blocked 伪装。
 
 **验证方式**：
 
@@ -296,13 +396,13 @@ sp mimics finalize /data/dataset_package/cases/case_001 --config mimics_workstat
   sp package validate → 确认数据完整
          │
 [每任务] 平台操作者
-  分配 review_id + 可选提前 prepare
+  分配 review_id + 可选提前 prepare/prebuild .mcs
          │
-[标注者] 打开 Mimics → SP Review Console → Open Next Review
+[标注者] 打开 Mimics → Start Labeling → Start Next Case
          │
-[标注者] 在 Mimics 中编辑 Mask → 随时保存 .mcs → 可选 Save Checkpoint
+[标注者] 在 Mimics 中编辑 Mask → 随时保存 .mcs → 可选 Save Recovery Backup
          │
-[标注者] SP Review Console → Submit Current Review → 导出 .u8
+[标注者] Start Labeling → Complete / Needs Review / Report Problem → 导出 .u8 或记录阻塞原因
          │
 [平台后台]
   sp mimics finalize 或 watcher → 身份/完整/哈希/几何 QC
@@ -354,6 +454,16 @@ python -m pip install -e '.[metaimage]'
 
 Mimics 内置 Python 不安装 nibabel、pydicom 或 SimpleITK。它只运行 `scripting_library/` 包装入口和 `runtime_py35/` 内部脚本。
 
+当 review 工具是 Mimics 且来源图像是 NIfTI/MHD/MHA 时，病例包创建器会在外部 Python 中自动生成 `images/{image_id}/dicom/` 派生 DICOM，并在 manifest 中同时记录：
+
+- `image_path`：原始 NIfTI/MHD/MHA，`sha256` 校验它；
+- `dicom_path`：给 Mimics 21 导入的工作影像，`dicom_sha256` 校验它；
+- `mimics_import.strategy: derived_dicom_series`：说明该 DICOM 是工具工作格式，不是原始数据。
+
+因此标注者仍然只从 Mimics 的 **Start Labeling** 进入，不需要知道原始数据是 DICOM、NIfTI 还是 MHD。批量使用前仍要在 Windows Mimics 21 实机上做一次方向、灰度和 Mask 往返验证。
+
+RAW/MHD 不是被否定的路径。MHD 的 `.raw` 只是体素字节，关键空间信息在 `.mhd` header；Mimics 21 标准图像导入资料只明确到 xy/z resolution 和方向确认，`test_images(force_raw_import=True)` 也没有给出完整的脚本化 RAW header 契约。阶段 A 因此默认派生 DICOM。后续若 POC 证明 RAW 的维度、像素类型、字节序、slice 顺序、方向预答和 P03/P05 都稳定，则可以把 RAW 作为节省存储和导入时间的可选优化。
+
 ## 5. 准备病例包
 
 大批量数据优先从扫描开始：
@@ -367,6 +477,34 @@ sp package create-many /data/package_requests /data/dataset_package --registry /
 ```
 
 `scan` 会把一个混合 DICOM 根目录拆成候选 Series，并为每个 Series 记录 `source_files`；也会发现三维 NIfTI 和 MetaImage 文件，并用父目录启发式生成 Case。来源目录不必预先人工整理成“一个文件夹一个序列”，但文件型数据集若有复杂含义，仍要审阅并修改生成的请求 YAML。`build-requests` 生成的是可审阅 YAML，不直接写 Registry。
+
+如果文件型数据集包含初始标签、CSV 配对或多标签值映射，不建议靠人工批量改 request。优先走 `sp ingest from-description`。
+
+TotalSegmentator、MSD 或 CSV 配对这类数据集优先使用：
+
+```bash
+sp ingest from-description /data/dataset_description.yaml /data/package_requests
+```
+
+它会根据正则或 CSV 表生成同样的 `case_package_request.v1`，包括 `initial_labels.organ` 或 `initial_labels.label_map`。后续仍由 `sp package create-many` 做图像/标签几何校验和拆分。
+
+如果数据集需要 L4 专用 importer，交付物不是一个孤立脚本，而是一整个 import run：
+
+```text
+import_runs/{dataset_id}_{run_id}/
+  requests/
+  reports/import_summary.json
+  reports/import_issues.csv
+  reports/importer_manifest.json
+```
+
+模板见 `examples/importers/custom_importer_template.py`。平台操作者先审阅 summary 和 issues，再运行：
+
+```bash
+sp package create-many import_runs/run_001/requests /data/dataset_package \
+  --registry /data/platform_registry \
+  --continue-on-error
+```
 
 单个病例调试时，可以复制并修改 [病例包请求示例](../../../examples/labeling/case_package_request.yaml)。每个 DICOM `image_set` 必须只指向一个 Series；包含多个 SeriesInstanceUID 的目录会被阻断。NIfTI/MHD `image_set` 指向单个三维文件或文件组。
 
@@ -455,6 +593,20 @@ buffer_mapping:
 
 轴顺序和翻转值必须来自探针世界坐标与 Case Package 几何的唯一匹配。不同 Mimics 构建、工作站配置或导入路径变化后应重新验证。
 
+正常情况下，一台 Mimics 工作站使用一套默认 `buffer_mapping`。如果 P05 明确证明某个 `image_id` 需要不同的轴排列或翻转，可以在同一配置中加入 per-image 覆盖：
+
+```yaml
+buffer_mapping_by_image_id:
+  img_venous:
+    schema_version: mimics_buffer_mapping.v1
+    status: verified
+    evidence_id: P05_WORKSTATION_01_IMG_VENOUS_20260615
+    platform_to_mimics_axes: [2, 1, 0]
+    platform_to_mimics_flips: [false, false, false]
+```
+
+覆盖项只按 `image_id` 生效。没有覆盖的图像继续使用默认 `buffer_mapping`。每个覆盖项都必须有自己的 P05 evidence；不能因为一个序列通过 P05 就推断另一个序列也相同。
+
 ## 7. Mimics 探针怎么运行
 
 正式工作站验收优先运行自包含探针套件：
@@ -502,9 +654,21 @@ copy C:\SegmentationPlatform\config\mimics_review_console.example.json `
 - Registry 根目录；
 - verified 工作站配置；
 - 当前标注者 assignee；
-- 是否在提交后立刻 `auto_finalize`。
+- 是否在提交后立刻 `auto_finalize`；
+- recovery backup 保留数量（默认 `checkpoint_keep_count=3`）。
 
-平台可提前批量运行 `prepare`；如果没有提前准备，`SP Review Console` 会在打开下一例时后台调用 `prepare`。
+平台可提前批量运行 `prepare`。如果工作站已通过 Mimics Gate，平台也可以提前运行 `prebuild-workspace` 或 `prebuild-many`，把首次 DICOM 导入、Mask 创建和初始标签注入前移到标注者不在场的时间。没有提前准备时，`Start Labeling` 会在打开下一例时后台调用 `prepare`，并在当前 Mimics 会话内完成首次打开。
+
+```powershell
+sp mimics prebuild-workspace D:\dataset_package\cases\case_001 `
+  --config C:\SegmentationPlatform\config\mimics_workstation.yaml
+
+sp mimics prebuild-many D:\dataset_package\cases `
+  --config C:\SegmentationPlatform\config\mimics_workstation.yaml `
+  --continue-on-error
+```
+
+`prebuild` 默认只处理尚未有 `.mcs` 的任务；已有 `working/prebuilt_workspace.json` 的任务会跳过为 `already_prebuilt`，已有普通 `.mcs` 的任务会跳过为 `already_exists`，避免后台覆盖标注者正在编辑的工作现场。确需重建时显式加 `--rebuild-workspace`。
 
 后台 `prepare` 完成：
 
@@ -515,35 +679,34 @@ copy C:\SegmentationPlatform\config\mimics_review_console.example.json `
 
 同一图像的初始逐器官 Mask 会登记成一份多 segment Label Artifact。若一个目标组的全部器官都来自该 Artifact，病例包会自动把它设为目标组的基础标签，后续提交必须回传相同 ID 和 bundle hash。
 
-标注者打开 Mimics 后运行 `Script -> Scripting Library -> SP Review Console`，选择 **Open Next Review**。Console 后台调用 `sp_open_review.py`，内部脚本完成：
+标注者打开 Mimics 后运行 `Script -> Scripting Library -> Start Labeling`，选择 **Start Next Case**。Console 后台调用 `sp_open_review.py`，内部脚本完成：
 
-- 首次任务导入 DICOM；继续任务打开专属 `.mcs`。
+- 首次任务导入 DICOM；预生成或继续任务打开专属 `.mcs`。
 - 使用 Series UID 哈希和 shape 唯一匹配 image set。
 - 每次操作目标前显式 `set_active()`。
-- 为每个目标器官建立一个 Mask；target 中 `known_absent` 声明的器官跳过（不建 Mask、不导出、不参与 QC）。
+- 为每个目标器官建立一个平台受管 Mask。若 target 中存在 `known_absent`，只把它当作来源数据已明确给出的例外事实：对应器官跳过，不建 Mask、不导出、不参与 QC。普通标注任务不要求也不建议在打开病例前填写它。
 - 写入 `review_id/target_id/image_id/organ/base_label` metadata。
 - 继续任务时先核对已有 Mask 的 `base_label_id + bundle hash`，不一致即阻断。
 - 只在首次创建 Mask 时注入初始缓冲区。
-- `.mcs` 不可用且选择重建时，优先恢复匹配当前任务版本和 mapping evidence 的 checkpoint。
-- 保存任务专属 `.mcs`；首次打开显示一次摘要，续标不再弹（可随时用 Show Summary 重看）。
+- `.mcs` 不可用且选择重建时，优先恢复匹配当前任务版本和 mapping evidence 的 recovery backup。
+- 保存任务专属 `.mcs`；首次打开显示一次摘要，续标不再弹（可随时用 Task List 重看）。Task List 会分页显示器官统计和当前 Mask 状态，并支持按 Missing、Ready、With Initial、Known Absent 筛选；完整清单写入 `reports/mimics_task_list.txt`。
 
 打开成功后，Registry 中该 Review 和尚未开始的目标组会更新为 `in_progress`，并追加 `open_started` 事件。
 
 标注者只执行：
 
 1. 打开 Mimics。
-2. 运行 **SP Review Console**。
+2. 运行 **Start Labeling**。
 3. 打开下一例或继续当前例。
-4. 核对病例、序列和目标器官。
+4. 核对病例、序列和目标器官统计；完整器官清单通过 Mimics 内的 Task List 分页和状态筛选查看，必要时再查 `reports/mimics_task_list.txt`。
 5. 使用 Mimics 正常工具编辑 Mask。
 6. 可随时保存 `.mcs` 并关闭。
-7. 长时间工作后可在 Console 里选择 **Save Checkpoint**。
-8. 完成时在 Console 里选择 **Submit Current Review**。
-9. 选择完成、复查、阻塞或取消；2–5 个目标组可勾选任意组合一次提交。
+7. 长时间工作、完成一段器官或离开工作站前，可在 Console 里选择 **Save Recovery Backup**。
+8. 完成时在 Console 里直接选择 **Complete**；不确定时选择 **Needs Review**；数据或工具问题导致无法继续时选择 **Report Problem**。
+9. 如有 2–5 个目标组，可勾选任意组合一次提交。
 
 保存 `.mcs` 不会创建正式标签。提交脚本也只写出缓冲区和提交意图。
-提交前会聚合检查 Mask 完整性、image set、基础版本和 shape。多个空 Mask 可统一确认，
-也可以逐项判断。
+提交前会聚合检查 Mask 完整性、image set、基础版本和 shape。多个空 Mask 只在弹窗中预览前若干项，完整清单写入报告；可统一确认，也可以逐项判断。
 
 ## 9. 平台收尾
 
@@ -577,13 +740,124 @@ sp mimics finalize D:\dataset_package\cases\case_001 `
 
 人工修订继承基础标签的生成器血统和使用限制。旧 Label Artifact 不被覆盖。
 
-## 10. 创建训练前快照
+## 10. 标注中需求变化
 
-修改 [Snapshot 请求示例](../../../examples/labeling/snapshot_request.yaml)，明确每个器官使用哪个 `label_id`：
+### 10.1 数据集增加病例
+
+新增病例不影响已有病例包、已完成 review 或已登记 Label Artifact。推荐流程：
+
+```bash
+sp ingest scan /data/new_cases --output /data/reports/new_scan.json
+sp ingest build-requests /data/reports/new_scan.json /data/new_requests \
+  --organs liver spleen \
+  --import-batch batch_002 \
+  --assignee annotator_01
+sp package create-many /data/new_requests /data/dataset_package \
+  --registry /data/platform_registry \
+  --continue-on-error
+sp review export-worklist \
+  --registry /data/platform_registry \
+  --assignee annotator_01 \
+  --output-root /transfer/annotator_01_worklist \
+  --merge
+```
+
+`--merge` 只补充新 review，不覆盖标注者本地已经在做的病例。
+
+### 10.2 标注任务追加器官
+
+不要用 `overwrite=True` 重建原病例包。对已完成或需要返修的病例，创建 follow-up review：
+
+```bash
+sp review create-followup \
+  --registry /data/platform_registry \
+  --output-root /data/dataset_package \
+  --case-id case_001 \
+  --organs kidney_left kidney_right \
+  --review-suffix add_kidney \
+  --assignee annotator_01
+```
+
+该命令会：
+
+- 找到该 case/image 当前 active 的基础 Label Artifact；
+- 创建新的 review package，路径形如 `cases/case_001-add_kidney/`；
+- 把旧标签作为 `base_label_id`；
+- 在 Mimics 中只要求标注新增器官；
+- Finalize 通过后生成包含旧器官和新增器官的新 Label Artifact；
+- 把旧 base 标记为 `superseded`，但不删除旧文件、旧提交或旧报告。
+
+对于尚未开始的 `ready` review，如果确认标注者还没有打开 `.mcs`，平台管理员可以删除并重建该 review package，或用后续专门命令做安全更新。对于已经 `in_progress` 的 review，阶段 A 不支持直接追加器官到原任务：标注者本地 `.mcs`、Mask metadata、`mimics_runtime.json`、提交清单和 Registry 记录已经形成一组一致状态，动态插入新器官会增加 Mask 缺失、基础标签 hash 不一致和提交范围混乱的风险。
+
+因此 `in_progress` 追加器官统一走 follow-up review。旧 review 继续完成原目标；新增器官创建新的 review package，并把当前 active Label Artifact 作为 base label。这样不会丢弃已完成工作，也不会要求标注者在一个已经打开的 `.mcs` 中理解“任务范围突然变化”。
+
+这不是禁止现场探索。标注者可以在 Mimics 中临时自建 Mask 做判断或记录，但这些 Mask 没有平台 metadata，也不在 `mimics_runtime.json` 和 manifest 的目标清单中，因此不会被 `sp_submit_review.py` 导出。提交脚本会在发现未管理 Mask 时提示“这些不会被导出”，并写入 `reports/mimics_unmanaged_masks.txt`。如果临时 Mask 有价值，标准处理是创建 follow-up review，然后由标注者或管理员把它复制/转移到平台创建的正式 Mask 中再提交。
+
+这条规则把灵活性放在“现场工作区”和“follow-up 接入点”，把严格性保留在“正式提交和 Label Artifact”。否则短期看似灵活，长期会失去 provenance、QC 和版本复现能力。
+
+### 10.3 已完成标签继续修正
+
+同样使用 `sp review create-followup`。若要重修 liver：
+
+```bash
+sp review create-followup \
+  --registry /data/platform_registry \
+  --output-root /data/dataset_package \
+  --case-id case_001 \
+  --organs liver \
+  --review-suffix relabel_liver \
+  --assignee annotator_02
+```
+
+标注者打开新 review 时看到 liver 从旧版本导入，可直接修正。提交完成后，新 Label Artifact 会 carry-forward base 中未重修的其他器官。
+
+### 10.4 分配的数据不一定全标
+
+三种方式：
+
+| 需求 | 做法 |
+| --- | --- |
+| 只先分发 N 例 | `sp review export-worklist --limit N` |
+| 标注者临时跳过当前病例 | Mimics 中选择 **Skip Case**，review 进入 `deferred` |
+| 管理员把跳过病例放回队列 | `sp review reactivate --registry /data/platform_registry --review-id review_xxx` |
+
+`deferred` 不等于 `blocked`。前者只是暂不处理，后者表示数据或工具问题导致无法继续。
+
+## 11. 创建训练前快照
+
+对少量病例，可以手写 `snapshot_request.v1` 并明确每个器官使用哪个 `label_id`。对几百到几千病例，不应手写 `label_id`，先从 Registry 生成请求草稿：
+
+```bash
+sp snapshot build-request \
+  --registry /data/platform_registry \
+  --output /data/requests/snapshot_liver.yaml \
+  --snapshot-id snapshot_liver_001 \
+  --task-id liver_task \
+  --organs liver \
+  --allow-lifecycle-status verified_label \
+  --default-split train
+```
+
+如果已有患者级 split 计划，提供 CSV：
+
+```bash
+sp snapshot build-request \
+  --registry /data/platform_registry \
+  --output /data/requests/snapshot_abdomen.yaml \
+  --snapshot-id snapshot_abdomen_001 \
+  --task-id abdomen_task \
+  --organs liver spleen kidney_left kidney_right \
+  --split-plan /data/splits/abdomen_split.csv \
+  --allow-lifecycle-status verified_label
+```
+
+`split_plan.csv` 至少包含 `case_id,split`，可选 `image_id`。生成器会查找每个 case/image 下任务器官的唯一 active Label Artifact；有多个候选会跳过并报告，避免静默选错版本。默认允许部分器官标签进入请求草稿；如果任务必须每例全器官齐全，加 `--require-all-organs`。
+
+草稿审阅后再冻结 Snapshot：
 
 ```bash
 sp snapshot create \
-  examples/labeling/snapshot_request.yaml \
+  /data/requests/snapshot_liver.yaml \
   --registry /data/platform_registry
 ```
 
@@ -593,6 +867,7 @@ sp snapshot create \
 - 编号从 0 连续。
 - 标签生命周期满足本次 `label_policy`。
 - Label 的 case/image 与请求一致。
+- Image Artifact 的用途限制：`train` 检查 `usability.training`，`val/test` 检查 `usability.evaluation`；`blocked` 不得进入 Snapshot。
 - 同一 `leakage_group_id` 不跨 train/val/test。
 - 所有输入的 `usage_constraints` 取最严结果。
 
@@ -606,31 +881,71 @@ sp snapshot validate /data/platform_registry/snapshots/snap_abdomen_v1.json
 
 到这里训练前闭环结束。后续 nnUNet Adapter 只能读取已冻结的 Snapshot。
 
-## 11. 异常和恢复
+## 12. 异常和恢复
 
 | 情况 | 处理 |
 | --- | --- |
-| Mimics 打开失败 | 查看 `reports/mimics_open_error.json`，修复后由 **SP Review Console** 重新打开 |
-| 标注中断 | 保存 `.mcs`，以后仍打开 Mimics 并通过 **SP Review Console** 继续 |
+| Mimics 打开失败 | 查看 `reports/mimics_open_error.json`，修复后由 **Start Labeling** 重新打开 |
+| 标注中断 | 保存 `.mcs`，以后仍打开 Mimics 并通过 **Start Labeling** 继续 |
 | Mask 错序列 | 提交脚本阻断；不要手工改 header |
 | Mimics 提交前检查失败 | 查看弹窗和 `reports/mimics_submit_precheck.json` |
-| 提交 QC 失败 | 查看 `reports/review_report.json`；下次通过 Console 打开时会显示失败摘要 |
-| 已验证标签要修改 | 新建 `review_id`，旧标签作为 base label，不覆盖旧版本 |
+| 提交 QC 失败 | 弹窗显示主要 finding 和动作建议；完整技术细节见 `reports/review_report.json` |
+| 提交过程中 Mimics 崩溃 | 半成品在 `.partial_*` staging 目录；下一次提交自动清理，正式 `submissions/` 不会被半截结果污染 |
+| 已验证标签要修改 | `sp review create-followup` 新建 review，旧标签作为 base label；complete 通过后旧标签变为 `superseded` |
+| 病例包创建中途失败 | 下次 `sp package create` 发现无 `manifest.json` 的残留目录会自动清理后重试 |
 | 多标注者 | 每人独立 `review_id` 和 `.mcs`；阶段 A 不共享写同一文件 |
-| `.mcs` 损坏 | 运行 `prepare --rebuild-workspace` 保留旧文件，并从最新 checkpoint 或初始标签重建 |
+| `.mcs` 损坏 | 运行 `prepare --rebuild-workspace` 保留旧文件，并从最新 recovery backup 或初始标签重建 |
 
-## 12. 规模化标注的当前决策
+## 13. 规模化标注的当前决策
 
 | 问题 | 当前处理 |
 | --- | --- |
 | 手写 10000 份 YAML 不可行 | 已提供 `sp ingest scan`、`sp ingest build-requests` 和 `sp package create-many`。扫描和请求生成是批量入口，人工只审阅规则和异常项。 |
+| 图像和标签规则复杂 | 使用 `sp ingest from-description`，用正则或 CSV 明确图像-标签配对和 label value 映射；仍表达不了时按 L4 importer 契约输出标准 request 和 issues。 |
 | 一个 `.mcs` 多病例能否减少启动成本 | 阶段 A 不采用。单 `.mcs` 多病例会放大项目损坏、Mask 误绑定、部分提交、多人分派和失败回滚的风险。当前选择一个 review/case 一个 `.mcs`，用批量发现和批量创建降低平台侧成本。 |
-| prepare/open/finalize 是否仍需逐病例 | 已提供 `sp mimics prepare-many`、`sp mimics finalize-many` 和 `sp review stats`。标注者不直接运行 `open`，而是在 Mimics 内通过 **SP Review Console** 领取下一例。 |
+| prepare/open/finalize 是否仍需逐病例 | 已提供 `sp mimics prepare-many`、`sp mimics prebuild-many`、`sp mimics finalize-many`、`sp review stats`、`sp review export-worklist` 和 `sp mimics collect-submissions`。标注者不直接运行 `open`，而是在 Mimics 内通过 **Start Labeling** 领取下一例。 |
 | Registry 标签查询 O(N) | 文件式 Registry 已维护 `_indexes/labels_by_case_image_organ.json`。旧 Registry 可运行 `sp registry rebuild-index /data/platform_registry` 生成索引。 |
 | 空间信息不完整 | 数据导入契约允许 `complete/partial/index_only`，但 Mimics 病例包当前仍要求可控的工具空间。纯 RAW 和无法证明空间的来源应先创建带明确假设的派生图像，或停在导入报告中。 |
 | 部分器官标签 | Snapshot 支持按病例列出实际 segment 子集。不能把未标器官当背景；训练导出层后续要显式实现 ignore/排除策略。 |
+| 几千病例手写 Snapshot `label_id` 不可行 | 使用 `sp snapshot build-request` 从 Registry 自动生成请求草稿；人工只审阅 skipped/ambiguous 项和 split。 |
+| 标注中追加器官或返修 | 使用 `sp review create-followup` 创建增量 review；旧 submissions/reports 不删除，旧 Label Artifact superseded 而非覆盖。 |
+| 不想标完全部分配病例 | 使用 `--limit` 控制分发数量，或用 **Skip Case** / `sp review defer` 暂时移出队列。 |
 
-## 13. 验证命令
+## 14. 非线性流程和当前缺口
+
+阶段 A 的命令看起来是线性的，但实现目标不是固定流水线。当前应把流程理解为 Registry 对象图：
+
+```text
+Image Artifact
+  -> Review Task -> Label Artifact
+  -> Candidate Generation Job -> Candidate Label
+Label Artifact(s)
+  -> Dataset Snapshot -> Model Record
+```
+
+当前支持和缺口如下：
+
+| 场景 | 当前是否支持 | 处理方式或缺口 |
+| --- | --- | --- |
+| 一批图像先登记，稍后再决定标注器官 | 支持 | `sp ingest register` 只写 Case/Image，不创建病例包和 review |
+| 同一图像分给不同工具标注 | 部分支持 | 可创建多个 review package；新对象图命令会写入最小 run record，但还不是完整调度 DAG |
+| 两个标注者标同一病例不同器官 | 支持 | 可用 `sp label merge` 合并同一 case/image 下互不冲突的 Label Artifact；同器官冲突必须显式 `--organ-source organ=label_id` |
+| Finalize 失败后回到标注者 | 支持 | `finalize` 失败写 `review_report.json`，review 回到 `in_progress` |
+| Snapshot 发现 leakage 冲突 | 支持修正，不需要标注者 | 修正 split plan 后重新创建 Snapshot；这不是标签错误 |
+| Snapshot 发现标签版本、来源或质量问题 | 支持 | `sp review create-from-finding` 可从 Snapshot/QC 报告生成 follow-up review；无器官信息的 finding 会被列为 unsupported |
+| 高质量外部标签直接进入训练 | 支持 | `sp label register` 可给已登记 Image Artifact 追加 `source_label`，Snapshot policy 决定是否采用；无需创建 review |
+| 自建或临时 Mask 进入正式链路 | 受控支持 | 当前提交会提示未管理 Mask 不导出；后续应实现 `adopt unmanaged mask` 或 follow-up 中的正式转入 |
+
+因此，下一步仍不应直接上 Airflow/Celery。当前已经补齐的对象图命令包括：
+
+1. `sp label merge`：把同一 case/image 下不同 Label Artifact 的互不冲突 segment 合成一个新 Label Artifact，并记录每个 segment 的 lineage。
+2. `sp review create-from-finding`：把 Snapshot 或 QC finding 转成 follow-up review 草稿。
+3. `sp label register-many`：从 CSV、JSON 或 YAML 表格批量追加外部标签，避免逐条命令。
+4. 最小 run record：上述对象图命令会在 Registry `_runs/` 下记录 `run_id`、输入、输出和结果摘要。
+
+仍未实现的是 Mimics 临时自建 Mask 的正式纳管命令，以及覆盖所有历史批处理命令的统一 run record。
+
+## 15. 验证命令
 
 ```bash
 .venv/bin/python -m pytest -q

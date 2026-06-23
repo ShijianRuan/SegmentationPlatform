@@ -43,7 +43,7 @@ Materialise 当前产品页也继续把 Python scripting 描述为自动化重�
 | 一个复杂 DICOM 目录实际生成哪些 image sets | 先由平台给出预期序列清单，导入后逐项核对 |
 | Mask buffer 的轴顺序和图像物理坐标关系 | 使用人工体模和已知点验证，未通过前不导入真实标签 |
 | 不使用 NumPy 时能否高效写入和导出 Mask buffer | 先验证标准库 `memoryview` 路径；失败才锁定旧版 NumPy |
-| NIfTI、MHD/MHA 图像能否直接稳定导入 | 默认不支持；优先走 DICOM 或改用原生支持工具 |
+| NIfTI、MHD/MHA 图像能否直接稳定导入 | 不能假设有原生 importer；当前实现先由外部 Python 派生 DICOM，再由 Mimics 导入；实机验证关注导入后的方向、灰度和 Mask 往返 |
 | `.mcs` 跨机器、跨 edition 和跨许可使用 | 只作为工作检查点，不作为唯一交付文件 |
 | 部分内置对话框能否安全预答 | 只有答案由平台预检查唯一确定时才启用 |
 
@@ -64,7 +64,7 @@ src/segplatform/adapters/mimics/
 
 adapters/mimics/
   scripting_library/
-    SP_Review_Console.py
+    Start_Labeling.py
   runtime_py35/
     sp_review_console.py
     sp_common.py
@@ -86,7 +86,7 @@ adapters/mimics/
 两类脚本含义不同：
 
 - `probes/sp_probe_suite.py` 是工作站验收入口；单项探针用于失败定位和回归；
-- `scripting_library/SP_Review_Console.py` 是标注者在 Mimics 菜单中看到的唯一入口；
+- `scripting_library/Start_Labeling.py` 是标注者在 Mimics 菜单中看到的唯一入口；
 - `runtime_py35/sp_review_console.py` 是 Console 的内部实现，必须兼容 Python 3.5；
 - `runtime_py35/` 中其他脚本是内部实现或管理员诊断入口，不要求标注者直接运行。
 
@@ -130,8 +130,10 @@ sp mimics prepare /path/to/case_package --config /path/to/mimics_workstation.yam
 
 - DICOM：进入 Mimics 直接导入路径；
 - 已有 `.mcs`：进入继续任务路径；
-- NIfTI/MHD 图像：只有 P03 已证明当前环境可安全导入或转换时才进入；
+- NIfTI/MHD 图像：外部现代 Python 读取并派生 Mimics 可导入表示；只有 P03 证明导入后维度、灰度和方向一致时才进入；
 - 无法证明空间的格式：改用 ITK-SNAP、3D Slicer 或其他原生工具。
+
+NIfTI/MHD 的推荐路径不是在 Mimics Python 3.5 中安装 nibabel/SimpleITK 并直接写 `ImageData`。官方 API 可确认 `ImageData.get_voxel_buffer()`，但没有对应的 `ImageData.set_voxel_buffer()`。第三方库读取应发生在外部 Python；Mimics 内脚本只负责导入已派生的 DICOM 或经 POC 证明可用的标准图像/RAW 工作表示、保存 `.mcs` 和管理 Mask。
 
 ### 5.3 `bridge.py`
 
@@ -184,16 +186,18 @@ Mimics 导出的提交 buffer 不写入 `working/bridge/`，而是写入
 
 ```bash
 sp mimics open /path/to/case_package --config /path/to/mimics_workstation.yaml --registry /path/to/registry
+sp mimics prebuild-workspace /path/to/case_package --config /path/to/mimics_workstation.yaml
+sp mimics prebuild-many /path/to/cases_root --config /path/to/mimics_workstation.yaml --continue-on-error
 ```
 
-这是管理员调试和兼容入口，不作为标注者日常入口。正式标注由 **SP Review Console** 在当前 Mimics 会话中调用内部打开逻辑。
+`open` 是管理员调试和兼容入口，不作为标注者日常入口。正式标注由 **Start Labeling** 在当前 Mimics 会话中调用内部打开逻辑。`prebuild-*` 是平台/管理员侧批量入口，用 Mimics background mode 预生成 `.mcs`，把首次导入从标注者在场时移走。
 
 职责：
 
 1. 检查 `mimics_runtime.json`；
 2. 设置本次任务需要的环境变量；
 3. 使用工作站配置中的实际可执行文件启动 Mimics；
-4. 调用 `sp_open_review.py` 并传入 runtime manifest；
+4. 交互 open 调用 `sp_open_review.py`；后台 prebuild 调用 `sp_open_review.py --background-prebuild`；
 5. 把 Mimics 系统日志保存到病例包 `reports/`。
 
 官方命令行参数形式为：
@@ -206,7 +210,7 @@ sp mimics open /path/to/case_package --config /path/to/mimics_workstation.yaml -
   [-run_script <script_name.py [args]>]
 ```
 
-人工编辑不能使用 `-background_mode`。批量准备项目、诊断或无交互检查才可以考虑后台模式。
+人工编辑不能使用 `-background_mode`。批量预生成项目、诊断或无交互检查才使用后台模式。`prebuild_workspace()` 默认跳过已有预生成 marker 的 `.mcs`，也跳过已有普通 `.mcs`，避免后台进程覆盖标注者现场；只有显式 `--rebuild-workspace` 才重建。
 
 ### 5.5 `finalize.py`
 
@@ -231,15 +235,16 @@ sp mimics finalize /path/to/case_package --config /path/to/mimics_workstation.ya
 
 ### 6.1 `sp_review_console.py`
 
-这是标注者在 Mimics 内通过 `scripting_library/SP_Review_Console.py` 调用的主入口，推荐在菜单中显示为 **SP Review Console**。
+这是标注者在 Mimics 内通过 `scripting_library/Start_Labeling.py` 调用的主入口，推荐在菜单中显示为 **Start Labeling**。
 
 它负责把平台流程收敛成少量 Mimics 内动作：
 
-- **Open Next Review**：读取本机 JSON 配置，调用外部平台 Python 查询 `sp review next`，必要时后台执行 `sp mimics prepare`，然后在当前 Mimics 会话内调用 `sp_open_review.py`。
-- **Submit Current Review**：调用 `sp_submit_review.py` 导出 Mask 和提交意图。默认不阻塞等待最终 QC；平台 watcher 或管理员批处理独立运行 `sp mimics finalize`。
-- **Save Checkpoint**：调用 `sp_save_checkpoint.py` 保存恢复快照。
-- **Show Summary**：重新显示当前 review、case、image set 和目标器官，替代常驻弹窗。
-- **Open Next Review** 可在当前项目保存并关闭后继续下一例，但每个 `.mcs` 仍只对应一个 review/case。
+- **Start Next Case**：读取本机 JSON 配置，调用外部平台 Python 查询 `sp review next`，必要时后台执行 `sp mimics prepare`，然后在当前 Mimics 会话内调用 `sp_open_review.py`。
+- **Complete / Needs Review / Report Problem**：把业务结果直接传给 `sp_submit_review.py`，导出 Mask 或记录阻塞原因。默认不阻塞等待最终 QC；平台 watcher 或管理员批处理独立运行 `sp mimics finalize`。
+- **Skip Case**：调用 `sp review defer`，把当前 review 暂时移出默认领取队列，然后打开下一例。它不是提交，也不是阻塞。
+- **Save Recovery Backup**：调用 `sp_save_checkpoint.py` 保存恢复快照。
+- **Task List**：在 Mimics 弹窗内分页显示当前 review、case、image set、目标器官和当前 Mask 状态，并支持按 Missing、Ready、With Initial、Known Absent 筛选，替代常驻弹窗。
+- **Start Next Case** 可在当前项目保存并关闭后继续下一例，但每个 `.mcs` 仍只对应一个 review/case。
 
 本机配置使用 JSON，而不是 YAML，因为 Mimics 21 内 Python 3.5 只应依赖标准库：
 
@@ -249,7 +254,8 @@ sp mimics finalize /path/to/case_package --config /path/to/mimics_workstation.ya
   "registry_root": "D:\\platform_registry",
   "workstation_config": "C:\\SegmentationPlatform\\config\\mimics_workstation.verified.yaml",
   "assignee": "annotator_01",
-  "auto_finalize": false
+  "auto_finalize": false,
+  "checkpoint_keep_count": 3
 }
 ```
 
@@ -315,7 +321,7 @@ Resume 时先比较已有 Mask metadata 与当前 target 的 `base_label_id` 和
 
 ### 6.5 `sp_submit_review.py`
 
-日常使用时由 **SP Review Console** 调用。管理员调试时可临时运行该脚本；生产工作站不应把整个 `runtime_py35/` 目录暴露给标注者。
+日常使用时由 **Start Labeling** 调用。管理员调试时可临时运行该脚本；生产工作站不应把整个 `runtime_py35/` 目录暴露给标注者。
 
 脚本先自动检查：
 
@@ -348,9 +354,17 @@ Resume 时先比较已有 Mask metadata 与当前 target 的 `base_label_id` 和
 
 ### 6.6 `sp_save_checkpoint.py`
 
-该脚本显式导出当前 review 的全部受管 Mask 为 gzip 压缩 `.u8.gz`，并写入 checkpoint manifest。它用于 `.mcs`
-损坏后的恢复，不创建提交、不改变标签状态。Mimics 21 资料没有证明存在稳定的项目保存事件
-回调，因此第一阶段不伪造“每次保存自动 checkpoint”；标注者在长时间工作后主动运行一次。
+该脚本显式导出当前 review 的全部受管 Mask 为 gzip 压缩 `.u8.gz`，并写入 recovery backup manifest。它用于 `.mcs`
+损坏后的恢复，不创建提交、不改变标签状态。
+
+它不是 Ctrl+S 的替代品：
+
+- Ctrl+S / 保存 `.mcs` 是日常进度保存，速度快，标注者可以频繁使用。
+- **Save Recovery Backup** 是灾备快照，用于 `.mcs` 损坏、跨机器恢复或重建工作区。
+
+Mimics 21 资料没有证明存在稳定的项目保存事件回调，因此第一阶段不伪造“每次保存自动 backup”。
+标注者只在长时间工作、完成一大段器官或准备离开工作站前主动运行一次。
+脚本默认保留最新 `checkpoint_keep_count=3` 份 recovery backup，自动清理更旧目录，避免长期标注产生大量 `.u8.gz` 文件。
 
 ## 7. 标注者实际怎样使用
 
@@ -367,13 +381,15 @@ Resume 时先比较已有 Mask metadata 与当前 target 的 `base_label_id` 和
 
 标注者不安装 Python 包，也不修改脚本。
 
+`buffer_mapping` 是默认映射，不再被视为不可替代的全局单例。实现支持可选 `buffer_mapping_by_image_id`，当 P05 证明某个 `image_id` 的 Mimics buffer 轴排列不同于默认值时，`prepare`、Mask 注入、Recovery Backup、提交导出和 `finalize` 会按 `image_id` 选择对应映射。没有覆盖的图像继续使用默认映射。覆盖项同样必须 `status=verified` 且带独立 `evidence_id`。
+
 ### 7.2 打开新任务
 
 标注者只做：
 
 1. 打开 Mimics。
-2. 运行 `Script -> Scripting Library -> SP Review Console`。
-3. 选择 **Open Next Review**。
+2. 运行 `Script -> Scripting Library -> Start Labeling`。
+3. 选择 **Start Next Case**。
 
 Console 在后台查询任务队列、准备病例、打开 `.mcs` 或导入 DICOM。任务打开后，标注者只核对：
 
@@ -384,23 +400,33 @@ Console 在后台查询任务队列、准备病例、打开 `.mcs` 或导入 DIC
 
 如果不一致，直接报告阻塞，不自行换序列或复制 header。
 
-任务摘要不是常驻窗口。标注中途忘记目标范围时，重新运行 **SP Review Console** 并选择 **Show Summary**。
+任务摘要不是常驻窗口。标注中途忘记目标范围时，重新运行 **Start Labeling** 并选择 **Task List**；多器官任务可在弹窗内翻页，也可按 Missing、Ready、With Initial、Known Absent 筛选。
+该摘要是当前稳定主路径：它从 `mimics_runtime.json` 和受管 Mask metadata 生成，不要求标注者打开外部文件。
+
+`known_absent` 不作为常规任务准备手段。平台在建包前通常不知道扫描覆盖范围，也不能凭“腹部/头颈”等粗略判断把目标器官排除。
+只有来源数据已有明确结构化事实时，才允许在病例包中写入 `known_absent`。标注者在打开病例后遇到空 Mask、无法确认或上下文不足时，通过提交时的
+`confirmed_absent`、`Needs Review` 或 `Report Problem` 表达，不回头修改病例包。
+
+Project Tree 中的 Custom/注释对象可以作为更好的常驻任务清单候选，但 Mimics 21 API 文档目前只确认 masks、parts、measurements、planes、points 等对象以及对象 metadata，
+未确认有稳定的“项目级任务注释”创建接口。因此生产实现暂不依赖该能力；若 POC 证明可创建不会污染图像视图的 Custom 注释对象，再把 Task List 同步写入该对象。
 
 ### 7.3 标注和保存
 
 - 使用 Mimics 正常编辑工具修改 Mask；
 - 可以任意多次保存 `.mcs`；
-- 长时间工作后可在 **SP Review Console** 中保存独立 Mask checkpoint；
-- 关闭后继续时，仍打开 Mimics 并通过 **SP Review Console** 进入任务；
+- 长时间工作后可在 **Start Labeling** 中保存独立 Mask checkpoint；
+- 关闭后继续时，仍打开 Mimics 并通过 **Start Labeling** 进入任务；
 - 保存只保留进度，不产生提交。
 
 ### 7.4 提交
 
-1. 在 **SP Review Console** 选择 **Submit Current Review**；
-2. 选择完成、复查、阻塞或取消；
+1. 在 **Start Labeling** 直接选择 **Complete**、**Needs Review** 或 **Report Problem**；
+2. 如有多个目标组，选择本次提交哪些目标组；
 3. 等待脚本提示导出完成；
 4. 平台后台或管理员批处理独立运行 `sp mimics finalize`；
 5. QC 通过后，平台更新任务和标签版本；QC 失败的任务回到可返修队列。
+
+单目标组、无空 Mask 的常见路径不会再出现“提交意图”二次选择。额外弹窗只保留在多目标组选择、空 Mask 语义确认、待复查原因和阻塞原因这些确实需要人工判断的分支。
 
 标注者不手工导出 NIfTI，不选择输出文件名，也不维护生命周期状态。
 
@@ -437,7 +463,7 @@ Console 在后台查询任务队列、准备病例、打开 `.mcs` 或导入 DIC
 | 器官 Mask 缺失 | 提交脚本 | 列出缺少目标 | 返回继续编辑 |
 | 医学上不能确认 | 标注者 | 选择“提交复查” | 保留草稿并创建复查队列 |
 | 工具或数据导致无法工作 | 标注者 | 选择“报告阻塞” | 平台操作者处理后重开 |
-| 导出后几何 QC 失败 | `finalize` | 查看 `review_report.json`；下次打开显示摘要 | 禁止创建 verified 标签 |
+| 导出后平台 QC 失败 | `finalize` | 弹窗显示主要 finding 和动作建议；完整报告在 `review_report.json` | 禁止创建 verified 标签，能返修的任务回到 in_progress |
 | `.mcs` 损坏 | Console/open 内部脚本 | 保留旧文件并提示重建 | 从匹配当前版本的 checkpoint 恢复 |
 
 用户提示只显示任务相关信息。完整堆栈、API 参数和文件路径写入 `reports/`，不直接展示给标注者。
@@ -468,7 +494,7 @@ Console 在后台查询任务队列、准备病例、打开 `.mcs` 或导入 DIC
 | 1 | 工作站诊断 | `doctor.py`、`sp_diagnostics.py`、环境报告 | 1-2 人日 |
 | 2 | 能力探针 | P01/P02/P04/P05/P06 脚本和证据 | 3-5 人日 |
 | 3 | 标签桥接 | `bridge.py`、buffer manifest、往返测试 | 3-5 人日 |
-| 4 | 打开任务 | `prepare.py`、`launcher.py`、`sp_review_console.py`、`sp_open_review.py` | 3-5 人日 |
+| 4 | 打开任务和预生成工作区 | `prepare.py`、`launcher.py`、`sp_review_console.py`、`sp_open_review.py`、`prebuild-workspace` | 3-5 人日 |
 | 5 | 保存与提交 | metadata 契约、`sp_submit_review.py`、`sp_save_checkpoint.py` | 2-4 人日 |
 | 6 | 收尾与 QC | `finalize.py`、提交报告和失败恢复 | 2-4 人日 |
 | 7 | 真实病例验收 | 3 至 5 例、继续任务、返修和双标注者 | 2-4 人日 |
@@ -519,7 +545,8 @@ Mimics 主路径预计 **16-29 人日**。如果直接文件路径无法使用�
 - 在一个 `.mcs` 中混放多个平台 review task；
 - 自动处理存在歧义的方向、spacing 或序列选择；
 - 把 `.mcs` 当作唯一标签交付物；
-- 在未验证前承诺 NIfTI/MHD 图像原生导入。
+- 在未验证前承诺 NIfTI/MHD 图像原生导入；
+- 绕过 Mimics 导入 API，直接把外部数组写成 `ImageData`。
 
 外部 IDE 和 listener 适合开发调试，不是阶段 A 的生产运行依赖。
 
