@@ -165,6 +165,10 @@ def _write_initial_labels(
             )
 
         if "organ" in entry:
+            if "label_map" in entry and entry["label_map"] is not None:
+                raise ValidationError(
+                    f"initial label for image {image_id} specifies both 'organ' and 'label_map'; provide only one: {source_path}"
+                )
             mappings = {vocabulary.normalize(str(entry["organ"])): 1}
             if not np.array_equal(np.unique(array), np.asarray([0, 1])) and not set(np.unique(array)).issubset({0, 1}):
                 raise ValidationError(f"single-organ mask must contain only 0/1: {source_path}")
@@ -259,10 +263,6 @@ def create_case_package(
             raise ValidationError(f"case package already exists: {case_root}")
         else:
             shutil.rmtree(case_root)
-    if case_root.exists():
-        if not overwrite:
-            raise ValidationError(f"case package already exists: {case_root}")
-        shutil.rmtree(case_root)
     case_root.mkdir(parents=True)
 
     vocabulary = AnatomyVocabulary()

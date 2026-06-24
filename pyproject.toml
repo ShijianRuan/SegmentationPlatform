@@ -9,6 +9,7 @@ description = "Offline data, annotation, Mimics 21, registry, and snapshot workf
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "filelock>=3.12",
   "jsonschema>=4.20",
   "nibabel>=5.2",
   "numpy>=1.24",

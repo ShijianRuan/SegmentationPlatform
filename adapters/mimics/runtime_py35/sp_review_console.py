@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Single Mimics-side entry point for annotators.
+"""Self-contained Mimics worklist console for annotators.
 
-This module backs the user-facing Start_Labeling.py Scripting Library entry.
-It keeps platform preparation and QC out of the annotator's command-line
-workflow.
+The worklist is movable and has no dependency on SegmentationPlatform Python,
+a Registry, a workstation YAML file, or an assignee-specific local config.
 """
 
 from __future__ import print_function
 
-import json
 import os
-import subprocess
 import sys
+import time
 
 import mimics
 
@@ -33,65 +31,183 @@ TASK_BUTTON_NEXT_PAGE = "Next Page"
 TASK_BUTTON_FILTER = "Filter"
 TASK_BUTTON_CLOSE = "Close"
 
-BUTTON_COMPLETE = "Complete"
-BUTTON_REVIEW = "Needs Review"
-BUTTON_PROBLEM = "Report Problem"
-BUTTON_BACKUP = "Save Recovery Backup"
-BUTTON_SUMMARY = "Task List"
-BUTTON_NEXT = "Next Case"
 BUTTON_SKIP = "Skip Case"
-BUTTON_START = "Open Case"
 BUTTON_CANCEL = "Cancel"
-
-BUTTON_NNI_REFINE = "AI Refine"
+BUTTON_CONTINUE = "Continue Last Case"
+BUTTON_CHOOSE = "Choose Case"
+BUTTON_NEEDS_REVIEW = "Needs Review"
+BUTTON_REPORT_PROBLEM = "Report Problem"
 
 BUTTON_SAVE_AND_NEXT = "Save Progress And Open Next"
 BUTTON_CLOSE_UNMANAGED = "Close Current Data"
 
-QC_ACTION_BY_CODE = {
-    "assignee_mismatch": "Ask the platform operator to check assignment. Do not resubmit from this workstation.",
-    "base_label_mismatch": "Stop this task and ask the platform operator to rebuild or reopen it; the base label version changed.",
-    "unexpected_base_label": "Ask the platform operator to check the task setup before resubmitting.",
-    "missing_mask": "Reopen the case, check the listed organ Mask exists, then submit again.",
-    "uncertain_complete": "Use Needs Review for uncertain organs, or resolve the uncertainty before choosing Complete.",
-    "invalid_organ_outcome": "Submit again from Start Labeling. If this repeats, ask the platform operator to inspect the task.",
-    "image_id_mismatch": "Do not manually edit files. Ask the platform operator to check the image/series binding.",
-    "empty_mask": "If the organ is absent, mark it Confirmed Absent; otherwise draw or fix the Mask and submit again.",
-}
-
-ADMIN_ONLY_CODE_WORDS = ("hash", "geometry", "shape", "spacing", "origin", "direction", "image_id")
+CASE_PAGE_SIZE = 8
+BUTTON_PREVIOUS_CASES = "Previous Cases"
+BUTTON_NEXT_CASES = "Next Cases"
 
 
-def console_config_path():
-    explicit = os.environ.get("SP_REVIEW_CONSOLE_CONFIG")
-    if explicit:
-        return explicit
-    return os.path.join(SCRIPT_DIR, "sp_review_console.local.json")
+def worklist_root():
+    explicit = os.environ.get("SP_WORKLIST_ROOT")
+    candidates = [
+        explicit,
+        os.path.dirname(SCRIPT_DIR),
+        os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..")),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(os.path.join(candidate, "worklist_manifest.json")):
+            return os.path.abspath(candidate)
+    raise RuntimeError(
+        "worklist_manifest.json was not found.\n\n"
+        "Run a Labeling_*.py entry from the root of an exported Mimics worklist."
+    )
 
 
-def load_console_config():
-    path = console_config_path()
+def load_worklist():
+    root = worklist_root()
+    manifest = load_json(os.path.join(root, "worklist_manifest.json"))
+    if manifest.get("schema_version") != "mimics_worklist.v2":
+        raise RuntimeError("Unsupported worklist schema: {0}".format(manifest.get("schema_version")))
+    review_ids = [entry.get("review_id") for entry in manifest.get("reviews", [])]
+    if not review_ids or len(review_ids) != len(set(review_ids)):
+        raise RuntimeError("The worklist has no cases or contains duplicate review ids")
+    return root, manifest
+
+
+def load_worklist_state(root, manifest):
+    path = os.path.join(root, manifest.get("state_path", "worklist_progress.json"))
+    if os.path.isfile(path):
+        state = load_json(path)
+    else:
+        state = {}
+    if (
+        state.get("schema_version") != "mimics_worklist_progress.v1"
+        or state.get("worklist_id") != manifest.get("worklist_id")
+    ):
+        state = {
+            "schema_version": "mimics_worklist_progress.v1",
+            "worklist_id": manifest.get("worklist_id"),
+            "current_review_id": None,
+            "items": {},
+        }
+    state.setdefault("items", {})
+    return path, state
+
+
+def save_worklist_state(path, state):
+    write_json(path, state)
+
+
+def utc_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def entry_package_root(root, entry):
+    return os.path.abspath(os.path.join(root, entry["package_path"]))
+
+
+def entry_runtime_path(root, entry):
+    return os.path.abspath(os.path.join(root, entry["runtime_path"]))
+
+
+def entry_submission_path(root, entry):
+    return os.path.join(
+        entry_package_root(root, entry),
+        "submissions",
+        entry["review_id"],
+        "submission_manifest.json",
+    )
+
+
+def submission_info(root, entry, worklist_id=None):
+    path = entry_submission_path(root, entry)
     if not os.path.isfile(path):
-        raise RuntimeError(
-            "Labeling task config not found: {0}\n"
-            "Set SP_REVIEW_CONSOLE_CONFIG or create sp_review_console.local.json.".format(path)
-        )
-    config = load_json(path)
-    required = ("platform_python", "registry_root", "workstation_config", "assignee")
-    missing = [key for key in required if not config.get(key)]
-    if missing:
-        raise RuntimeError("Labeling task config is missing: {0}".format(", ".join(missing)))
-    return config
+        return None
+    submission = load_json(path)
+    if worklist_id and submission.get("worklist_id") != worklist_id:
+        return None
+    action = submission.get("action")
+    status = {
+        "submit_complete": "submitted",
+        "submit_for_review": "submitted_for_review",
+        "report_blocked": "reported_problem",
+    }.get(action, "submitted")
+    submission_key = (
+        submission.get("submission_id")
+        or submission.get("submitted_at")
+        or "legacy:{0}".format(action or "submitted")
+    )
+    return {
+        "status": status,
+        "submission_key": submission_key,
+        "submitted_at": submission.get("submitted_at"),
+    }
 
 
-def run_platform(config, args):
-    command = [config["platform_python"], "-m", "segplatform"] + list(args)
+def submission_status(root, entry, worklist_id=None):
+    info = submission_info(root, entry, worklist_id)
+    return info.get("status") if info else None
+
+
+def refresh_worklist_state(root, manifest, state):
+    for entry in manifest["reviews"]:
+        item = state["items"].setdefault(entry["review_id"], {})
+        submitted = submission_info(root, entry, manifest.get("worklist_id"))
+        if submitted:
+            reopened_after_submission = (
+                item.get("status") in ("in_progress", "deferred")
+                and item.get("last_submission_key") == submitted["submission_key"]
+            )
+            if not reopened_after_submission:
+                item["status"] = submitted["status"]
+            item["last_submission_key"] = submitted["submission_key"]
+            if submitted.get("submitted_at"):
+                item["last_submitted_at"] = submitted["submitted_at"]
+        else:
+            item.setdefault("status", "available")
+    return state
+
+
+def _rebase_case_path(value, old_root, new_root):
+    if not value:
+        return value
+    path = str(value)
+    if not os.path.isabs(path):
+        return os.path.abspath(os.path.join(new_root, path))
     try:
-        output = subprocess.check_output(command, stderr=subprocess.STDOUT)
-    except subprocess.CalledProcessError as error:
-        text = error.output.decode("utf-8", "replace") if error.output else ""
-        raise RuntimeError("Platform command failed:\n{0}\n{1}".format(" ".join(command), text))
-    return json.loads(output.decode("utf-8"))
+        relative = os.path.relpath(path, old_root)
+    except (TypeError, ValueError):
+        return path
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return path
+    return os.path.abspath(os.path.join(new_root, relative))
+
+
+def rebase_runtime(runtime, package_root, worklist_id, submission_assignee=None):
+    old_root = os.path.abspath(runtime.get("package_root") or package_root)
+    runtime["package_root"] = package_root
+    runtime["worklist_id"] = worklist_id
+    runtime["assignee"] = submission_assignee
+    for key in (
+        "mcs_path",
+        "prebuilt_marker_path",
+        "dicom_import_root",
+        "reports_dir",
+        "submissions_dir",
+        "buffer_manifest",
+    ):
+        runtime[key] = _rebase_case_path(runtime.get(key), old_root, package_root)
+    for image in runtime.get("image_sets", []):
+        for key in ("dicom_path", "image_path"):
+            image[key] = _rebase_case_path(image.get(key), old_root, package_root)
+    for collection_name in ("import_buffers", "checkpoint_buffers"):
+        for entry in runtime.get(collection_name, []):
+            entry["path"] = _rebase_case_path(entry.get("path"), old_root, package_root)
+    if os.path.isfile(runtime.get("mcs_path", "")):
+        marker = runtime.get("prebuilt_marker_path", "")
+        runtime["mode"] = "prebuilt" if marker and os.path.isfile(marker) else "resume"
+    else:
+        runtime["mode"] = "new"
+    return runtime
 
 
 def current_review_context():
@@ -126,8 +242,8 @@ def close_unmanaged_project_if_needed():
         return True
     answer = mimics.dialogs.question_box(
         message=(
-            "This Mimics session already contains data that is not managed by SegmentationPlatform.\n\n"
-            "Close the current data before starting the next assigned case?"
+            "This Mimics session already contains other image or Mask data.\n\n"
+            "Close the current data before opening a worklist case?"
         ),
         buttons=BUTTON_CLOSE_UNMANAGED + ";" + BUTTON_CANCEL,
         title=CONSOLE_TITLE,
@@ -149,27 +265,18 @@ def console_error_report_path():
     return os.path.join(SCRIPT_DIR, "sp_review_console_error.json")
 
 
-def open_review(config, package_root, review_id):
-    prepare_result = run_platform(
-        config,
-        ["mimics", "prepare", package_root, "--config", config["workstation_config"]],
-    )
-    run_platform(
-        config,
-        [
-            "review",
-            "start",
-            "--registry",
-            config["registry_root"],
-            "--review-id",
-            review_id,
-            "--actor",
-            config["assignee"],
-        ],
-    )
-    runtime_manifest = prepare_result["runtime_manifest"]
+def open_review(root, manifest, state_path, state, entry):
+    package_root = entry_package_root(root, entry)
+    runtime_manifest = entry_runtime_path(root, entry)
+    if not os.path.isfile(runtime_manifest):
+        raise RuntimeError("Prepared Mimics runtime is missing: {0}".format(runtime_manifest))
     runtime = load_json(runtime_manifest)
-    runtime["assignee"] = config["assignee"]
+    runtime = rebase_runtime(
+        runtime,
+        package_root,
+        manifest.get("worklist_id"),
+        entry.get("submission_assignee"),
+    )
     write_json(runtime_manifest, runtime)
     import sp_open_review
 
@@ -177,180 +284,99 @@ def open_review(config, package_root, review_id):
     try:
         sys.argv = ["sp_open_review.py", runtime_manifest]
         result = sp_open_review.main()
+    except Exception:
+        # sp_open_review may have imported DICOM or created managed masks before
+        # failing; drop the partially initialized project so the Mimics session is
+        # not left with inconsistent state, then re-raise so the caller reports it.
+        try:
+            mimics.file.close_project()
+        except Exception:
+            pass
+        raise
     finally:
         sys.argv = original_argv
-    try:
-        import sp_nninteractive_refine
-        sp_nninteractive_refine.initialize_baselines(runtime_manifest)
-    except Exception as error:
-        write_error_report(
-            os.path.join(package_root, "reports", "nninteractive_baseline_error.json"),
-            "nninteractive_baseline_init",
-            error,
-        )
+    item = state["items"].setdefault(entry["review_id"], {})
+    item["status"] = "in_progress"
+    item["last_opened_at"] = utc_now()
+    state["current_review_id"] = entry["review_id"]
+    save_worklist_state(state_path, state)
     return result
 
 
-def open_next_review(config, exclude_review_id=None):
-    args = ["review", "next", "--registry", config["registry_root"], "--assignee", config["assignee"]]
-    if config.get("claim_unassigned", False):
-        args.append("--claim-unassigned")
-    if exclude_review_id:
-        args.extend(["--exclude-review-id", exclude_review_id])
-    result = run_platform(config, args)
-    if result.get("status") == "empty":
+def find_worklist_entry(manifest, review_id):
+    for entry in manifest["reviews"]:
+        if entry["review_id"] == review_id:
+            return entry
+    return None
+
+
+def next_worklist_entry(root, manifest, state, exclude_review_id=None):
+    priorities = ("available", "in_progress", "deferred")
+    for desired_status in priorities:
+        for entry in manifest["reviews"]:
+            if entry["review_id"] == exclude_review_id:
+                continue
+            item = state["items"].setdefault(entry["review_id"], {"status": "available"})
+            if item.get("status") == desired_status:
+                return entry
+    return None
+
+
+def open_next_review(root, manifest, state_path, state, exclude_review_id=None):
+    refresh_worklist_state(root, manifest, state)
+    entry = next_worklist_entry(root, manifest, state, exclude_review_id=exclude_review_id)
+    if entry is None:
         mimics.dialogs.message_box(
-            "No assigned case is ready on this workstation.",
+            "No unfinished case remains in this worklist.\n\n"
+            "Use Choose Case to reopen a submitted or previously reported case.",
             title=CONSOLE_TITLE,
             ui_blocking=True,
         )
         return 0
-    return open_review(config, result["package_path"], result["review_id"])
+    return open_review(root, manifest, state_path, state, entry)
 
 
-def submit_current_review(config, action):
+def submit_current_review(root, manifest, state_path, state, action):
     import sp_submit_review
 
     result = sp_submit_review.main(action)
     if result != 0:
         return result
-    if config.get("auto_finalize", False):
-        context = current_review_context()
-        if context:
-            try:
-                finalize = run_platform(
-                    config,
-                    [
-                        "mimics",
-                        "finalize",
-                        context["package_root"],
-                        "--config",
-                        config["workstation_config"],
-                        "--registry",
-                        config["registry_root"],
-                    ],
-                )
-            except Exception as error:
-                mimics.dialogs.message_box(
-                    build_qc_failure_message(context["package_root"], error),
-                    title="Platform QC Failed",
-                    ui_blocking=True,
-                )
-                return 2
-            mimics.dialogs.message_box(
-                "Platform QC finished: {0}".format(finalize.get("status", "unknown")),
-                title=CONSOLE_TITLE,
-                ui_blocking=True,
-            )
+    context = current_review_context()
+    if context:
+        entry = find_worklist_entry(manifest, context["review_id"])
+        if entry:
+            submitted = submission_info(root, entry, manifest.get("worklist_id"))
+            item = state["items"].setdefault(context["review_id"], {})
+            item["status"] = submitted["status"] if submitted else "in_progress"
+            if submitted:
+                item["last_submission_key"] = submitted["submission_key"]
+            item["last_submitted_at"] = utc_now()
+            save_worklist_state(state_path, state)
     return 0
 
 
-def finding_action(finding):
-    code = str(finding.get("code") or "")
-    if code in QC_ACTION_BY_CODE:
-        return QC_ACTION_BY_CODE[code]
-    lowered = code.lower() + " " + str(finding.get("message") or "").lower()
-    for word in ADMIN_ONLY_CODE_WORDS:
-        if word in lowered:
-            return "Do not manually edit files. Ask the platform operator to inspect the package and geometry."
-    return "Reopen this case from Start Labeling. If you cannot fix the listed Mask, choose Needs Review or Report Problem."
-
-
-def _short_text(value, limit):
-    text = " ".join(str(value or "").split())
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3] + "..."
-
-
-def build_qc_failure_message(package_root, error):
-    report_path = os.path.join(package_root, "reports", "review_report.json")
-    report = None
-    if os.path.isfile(report_path):
-        try:
-            report = load_json(report_path)
-        except Exception:
-            report = None
-    if report and report.get("findings"):
-        findings = list(report.get("findings", []))
-        lines = [
-            "Platform QC did not accept this submission.",
-            "",
-            "What to do:",
-        ]
-        for index, finding in enumerate(findings[:4], start=1):
-            code = str(finding.get("code") or "qc_issue")
-            message = _short_text(finding.get("message") or code, 140)
-            action = finding_action(finding)
-            lines.append("{0}. {1}: {2}".format(index, code, message))
-            lines.append("   Action: {0}".format(action))
-        if len(findings) > 4:
-            lines.append("... {0} more issue(s) in the report.".format(len(findings) - 4))
-        lines.extend(
-            [
-                "",
-                "Your work was not verified yet. Save the Mimics project before leaving.",
-                "Technical report: {0}".format(report_path),
-            ]
-        )
-        return "\n".join(lines)
-    return (
-        "Platform QC could not finish. This may be a platform or file issue, not necessarily a Mask issue.\n\n"
-        "Action: save the Mimics project and ask the platform operator to inspect the report/logs before resubmitting.\n\n"
-        "Technical error: {0}\n"
-        "Expected report: {1}".format(_short_text(str(error), 300), report_path)
-    )
-
-
-def save_current_checkpoint(config):
+def save_current_checkpoint(manifest):
     import sp_save_checkpoint
 
-    return sp_save_checkpoint.main(config.get("checkpoint_keep_count", 3))
+    return sp_save_checkpoint.main(int(manifest.get("checkpoint_keep_count", 3)))
 
 
-def nninteractive_refine_current(config):
-    """Run nnInteractive refinement on the current case."""
-    context = current_review_context()
-    if context is None:
-        mimics.dialogs.message_box(
-            "No SegmentationPlatform case is open in this MIMICS session.",
-            title="AI Refine",
-            ui_blocking=True,
-        )
-        return 0
-    runtime_path = os.path.join(context["package_root"], "working", "mimics_runtime.json")
-    if not os.path.isfile(runtime_path):
-        mimics.dialogs.message_box(
-            "Runtime manifest not found at:\n{0}".format(runtime_path),
-            title="AI Refine",
-            ui_blocking=True,
-        )
-        return 2
-    try:
-        import sp_nninteractive_refine
-        return sp_nninteractive_refine.main(runtime_path)
-    except ImportError:
-        mimics.dialogs.message_box(
-            "nnInteractive refine module not found.\n\n"
-            "Ensure sp_nninteractive_refine.py is in the runtime script directory\n"
-            "and the nnInteractive environment is set up.",
-            title="nnInteractive — Module Missing",
-            ui_blocking=True,
-        )
-        return 2
-    except Exception as error:
-        mimics.dialogs.message_box(
-            "nnInteractive refine failed:\n\n{0}".format(str(error)),
-            title="nnInteractive — Error",
-            ui_blocking=True,
-        )
-        return 2
-
-
-def skip_current_review(config, context):
+def skip_current_review(root, manifest, state_path, state, context):
+    item = state["items"].setdefault(context["review_id"], {})
+    item["status"] = "deferred"
+    item["last_deferred_at"] = utc_now()
+    state["current_review_id"] = None
+    save_worklist_state(state_path, state)
     mimics.file.save_project()
     mimics.file.close_project()
-    return open_next_review(config, exclude_review_id=context["review_id"])
+    return open_next_review(
+        root,
+        manifest,
+        state_path,
+        state,
+        exclude_review_id=context["review_id"],
+    )
 
 
 def current_mask_state(review_id):
@@ -641,64 +667,148 @@ def show_current_summary(context):
     return 0
 
 
-def choose_console_action(has_context):
-    if has_context:
+def worklist_case_status(state, review_id):
+    return state["items"].get(review_id, {}).get("status", "available")
+
+
+def choose_worklist_entry(manifest, state):
+    page_index = 0
+    entries = manifest["reviews"]
+    while True:
+        page_count = max(1, int((len(entries) + CASE_PAGE_SIZE - 1) / CASE_PAGE_SIZE))
+        page_index = max(0, min(page_index, page_count - 1))
+        start = page_index * CASE_PAGE_SIZE
+        page = entries[start:start + CASE_PAGE_SIZE]
+        buttons = [str(index + 1) for index in range(len(page))]
+        if page_index > 0:
+            buttons.append(BUTTON_PREVIOUS_CASES)
+        if page_index < page_count - 1:
+            buttons.append(BUTTON_NEXT_CASES)
+        buttons.append(BUTTON_CANCEL)
+        lines = [
+            "Choose any case in this worklist.",
+            "Submitted cases can be reopened and submitted again.",
+            "",
+        ]
+        for index, entry in enumerate(page):
+            lines.append(
+                "{0}. {1} [{2}]".format(
+                    index + 1,
+                    entry.get("case_id", entry["review_id"]),
+                    worklist_case_status(state, entry["review_id"]),
+                )
+            )
+        lines.extend(["", "Page {0}/{1}".format(page_index + 1, page_count)])
         answer = mimics.dialogs.question_box(
-            message="Choose the result or action for the current case.",
-            buttons=";".join(
-                [
-                    BUTTON_COMPLETE,
-                    BUTTON_REVIEW,
-                    BUTTON_PROBLEM,
-                    BUTTON_SUMMARY,
-                    BUTTON_BACKUP,
-                    BUTTON_NNI_REFINE,
-                    BUTTON_SKIP,
-                    BUTTON_NEXT,
-                    BUTTON_CANCEL,
-                ]
-            ),
-            title=CONSOLE_TITLE,
+            message="\n".join(lines),
+            buttons=";".join(buttons),
+            title="Choose Case",
             ui_blocking=True,
         )
-        return {
-            BUTTON_COMPLETE: "submit_complete",
-            BUTTON_REVIEW: "submit_for_review",
-            BUTTON_PROBLEM: "report_blocked",
-            BUTTON_BACKUP: "checkpoint",
-            BUTTON_SUMMARY: "summary",
-            BUTTON_NNI_REFINE: "nninteractive_refine",
-            BUTTON_SKIP: "skip",
-            BUTTON_NEXT: "next",
-            BUTTON_CANCEL: "cancel",
-        }.get(answer, "cancel")
-    answer = mimics.dialogs.question_box(
-        message="No platform case is open in this Mimics session.",
-        buttons=BUTTON_START + ";" + BUTTON_CANCEL,
+        if answer == BUTTON_PREVIOUS_CASES:
+            page_index -= 1
+        elif answer == BUTTON_NEXT_CASES:
+            page_index += 1
+        elif answer == BUTTON_CANCEL:
+            return None
+        else:
+            try:
+                selected = int(answer) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= selected < len(page):
+                return page[selected]
+
+
+def require_current_context(context, action_name):
+    if context is not None:
+        return True
+    mimics.dialogs.message_box(
+        "No worklist case is currently open.\n\n"
+        "Open or continue a case before using {0}.".format(action_name),
         title=CONSOLE_TITLE,
         ui_blocking=True,
     )
-    return "next" if answer == BUTTON_START else "cancel"
+    return False
 
 
-def main():
-    config = load_console_config()
+def choose_navigation_action(context, can_continue):
+    buttons = []
+    if can_continue and (context is None or context.get("review_id") is None):
+        buttons.append(BUTTON_CONTINUE)
+    buttons.append(BUTTON_CHOOSE)
+    if context is not None:
+        buttons.append(BUTTON_SKIP)
+    buttons.append(BUTTON_CANCEL)
+    answer = mimics.dialogs.question_box(
+        message=(
+            "Continue the last case, choose a different case, or temporarily skip the open case."
+        ),
+        buttons=";".join(buttons),
+        title="Case Navigation",
+        ui_blocking=True,
+    )
+    return {
+        BUTTON_CONTINUE: "continue",
+        BUTTON_CHOOSE: "choose",
+        BUTTON_SKIP: "skip",
+        BUTTON_CANCEL: "cancel",
+    }.get(answer, "cancel")
+
+
+def choose_issue_action():
+    answer = mimics.dialogs.question_box(
+        message=(
+            "Use Needs Review when the Mask can be exported but medical judgment remains uncertain.\n\n"
+            "Use Report Problem when data or tool issues prevent the case from continuing."
+        ),
+        buttons=";".join([BUTTON_NEEDS_REVIEW, BUTTON_REPORT_PROBLEM, BUTTON_CANCEL]),
+        title="Submit or Report Issue",
+        ui_blocking=True,
+    )
+    return {
+        BUTTON_NEEDS_REVIEW: "submit_for_review",
+        BUTTON_REPORT_PROBLEM: "report_blocked",
+        BUTTON_CANCEL: "cancel",
+    }.get(answer, "cancel")
+
+
+def main(action):
+    root, manifest = load_worklist()
+    state_path, state = load_worklist_state(root, manifest)
+    refresh_worklist_state(root, manifest, state)
     context = current_review_context()
-    action = choose_console_action(context is not None)
+    current_review_id = state.get("current_review_id")
+    if action == "navigation":
+        action = choose_navigation_action(
+            context,
+            bool(current_review_id and find_worklist_entry(manifest, current_review_id)),
+        )
+    elif action == "issue":
+        if not require_current_context(context, "Submit or Report Issue"):
+            return 0
+        action = choose_issue_action()
     if action == "cancel":
+        save_worklist_state(state_path, state)
         return 0
     if action in ("submit_complete", "submit_for_review", "report_blocked"):
-        return submit_current_review(config, action)
+        if not require_current_context(context, "Submit or Report Current Case"):
+            return 0
+        return submit_current_review(root, manifest, state_path, state, action)
     if action == "checkpoint":
-        return save_current_checkpoint(config)
-    if action == "nninteractive_refine":
-        return nninteractive_refine_current(config)
+        if not require_current_context(context, "Save Recovery Backup"):
+            return 0
+        return save_current_checkpoint(manifest)
     if action == "summary":
+        if not require_current_context(context, "View Task List"):
+            return 0
         return show_current_summary(context)
     if action == "skip":
+        if not require_current_context(context, "Skip Current Case"):
+            return 0
         confirm = mimics.dialogs.question_box(
             message=(
-                "Skip this case for now and open the next assigned case?\n\n"
+                "Skip this case for now and open the next worklist case?\n\n"
                 "This does not submit the current work and does not mark the case as impossible."
             ),
             buttons=BUTTON_SKIP + ";" + BUTTON_CANCEL,
@@ -707,12 +817,41 @@ def main():
         )
         if confirm != BUTTON_SKIP:
             return 0
-        return skip_current_review(config, context)
+        return skip_current_review(root, manifest, state_path, state, context)
+    if action == "continue":
+        entry = find_worklist_entry(manifest, current_review_id)
+        if entry is None:
+            state["current_review_id"] = None
+            save_worklist_state(state_path, state)
+            mimics.dialogs.message_box(
+                "There is no previous worklist case to continue.\n\n"
+                "Use Open Next Case or Choose Case.",
+                title=CONSOLE_TITLE,
+                ui_blocking=True,
+            )
+            return 0
+        if context is not None and context.get("review_id") == current_review_id:
+            return 0
+        if not close_unmanaged_project_if_needed():
+            return 0
+        return open_review(root, manifest, state_path, state, entry)
+    if action == "choose":
+        entry = choose_worklist_entry(manifest, state)
+        if entry is None:
+            return 0
+        if context is not None and context.get("review_id") == entry.get("review_id"):
+            return 0
+        if context is not None:
+            mimics.file.save_project()
+            mimics.file.close_project()
+        elif not close_unmanaged_project_if_needed():
+            return 0
+        return open_review(root, manifest, state_path, state, entry)
     if action == "next":
         if context is not None:
             close = mimics.dialogs.question_box(
                 message=(
-                    "Save the current project as progress only, close it, and open the next assigned case?\n\n"
+                    "Save the current project as progress only, close it, and open the next worklist case?\n\n"
                     "This does not submit the current work."
                 ),
                 buttons=BUTTON_SAVE_AND_NEXT + ";" + BUTTON_CANCEL,
@@ -725,13 +864,19 @@ def main():
             mimics.file.close_project()
         elif not close_unmanaged_project_if_needed():
             return 0
-        return open_next_review(config, exclude_review_id=context["review_id"] if context else None)
+        return open_next_review(
+            root,
+            manifest,
+            state_path,
+            state,
+            exclude_review_id=context["review_id"] if context else None,
+        )
     return 0
 
 
-if __name__ == "__main__":
+def run_entry(action):
     try:
-        sys.exit(main())
+        return main(action)
     except Exception as error:
         try:
             report_path = os.path.abspath(console_error_report_path())
@@ -743,3 +888,25 @@ if __name__ == "__main__":
             )
         finally:
             raise
+
+
+if __name__ == "__main__":
+    requested_action = sys.argv[1] if len(sys.argv) > 1 else ""
+    if requested_action not in (
+        "next",
+        "navigation",
+        "continue",
+        "choose",
+        "submit_complete",
+        "issue",
+        "submit_for_review",
+        "report_blocked",
+        "summary",
+        "skip",
+        "checkpoint",
+    ):
+        raise RuntimeError(
+            "usage: sp_review_console.py "
+            "[next|navigation|submit_complete|issue|summary|checkpoint]"
+        )
+    sys.exit(run_entry(requested_action))

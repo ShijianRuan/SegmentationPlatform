@@ -330,12 +330,11 @@ Mimics API 提供：
 只有平台预检查已经证明答案唯一时，才能自动关闭或预答对话框。方向、raw 参数和序列选择存在歧义时必须阻断。
 
 Scripting Library 的入口由脚本目录中的 `.py` 文件自动注册。当前 21.0 文档只确认“脚本可一键运行”，没有找到为 Scripting Library 条目配置自定义图标、工具栏按钮或持久面板的接口。
-因此标注者入口通过脚本文件名表达为 **Start Labeling**，交互通过少量 `question_box()` 和 `message_box()` 完成。
+因此标注者入口直接用 `Labeling_Open_Next_Case.py`、`Labeling_Submit_Complete.py` 等脚本文件名表达动作，避免先进入功能总菜单。
 
 ## 11. 任务清单和 Project Tree 注释
 
-已确认的稳定方式是通过 Scripting Library 运行 **Start Labeling**，用 `message_box()` 显示当前任务清单摘要。
-当前实现的 **Task List** 会读取任务运行清单和受管 Mask metadata，列出器官总数、ready/missing 数量，并在 Mimics 弹窗内分页展示。标注者可用固定按钮按 Missing、Ready、With Initial、Known Absent 筛选；完整清单同时写入 `reports/mimics_task_list.txt` 作为技术记录。
+已确认的稳定方式是通过 Scripting Library 运行语义化入口。`Labeling_View_Task_List.py` 会读取任务运行清单和受管 Mask metadata，在 Mimics 弹窗内分页展示。
 这样一百多个器官不会被塞进不可读的弹窗。
 
 未确认能力：

@@ -4,6 +4,7 @@
 from __future__ import print_function
 
 import os
+import re
 import sys
 
 import mimics
@@ -86,6 +87,20 @@ def main():
     if not os.path.isdir(reports_dir):
         os.makedirs(reports_dir)
 
+    compatibility = runtime.get("mimics_compatibility", {})
+    expected_version = str(compatibility.get("expected_version") or "").strip()
+    actual_version = str(mimics.get_version())
+    actual_version_tokens = re.findall(r"\d+(?:\.\d+)+", actual_version)
+    version_matches = any(
+        token == expected_version or token.startswith(expected_version + ".")
+        for token in actual_version_tokens
+    )
+    if expected_version and not version_matches:
+        raise RuntimeError(
+            "This worklist requires Mimics {0}, but this workstation reports {1}. "
+            "Ask the platform operator for a compatible worklist.".format(expected_version, actual_version)
+        )
+
     apply_predefined_answers(mimics, runtime.get("predefined_dialog_answers", {}))
     if runtime["mode"] in ("resume", "prebuilt") and os.path.isfile(runtime["mcs_path"]):
         mimics.file.open_project(filename=runtime["mcs_path"])
@@ -160,15 +175,6 @@ def main():
             )
 
     mimics.file.save_project(filename=runtime["mcs_path"], save_as_type="Mimics Project Files")
-
-    # Initialize nnInteractive diff baselines so the first AI Refine can detect
-    # real edits instead of treating the entire mask as a foreground scribble.
-    try:
-        import sp_nninteractive_refine
-
-        sp_nninteractive_refine.initialize_baselines(runtime_path)
-    except ImportError:
-        pass  # nnInteractive not set up on this workstation — fine.
 
     report = {
         "schema_version": "mimics_open_report.v1",

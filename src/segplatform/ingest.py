@@ -260,6 +260,24 @@ def scan_source(source_root: Path, *, workers: int = 1, progress: bool = False) 
     for case in sorted(case_groups.values(), key=lambda item: item["case_id"]):
         case["image_ids"] = sorted(case["image_ids"])
         cases.append(case)
+    findings: list[dict[str, Any]] = []
+    study_patient_keys: dict[str, set[str]] = {}
+    for patient_key, study_uid, _series_uid in groups:
+        study_patient_keys.setdefault(study_uid, set()).add(patient_key or "")
+    for study_uid, patient_keys in sorted(study_patient_keys.items()):
+        if len(patient_keys) > 1:
+            findings.append(
+                {
+                    "severity": "warning",
+                    "code": "study_with_multiple_patient_ids",
+                    "study_uid": study_uid,
+                    "patient_keys": sorted(patient_keys),
+                    "message": (
+                        f"StudyInstanceUID {study_uid} contains {len(patient_keys)} distinct patient "
+                        "identifiers; cases were split by patient identifier"
+                    ),
+                }
+            )
     return {
         "schema_version": "ingest_scan.v1",
         "created_at": utc_now(),
@@ -268,12 +286,14 @@ def scan_source(source_root: Path, *, workers: int = 1, progress: bool = False) 
         "cases": cases,
         "series": series_records,
         "skipped_files": skipped,
+        "findings": findings,
         "summary": {
             "case_count": len(cases),
             "series_count": len(series_records),
             "importable_series_count": sum(1 for item in series_records if item["status"] == "importable"),
             "file_image_count": len(file_image_records),
             "skipped_file_count": len(skipped),
+            "finding_count": len(findings),
         },
     }
 

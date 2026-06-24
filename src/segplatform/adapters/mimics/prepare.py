@@ -187,6 +187,12 @@ def prepare_case(
         ],
         "buffer_mapping": mapping_set.default_data,
         "buffer_mapping_by_image_id": mapping_set.by_image_id,
+        "mimics_compatibility": {
+            "expected_product": config.get("expected_product"),
+            "expected_version": config.get("expected_version"),
+            "edition": config.get("edition"),
+            "buffer_mapping_evidence_id": mapping_set.default_data.get("evidence_id"),
+        },
         "predefined_dialog_answers": config.get("predefined_dialog_answers", {}),
         "reports_dir": str((case_root / "reports").resolve()),
         "submissions_dir": str((case_root / "submissions" / manifest["review"]["review_id"]).resolve()),

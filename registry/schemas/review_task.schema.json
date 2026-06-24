@@ -24,9 +24,23 @@
       "enum": ["ready", "in_progress", "needs_review", "completed", "blocked", "deferred"]
     },
     "assignee": {"type": ["string", "null"]},
+    "enforce_assignee": {"type": "boolean", "default": false},
     "package_path": {"type": "string"},
     "created_at": {"type": "string"},
     "updated_at": {"type": "string"},
+    "worklist_exports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["worklist_id", "exported_at"],
+        "properties": {
+          "worklist_id": {"type": "string"},
+          "exported_at": {"type": "string"},
+          "recipient_hint": {"type": ["string", "null"]}
+        },
+        "additionalProperties": false
+      }
+    },
     "targets": {
       "type": "array",
       "minItems": 1,

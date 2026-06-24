@@ -34,6 +34,7 @@
 | 在 Windows 上实际运行 Mimics 21 | [Mimics Research 21 Windows 工作站操作手册](domains/labeling/mimics_windows_runbook.md) |
 | 定义标注工具交换文件 | [病例包契约](domains/labeling/case_package_contract.md) |
 | 开发或试用 Mimics 接入 | [Mimics 适配器设计与开发流程](domains/labeling/mimics_adapter_design.md) |
+| 在任意 Mimics 项目中使用 nnInteractive | [nnInteractive for Mimics 21](integrations/nninteractive_mimics.md) |
 | 接入或修改 nnUNet 训练 | [训练域入口](domains/training/README.md) |
 | 运行模型生成候选标签 | [候选标签生成域入口](domains/label_generation/README.md) |
 | 查看截至 2026-10-30 的交付安排 | [实施计划](plans/platform_implementation_plan_2026-10-30.md) |
@@ -50,8 +51,9 @@
 | 3 | `architecture/architecture_decisions.md` | 记录重要决定及其理由 |
 | 4 | `plans/` | 当前执行安排，会随进度调整 |
 | 5 | `research/` | 研究综述和实验候选，不自动成为平台能力 |
-| 6 | `references/` | 原始手册和外部资料，不直接定义平台行为 |
-| 7 | `archive/` | 历史记录，不作为当前实现依据 |
+| 6 | `integrations/` | 可独立运行的工具集成和使用说明 |
+| 7 | `references/` | 原始手册和外部资料，不直接定义平台行为 |
+| 8 | `archive/` | 历史记录，不作为当前实现依据 |
 
 ## 3. 目录结构
 
@@ -64,6 +66,7 @@ docs/
     label_generation/ 模型或算法生成候选标签并回流
   plans/              实施计划和近期任务清单
   research/           跨域研究综述和研究源笔记
+  integrations/       独立工具集成和使用说明
   references/         实现时需要查阅的外部手册
   conversations/      重要对话记录和问题处理清单
   archive/            初始需求和历史会议记录
