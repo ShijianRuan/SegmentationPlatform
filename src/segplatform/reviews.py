@@ -33,6 +33,7 @@ def next_review(
     assignee: str | None = None,
     include_statuses: set[str] | None = None,
     exclude_review_id: str | None = None,
+    claim_unassigned: bool = False,
 ) -> dict[str, Any]:
     registry = FileRegistry(registry_root)
     statuses = include_statuses or {"ready", "in_progress", "needs_review"}
@@ -40,7 +41,11 @@ def next_review(
     for record in registry.list("reviews"):
         if exclude_review_id and record.get("review_id") == exclude_review_id:
             continue
-        if assignee and record.get("assignee") != assignee:
+        record_assignee = record.get("assignee")
+        if assignee and record_assignee != assignee:
+            if not (claim_unassigned and record_assignee in (None, "")):
+                continue
+        elif not assignee and claim_unassigned:
             continue
         if record.get("status") not in statuses:
             continue
@@ -53,6 +58,17 @@ def next_review(
     if not candidates:
         return {"status": "empty", "review": None}
     record = candidates[0]
+    if assignee and claim_unassigned and record.get("assignee") in (None, ""):
+        record["assignee"] = assignee
+        record.setdefault("events", []).append(
+            {
+                "at": utc_now(),
+                "action": "claimed",
+                "actor": assignee,
+                "detail": "claimed from unassigned queue",
+            }
+        )
+        registry.put("reviews", record, allow_update=True)
     return {
         "status": "found",
         "review_id": record["review_id"],
@@ -60,6 +76,30 @@ def next_review(
         "package_path": record["package_path"],
         "review": record,
     }
+
+
+def assign_review(
+    registry_root: Path,
+    review_id: str,
+    *,
+    assignee: str | None,
+    actor: str | None = None,
+) -> dict[str, Any]:
+    registry = FileRegistry(registry_root)
+    record = registry.get("reviews", review_id)
+    previous = record.get("assignee")
+    record["assignee"] = assignee
+    record.setdefault("events", []).append(
+        {
+            "at": utc_now(),
+            "action": "assigned" if assignee else "assignment_cleared",
+            "actor": actor or "offline_operator",
+            "detail": f"{previous!r} -> {assignee!r}",
+            "target_ids": [target["target_id"] for target in record.get("targets", [])],
+        }
+    )
+    registry.put("reviews", record, allow_update=True)
+    return {"status": "assigned" if assignee else "unassigned", "review_id": review_id, "assignee": assignee}
 
 
 def mark_review_started(

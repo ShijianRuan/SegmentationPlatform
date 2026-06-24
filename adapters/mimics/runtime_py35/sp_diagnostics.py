@@ -59,8 +59,9 @@ def main():
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        main()
     except Exception as error:
         output_path = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath("mimics_diagnostics_error.json")
         write_error_report(output_path + ".error.json", "diagnostics", error)
+        # Re-raise so Mimics script runner sees the failure.
         raise

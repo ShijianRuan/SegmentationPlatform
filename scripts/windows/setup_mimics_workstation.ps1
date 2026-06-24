@@ -9,6 +9,7 @@ param(
     [string]$ConfigPath = "",
     [string]$RegistryRoot = "",
     [string]$Assignee = "",
+    [bool]$ClaimUnassigned = $true,
     [switch]$AutoFinalize
 )
 
@@ -98,6 +99,7 @@ if ($RegistryRoot -and $Assignee) {
         registry_root = $RegistryRoot
         workstation_config = $ConfigPath
         assignee = $Assignee
+        claim_unassigned = [bool]$ClaimUnassigned
         auto_finalize = [bool]$AutoFinalize
         checkpoint_keep_count = 3
     }

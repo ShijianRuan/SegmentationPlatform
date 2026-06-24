@@ -55,23 +55,13 @@
         "deidentification_status": {
           "type": "string",
           "enum": ["pending", "verified", "failed"],
-          "description": "去标识检查状态。数据进入工作区（source_zone=working）前必须为 'verified'（蓝图 §8.3 P0、病例包契约 v0.5 强制）。"
+          "description": "去标识检查状态。默认作为治理记录和风险提示，不阻断标注；需要强门禁时由 strict_deidentification 控制。"
         },
         "profile": {"type": "string"},
         "profile_version": {"type": "string"},
-        "direct_identifiers_allowed": {"type": "boolean"}
+        "direct_identifiers_allowed": {"type": "boolean"},
+        "strict_deidentification": {"type": "boolean"}
       },
-      "allOf": [
-        {
-          "if": {
-            "properties": {"source_zone": {"const": "working"}},
-            "required": ["source_zone"]
-          },
-          "then": {
-            "properties": {"deidentification_status": {"const": "verified"}}
-          }
-        }
-      ],
       "additionalProperties": true
     },
     "segment_source": {

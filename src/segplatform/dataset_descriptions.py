@@ -326,6 +326,7 @@ def build_requests_from_dataset_description(description_path: Path, output_dir: 
         "profile": str(defaults.get("governance_profile", "dataset_description_profile")),
         "profile_version": str(defaults.get("governance_profile_version", "1")),
         "direct_identifiers_allowed": bool(defaults.get("direct_identifiers_allowed", False)),
+        "strict_deidentification": bool(defaults.get("strict_deidentification", False)),
     }
     written = []
     for case_id, case in sorted(cases.items()):

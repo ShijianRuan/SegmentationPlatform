@@ -130,6 +130,10 @@ def prepare_case(
     image_sets = []
     for image in manifest["image_sets"]:
         dicom_path = image.get("dicom_path")
+        image_path = image.get("image_path")
+        if not image_path:
+            mimics_import = image.get("mimics_import", {})
+            image_path = mimics_import.get("source_image_path")
         if not dicom_path and not existing_mcs.exists():
             raise ConfigurationError(
                 f"Mimics 21 production path requires image_sets[].dicom_path or an existing .mcs; "
@@ -140,6 +144,7 @@ def prepare_case(
                 "image_id": image["image_id"],
                 "modality": image.get("modality", "UNKNOWN"),
                 "dicom_path": str((case_root / dicom_path).resolve()) if dicom_path else None,
+                "image_path": str((case_root / image_path).resolve()) if image_path else None,
                 "platform_shape": image["shape"],
                 "spacing": image["spacing"],
                 "origin": image["origin"],

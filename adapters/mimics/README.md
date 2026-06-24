@@ -84,14 +84,14 @@ Mimics 内脚本不实现 Registry、标签生命周期、训练准入或医学�
 标注者只做三件事：
 
 1. 打开 Mimics。
-2. 运行 **Start Labeling**，选择 **Start Next Case**。
+2. 运行 **Start Labeling**，选择 **Open Case**。
 3. 编辑 Mask，并在同一 Console 中选择 **Complete**、**Needs Review**、**Report Problem**、**Skip Case**、**Task List** 或 **Save Recovery Backup**。
 
 **Task List** 是当前稳定的非阻塞任务清单入口：它在 Mimics 弹窗内分页显示当前病例、目标器官统计和受管 Mask 状态，并支持按 Missing、Ready、With Initial、Known Absent 筛选。Project Tree 常驻注释对象仍需 Mimics 21 实机 POC 证明，不能作为生产依赖。
 
 `prepare`、`prebuild`、`open`、`finalize` 仍保留为平台/管理员命令，用于批量准备、预生成 `.mcs`、调试和后台收尾，不作为标注者日常步骤。`prebuild` 通过 Mimics `-background_mode` 调用 `sp_open_review.py --background-prebuild`，成功后写入 `working/prebuilt_workspace.json`；已有普通 `.mcs` 默认跳过，避免覆盖标注者现场。路径、文件名、标签编号、格式转换、Registry 写入和最终 QC 由平台处理。
 
-多工作站无共享盘时，平台侧使用 `sp review export-worklist` 为每个标注者导出本地工作包；标注完成后使用 `sp mimics collect-submissions` 把 `submissions/` 收回中央病例包，再运行 `sp mimics finalize-many`。标注者仍只在 Mimics 内使用 **Start Labeling**。
+多工作站无共享盘时，平台侧使用 `sp review export-worklist --claim-unassigned` 为每个标注者导出本地工作包；标注完成后使用 `sp mimics collect-submissions` 把 `submissions/` 收回中央病例包，再运行 `sp mimics finalize-many`。标注者仍只在 Mimics 内使用 **Start Labeling**。
 
 ## 不属于本目录
 

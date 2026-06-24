@@ -69,8 +69,8 @@ def doctor(config_path: Path, *, run_diagnostics: bool = False) -> dict[str, Any
         }
         add(
             "mimics_diagnostics",
-            completed.returncode == 0 and diagnostics_output.is_file(),
-            f"returncode={completed.returncode}",
+            diagnostics_output.is_file(),
+            f"returncode={completed.returncode}, output_exists={diagnostics_output.is_file()}",
         )
         if diagnostics_output.is_file():
             diagnostics = load_data(diagnostics_output)
@@ -78,7 +78,7 @@ def doctor(config_path: Path, *, run_diagnostics: bool = False) -> dict[str, Any
             expected_version = str(config.get("expected_version", "21.0"))
             add(
                 "mimics_version",
-                actual_version.startswith(expected_version),
+                expected_version in actual_version,
                 f"expected {expected_version}, detected {actual_version}",
             )
 

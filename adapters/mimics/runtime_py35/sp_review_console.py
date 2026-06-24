@@ -15,7 +15,7 @@ import sys
 
 import mimics
 
-from sp_common import load_json, managed_masks, metadata_get, write_error_report
+from sp_common import load_json, managed_masks, metadata_get, write_error_report, write_json
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,8 +40,10 @@ BUTTON_BACKUP = "Save Recovery Backup"
 BUTTON_SUMMARY = "Task List"
 BUTTON_NEXT = "Next Case"
 BUTTON_SKIP = "Skip Case"
-BUTTON_START = "Start Next Case"
+BUTTON_START = "Open Case"
 BUTTON_CANCEL = "Cancel"
+
+BUTTON_NNI_REFINE = "AI Refine"
 
 BUTTON_SAVE_AND_NEXT = "Save Progress And Open Next"
 BUTTON_CLOSE_UNMANAGED = "Close Current Data"
@@ -165,18 +167,34 @@ def open_review(config, package_root, review_id):
             config["assignee"],
         ],
     )
+    runtime_manifest = prepare_result["runtime_manifest"]
+    runtime = load_json(runtime_manifest)
+    runtime["assignee"] = config["assignee"]
+    write_json(runtime_manifest, runtime)
     import sp_open_review
 
     original_argv = list(sys.argv)
     try:
-        sys.argv = ["sp_open_review.py", prepare_result["runtime_manifest"]]
-        return sp_open_review.main()
+        sys.argv = ["sp_open_review.py", runtime_manifest]
+        result = sp_open_review.main()
     finally:
         sys.argv = original_argv
+    try:
+        import sp_nninteractive_refine
+        sp_nninteractive_refine.initialize_baselines(runtime_manifest)
+    except Exception as error:
+        write_error_report(
+            os.path.join(package_root, "reports", "nninteractive_baseline_error.json"),
+            "nninteractive_baseline_init",
+            error,
+        )
+    return result
 
 
 def open_next_review(config, exclude_review_id=None):
     args = ["review", "next", "--registry", config["registry_root"], "--assignee", config["assignee"]]
+    if config.get("claim_unassigned", False):
+        args.append("--claim-unassigned")
     if exclude_review_id:
         args.extend(["--exclude-review-id", exclude_review_id])
     result = run_platform(config, args)
@@ -290,22 +308,46 @@ def save_current_checkpoint(config):
     return sp_save_checkpoint.main(config.get("checkpoint_keep_count", 3))
 
 
+def nninteractive_refine_current(config):
+    """Run nnInteractive refinement on the current case."""
+    context = current_review_context()
+    if context is None:
+        mimics.dialogs.message_box(
+            "No SegmentationPlatform case is open in this MIMICS session.",
+            title="AI Refine",
+            ui_blocking=True,
+        )
+        return 0
+    runtime_path = os.path.join(context["package_root"], "working", "mimics_runtime.json")
+    if not os.path.isfile(runtime_path):
+        mimics.dialogs.message_box(
+            "Runtime manifest not found at:\n{0}".format(runtime_path),
+            title="AI Refine",
+            ui_blocking=True,
+        )
+        return 2
+    try:
+        import sp_nninteractive_refine
+        return sp_nninteractive_refine.main(runtime_path)
+    except ImportError:
+        mimics.dialogs.message_box(
+            "nnInteractive refine module not found.\n\n"
+            "Ensure sp_nninteractive_refine.py is in the runtime script directory\n"
+            "and the nnInteractive environment is set up.",
+            title="nnInteractive — Module Missing",
+            ui_blocking=True,
+        )
+        return 2
+    except Exception as error:
+        mimics.dialogs.message_box(
+            "nnInteractive refine failed:\n\n{0}".format(str(error)),
+            title="nnInteractive — Error",
+            ui_blocking=True,
+        )
+        return 2
+
+
 def skip_current_review(config, context):
-    run_platform(
-        config,
-        [
-            "review",
-            "defer",
-            "--registry",
-            config["registry_root"],
-            "--review-id",
-            context["review_id"],
-            "--actor",
-            config["assignee"],
-            "--reason",
-            "skipped_by_annotator",
-        ],
-    )
     mimics.file.save_project()
     mimics.file.close_project()
     return open_next_review(config, exclude_review_id=context["review_id"])
@@ -610,6 +652,7 @@ def choose_console_action(has_context):
                     BUTTON_PROBLEM,
                     BUTTON_SUMMARY,
                     BUTTON_BACKUP,
+                    BUTTON_NNI_REFINE,
                     BUTTON_SKIP,
                     BUTTON_NEXT,
                     BUTTON_CANCEL,
@@ -624,6 +667,7 @@ def choose_console_action(has_context):
             BUTTON_PROBLEM: "report_blocked",
             BUTTON_BACKUP: "checkpoint",
             BUTTON_SUMMARY: "summary",
+            BUTTON_NNI_REFINE: "nninteractive_refine",
             BUTTON_SKIP: "skip",
             BUTTON_NEXT: "next",
             BUTTON_CANCEL: "cancel",
@@ -647,6 +691,8 @@ def main():
         return submit_current_review(config, action)
     if action == "checkpoint":
         return save_current_checkpoint(config)
+    if action == "nninteractive_refine":
+        return nninteractive_refine_current(config)
     if action == "summary":
         return show_current_summary(context)
     if action == "skip":

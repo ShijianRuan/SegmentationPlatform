@@ -53,6 +53,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 脚本会创建项目专用 `.venv`、安装平台依赖、生成
 `config\mimics_workstation.local.yaml`。如果提供 `RegistryRoot` 和 `Assignee`，还会生成
 `adapters\mimics\scripting_library\sp_review_console.local.json`，供 Mimics 内 **Start Labeling** 使用。
+默认配置包含 `claim_unassigned: true`，表示本工作站可以从未分配队列领取任务。
 
 在 Mimics 的 `File -> Preferences -> Scripting` 中，把 Scripting Library 路径设置为：
 
@@ -155,7 +156,7 @@ $Registry = "D:\SegmentationPlatform\data\registry"
 
 ### 6.1 平台准备病例
 
-平台可以提前批量准备病例，也可以不提前准备，让 **Start Labeling** 在标注者点击 **Start Next Case** 后后台执行。提前准备时可运行：
+平台可以提前批量准备病例，也可以不提前准备，让 **Start Labeling** 在标注者点击 **Open Case** 后后台执行。提前准备时可运行：
 
 ```powershell
 .\scripts\windows\invoke_mimics_case.ps1 `
@@ -192,7 +193,7 @@ sp mimics prebuild-many D:\SegmentationPlatform\data\packages\cases `
 
 ### 6.2 打开 Mimics
 
-正式标注时，标注者只手动打开 Mimics，然后在 Scripting Library 运行 **Start Labeling**。Console 会读取本机 JSON 配置，查询分配给当前 assignee 的下一例，必要时后台运行 `prepare`，并在当前 Mimics 会话中打开 `.mcs` 或导入 DICOM。若管理员已提前 `prebuild`，标注者首次打开也只需打开 `.mcs`，不等待首次导入。
+正式标注时，标注者只手动打开 Mimics，然后在 Scripting Library 运行 **Start Labeling**。Console 会读取本机 JSON 配置，查询分配给当前 assignee 的任务；若开启 `claim_unassigned`，也会认领未分配任务。必要时后台运行 `prepare`，并在当前 Mimics 会话中打开 `.mcs` 或导入 DICOM。若管理员已提前 `prebuild`，标注者首次打开也只需打开 `.mcs`，不等待首次导入。
 
 `invoke_mimics_case.ps1 -Action Open` 只作为管理员调试入口保留，不作为标注者日常步骤。
 
@@ -214,7 +215,7 @@ Mimics 启动后会自动：
 
 1. 打开 Mimics。
 2. 运行 `Script -> Scripting Library -> Start Labeling`。
-3. 选择 **Start Next Case**，核对病例、序列数量、目标器官统计和初始 Mask 是否合理。
+3. 选择 **Open Case**，核对病例、序列数量、目标器官统计和初始 Mask 是否合理。
 4. 使用 Mimics 工具修正对应的 `SP__<target_id>__<organ>` Mask。
 5. 随时保存 `.mcs`，关闭 Mimics 后可以继续。
 6. 忘记当前任务范围时，在 Console 中选择 **Task List** 重新显示病例、序列、目标器官统计和当前 Mask 状态。Task List 在 Mimics 弹窗内分页显示，并可按 Missing、Ready、With Initial、Known Absent 筛选；完整清单仍会写入 `reports\mimics_task_list.txt` 作为技术记录。
@@ -236,7 +237,7 @@ Mimics 启动后会自动：
 | Report Problem | 数据、图像集或工具问题导致无法继续 |
 | Cancel | 不提交，继续保留 `.mcs` 当前进度 |
 
-**Skip Case** 不在提交表里。它只把当前 review 设为 `deferred` 并打开下一例；管理员可以用 `sp review reactivate` 放回队列。不要用 Report Problem 表示“先放一边”。
+**Skip Case** 不在提交表里。它只保存并关闭当前 `.mcs`，本次领取时排除当前 review 后打开下一例；不会把 review 设为 `deferred`。管理员需要长期移出队列时才运行 `sp review defer`，需要放回队列时运行 `sp review reactivate`。不要用 Report Problem 表示“先放一边”。
 
 当任务包含 2–5 个 target 时，脚本允许逐个勾选后一次提交任意组合。提交前会聚合检查 Mask
 完整性、image set、基础版本和 shape；检查失败时直接显示主要问题，并写入
@@ -392,7 +393,7 @@ recovery backup 时退回初始标签或空 Mask。
 
 第一阶段采用离线文件式 Registry，建议遵守：
 
-1. 一个 review 只分配给一个 assignee。
+1. 一个 review 同一时间只由一个 assignee 领取或处理。
 2. 一个 Case Package 同一时刻只由一个标注者写入。
 3. 不同标注者使用不同 Case Package 目录，可以并行工作。
 4. Registry 应由一个平台操作进程写入，不让多人同时直接编辑 JSON。
@@ -420,6 +421,7 @@ sp review export-worklist `
   --registry D:\SegmentationPlatform\data\registry `
   --assignee annotator_01 `
   --output-root D:\transfer\annotator_01_worklist `
+  --claim-unassigned `
   --overwrite
 ```
 
@@ -438,16 +440,20 @@ sp review export-worklist `
   --registry D:\SegmentationPlatform\data\registry `
   --assignee annotator_01 `
   --output-root D:\transfer\annotator_01_worklist `
+  --claim-unassigned `
   --merge
 ```
 
-只想先分发一部分病例时，加 `--limit 30`。被 Skip 的病例状态为 `deferred`，需要重新进入队列时运行：
+只想先分发一部分病例时，加 `--limit 30`。被标注者 Skip 的病例不会改变 Registry 状态；需要长期移出队列时运行：
 
 ```powershell
-sp review reactivate `
+sp review defer `
   --registry D:\SegmentationPlatform\data\registry `
-  --review-id review_case_001
+  --review-id review_case_001 `
+  --actor lead
 ```
+
+重新放回队列时运行 `sp review reactivate --review-id review_case_001 --actor lead`。
 
 ## 10. Windows 与其他机器之间传输什么
 

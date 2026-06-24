@@ -58,6 +58,7 @@ def export_assignee_worklist(
     overwrite: bool = False,
     merge: bool = False,
     limit: int | None = None,
+    claim_unassigned: bool = False,
 ) -> dict[str, Any]:
     """Copy assigned case packages and a minimal local Registry for a workstation."""
 
@@ -75,11 +76,13 @@ def export_assignee_worklist(
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    selected_reviews = [
-        review
-        for review in registry.list("reviews")
-        if review.get("assignee") == assignee and review.get("status") in statuses and review.get("package_path")
-    ]
+    selected_reviews = []
+    for review in registry.list("reviews"):
+        if review.get("status") not in statuses or not review.get("package_path"):
+            continue
+        review_assignee = review.get("assignee")
+        if review_assignee == assignee or (claim_unassigned and review_assignee in (None, "")):
+            selected_reviews.append(review)
     selected_reviews.sort(key=lambda item: (item.get("created_at", ""), item["review_id"]))
     if limit is not None:
         selected_reviews = selected_reviews[: int(limit)]
@@ -92,6 +95,17 @@ def export_assignee_worklist(
     copied_label_ids = set()
 
     for review in selected_reviews:
+        if claim_unassigned and review.get("assignee") in (None, ""):
+            review["assignee"] = assignee
+            review.setdefault("events", []).append(
+                {
+                    "at": utc_now(),
+                    "action": "claimed_for_worklist",
+                    "actor": assignee,
+                    "detail": str(output_root),
+                }
+            )
+            registry.put("reviews", review, allow_update=True)
         case_id = review["case_id"]
         source_case_root = Path(str(review["package_path"])).resolve()
         if not source_case_root.is_dir():

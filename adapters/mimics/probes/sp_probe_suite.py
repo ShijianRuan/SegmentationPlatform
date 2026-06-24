@@ -70,14 +70,32 @@ def run_p02(project_path):
     mimics.file.open_project(filename=project_path)
 
     reopened = []
+    # Mimics 21.0.0.406 does not persist custom metadata across project
+    # save/close/open, so we match by mask name pattern as a fallback.
     for mask in mimics.data.masks:
-        if metadata_get(mask, "sp.probe") != "P02":
-            continue
-        expected_index = int(metadata_get(mask, "sp.image_index"))
+        stored_probe = metadata_get(mask, "sp.probe", "")
+        if stored_probe != "P02":
+            if stored_probe:
+                continue
+            if not mask.name.startswith("SP_P02_IMAGE_"):
+                continue
+        expected_index = int(metadata_get(mask, "sp.image_index", -1))
+        if expected_index < 0 or expected_index >= len(created):
+            try:
+                prefix = "SP_P02_IMAGE_"
+                if mask.name.startswith(prefix):
+                    expected_index = int(mask.name[len(prefix):])
+                else:
+                    continue
+            except (ValueError, IndexError):
+                continue
         expected_uid = metadata_get(mask, "sp.expected_series_uid_sha256", "")
         linked_identity = image_identity(mask.image)
         uid_matches = bool(expected_uid) and linked_identity.get("dicom_series_uid_sha256") == expected_uid
-        shape_matches = linked_identity["logical_dimensions"] == created[expected_index]["identity"]["logical_dimensions"]
+        shape_matches = (
+            expected_index < len(created)
+            and linked_identity["logical_dimensions"] == created[expected_index]["identity"]["logical_dimensions"]
+        )
         reopened.append(
             {
                 "image_index": expected_index,

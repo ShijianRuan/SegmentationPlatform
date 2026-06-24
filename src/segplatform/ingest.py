@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import sys
+import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -76,7 +79,37 @@ def _file_image_record(path: Path, source_root: Path, format_name: str) -> dict[
     return record
 
 
-def scan_source(source_root: Path) -> dict[str, Any]:
+def _scan_one_file(path: Path, source_root: Path) -> tuple[str, Any]:
+    format_name = infer_format(path)
+    if format_name in {"nifti", "metaimage"}:
+        return "file_image", _file_image_record(path, source_root, format_name)
+    if format_name == "raw_binary":
+        return "skipped", {"path": _relative(path, source_root), "reason": "raw_binary_requires_sidecar"}
+    try:
+        dataset = pydicom.dcmread(str(path), stop_before_pixels=True, force=False)
+    except Exception:
+        return "skipped", {"path": _relative(path, source_root), "reason": "not_readable_as_dicom"}
+    if not hasattr(dataset, "Rows") or not hasattr(dataset, "Columns"):
+        return "skipped", {"path": _relative(path, source_root), "reason": "dicom_without_pixel_matrix"}
+    patient_key = str(dataset.get("PatientID", "")).strip()
+    study_uid = str(dataset.get("StudyInstanceUID", "")).strip()
+    series_uid = str(dataset.get("SeriesInstanceUID", "")).strip()
+    if not study_uid or not series_uid:
+        return "skipped", {"path": _relative(path, source_root), "reason": "missing_study_or_series_uid"}
+    return (
+        "dicom",
+        {
+            "path": path,
+            "patient_key": patient_key,
+            "study_uid": study_uid,
+            "series_uid": series_uid,
+            "modality": str(dataset.get("Modality", "")).strip(),
+            "series_description": str(dataset.get("SeriesDescription", "")).strip(),
+        },
+    )
+
+
+def scan_source(source_root: Path, *, workers: int = 1, progress: bool = False) -> dict[str, Any]:
     """Discover importable image sets without creating registry records.
 
     DICOM is grouped by StudyInstanceUID and SeriesInstanceUID. File-based
@@ -88,32 +121,33 @@ def scan_source(source_root: Path) -> dict[str, Any]:
     source_root = source_root.expanduser().resolve()
     if not source_root.is_dir():
         raise ValidationError(f"ingest scan requires a directory: {source_root}")
+    workers = max(1, int(workers))
 
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
     skipped: list[dict[str, Any]] = []
     file_image_records = []
-    for path in sorted(item for item in source_root.rglob("*") if item.is_file()):
-        format_name = infer_format(path)
-        if format_name in {"nifti", "metaimage"}:
-            file_image_records.append(_file_image_record(path, source_root, format_name))
+    paths = sorted(item for item in source_root.rglob("*") if item.is_file())
+    started_at = time.time()
+    if progress:
+        print(f"[scan] discovered {len(paths)} files; workers={workers}", file=sys.stderr)
+    if workers > 1 and len(paths) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            scanned = list(pool.map(lambda item: _scan_one_file(item, source_root), paths))
+    else:
+        scanned = [_scan_one_file(path, source_root) for path in paths]
+    if progress:
+        print(f"[scan] file header pass finished in {time.time() - started_at:.1f}s", file=sys.stderr)
+
+    for kind, payload in scanned:
+        if kind == "file_image":
+            file_image_records.append(payload)
             continue
-        if format_name == "raw_binary":
-            skipped.append({"path": _relative(path, source_root), "reason": "raw_binary_requires_sidecar"})
+        if kind == "skipped":
+            skipped.append(payload)
             continue
-        try:
-            dataset = pydicom.dcmread(str(path), stop_before_pixels=True, force=False)
-        except Exception:
-            skipped.append({"path": _relative(path, source_root), "reason": "not_readable_as_dicom"})
-            continue
-        if not hasattr(dataset, "Rows") or not hasattr(dataset, "Columns"):
-            skipped.append({"path": _relative(path, source_root), "reason": "dicom_without_pixel_matrix"})
-            continue
-        patient_key = str(dataset.get("PatientID", "")).strip()
-        study_uid = str(dataset.get("StudyInstanceUID", "")).strip()
-        series_uid = str(dataset.get("SeriesInstanceUID", "")).strip()
-        if not study_uid or not series_uid:
-            skipped.append({"path": _relative(path, source_root), "reason": "missing_study_or_series_uid"})
-            continue
+        patient_key = payload["patient_key"]
+        study_uid = payload["study_uid"]
+        series_uid = payload["series_uid"]
         key = (patient_key, study_uid, series_uid)
         group = groups.setdefault(
             key,
@@ -126,17 +160,25 @@ def scan_source(source_root: Path) -> dict[str, Any]:
                 "series_descriptions": set(),
             },
         )
-        group["files"].append(path)
-        modality = str(dataset.get("Modality", "")).strip()
-        if modality:
-            group["modalities"].add(modality)
-        description = str(dataset.get("SeriesDescription", "")).strip()
-        if description:
-            group["series_descriptions"].add(description)
+        group["files"].append(payload["path"])
+        if payload["modality"]:
+            group["modalities"].add(payload["modality"])
+        if payload["series_description"]:
+            group["series_descriptions"].add(payload["series_description"])
 
     series_records = []
     case_groups: dict[str, dict[str, Any]] = {}
-    for (patient_key, study_uid, series_uid), group in sorted(groups.items(), key=lambda item: item[0]):
+    total_series = len(groups)
+    for series_index, ((patient_key, study_uid, series_uid), group) in enumerate(
+        sorted(groups.items(), key=lambda item: item[0]),
+        start=1,
+    ):
+        if progress:
+            print(
+                f"[scan] inspecting series {series_index}/{total_series}: "
+                f"{len(group['files'])} files, {series_uid[:12]}...",
+                file=sys.stderr,
+            )
         case_seed = (patient_key or "unknown_patient") + "|" + study_uid
         case_id = "case_" + _short_hash(case_seed)
         study_id = "study_" + _short_hash(study_uid)
@@ -243,14 +285,13 @@ def _data_governance(
     governance_profile: str,
     governance_profile_version: str,
 ) -> dict[str, Any]:
-    if source_zone == "working" and deidentification_status != "verified":
-        raise ValidationError("source_zone=working requires deidentification_status=verified")
     return {
         "source_zone": source_zone,
         "deidentification_status": deidentification_status,
         "profile": governance_profile,
         "profile_version": governance_profile_version,
         "direct_identifiers_allowed": False,
+        "strict_deidentification": False,
     }
 
 
@@ -493,6 +534,7 @@ def build_case_package_requests(
                 "profile": governance_profile,
                 "profile_version": governance_profile_version,
                 "direct_identifiers_allowed": False,
+                "strict_deidentification": False,
             },
             "image_sets": image_sets,
             "review": {

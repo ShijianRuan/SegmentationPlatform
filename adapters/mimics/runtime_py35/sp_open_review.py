@@ -160,6 +160,16 @@ def main():
             )
 
     mimics.file.save_project(filename=runtime["mcs_path"], save_as_type="Mimics Project Files")
+
+    # Initialize nnInteractive diff baselines so the first AI Refine can detect
+    # real edits instead of treating the entire mask as a foreground scribble.
+    try:
+        import sp_nninteractive_refine
+
+        sp_nninteractive_refine.initialize_baselines(runtime_path)
+    except ImportError:
+        pass  # nnInteractive not set up on this workstation — fine.
+
     report = {
         "schema_version": "mimics_open_report.v1",
         "review_id": runtime["review_id"],

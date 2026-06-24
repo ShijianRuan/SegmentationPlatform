@@ -33,7 +33,7 @@ from segplatform.labels import merge_labels, register_label, register_labels_fro
 from segplatform.errors import ValidationError
 from segplatform.registry import FileRegistry
 from segplatform.review_updates import create_followup_reviews, create_followup_reviews_from_findings
-from segplatform.reviews import defer_review, next_review, reactivate_review
+from segplatform.reviews import assign_review, defer_review, next_review, reactivate_review
 from segplatform.snapshots import build_snapshot_request, create_snapshot, validate_snapshot
 
 
@@ -973,7 +973,7 @@ class LabelingWorkflowTests(unittest.TestCase):
 
     def test_ingest_scan_builds_requests_without_manual_image_sets(self) -> None:
         dicom_root = self.make_dicom_series()
-        scan = scan_source(dicom_root)
+        scan = scan_source(dicom_root, workers=2)
         self.assertEqual(1, scan["summary"]["importable_series_count"])
         encoded = json.dumps(scan)
         self.assertNotIn("PSEUDO_001", encoded)
@@ -998,6 +998,44 @@ class LabelingWorkflowTests(unittest.TestCase):
         manifest = load_data(case_root / "manifest.json")
         self.assertEqual(1, len(manifest["image_sets"]))
         self.assertEqual(["liver"], manifest["review"]["targets"][0]["organs"])
+
+    def test_build_requests_can_use_organs_file_and_unassigned_queue(self) -> None:
+        dicom_root = self.make_dicom_series()
+        scan = scan_source(dicom_root)
+        scan_path = self.root / "scan_for_organs_file.json"
+        scan_path.write_text(json.dumps(scan), encoding="utf-8")
+        organs_path = self.root / "target_organs.txt"
+        organs_path.write_text("liver\nspleen\n", encoding="utf-8")
+
+        from segplatform.cli import _load_organs_file
+
+        batch = build_case_package_requests(
+            scan_path,
+            self.root / "requests_organs_file",
+            organs=_load_organs_file(organs_path),
+            import_batch="batch_organs_file",
+            assignee=None,
+        )
+
+        request = load_data(Path(batch["requests"][0]))
+        self.assertIsNone(request["review"]["assignee"])
+        self.assertEqual(["liver", "spleen"], request["review"]["targets"][0]["organs"])
+
+    def test_deidentification_findings_are_nonblocking_by_default(self) -> None:
+        dicom_root = self.make_dicom_series()
+        geometry, _ = inspect_dicom_series(dicom_root)
+        source_mask = self.root / "liver_deid_optional.nii.gz"
+        write_mask_nifti(source_mask, np.zeros(geometry.shape, dtype=np.uint8), geometry)
+        request = load_data(self.make_request(dicom_root, source_mask))
+        request["data_governance"]["deidentification_status"] = "pending"
+        request_path = self.root / "package_request_deid_pending.yaml"
+        request_path.write_text(yaml.safe_dump(request, sort_keys=False), encoding="utf-8")
+
+        case_root = create_case_package(request_path, self.root / "dataset_package_deid_pending")
+        manifest = load_data(case_root / "manifest.json")
+        self.assertEqual("pending", manifest["data_governance"]["deidentification_status"])
+        report = load_data(case_root / "reports" / "ingest_report.json")
+        self.assertIn(report["images"][0]["status"], {"passed", "warning"})
 
     def test_ingest_registers_images_without_creating_case_packages_or_reviews(self) -> None:
         dicom_root = self.make_dicom_series()
@@ -1431,6 +1469,143 @@ class LabelingWorkflowTests(unittest.TestCase):
         reactivate_review(registry_root, "review_defer", actor="lead")
         self.assertEqual("review_defer", next_review(registry_root, assignee="annotator_01")["review_id"])
 
+    def test_unassigned_review_can_be_claimed_and_reassigned_without_rebuilding_package(self) -> None:
+        registry_root = self.root / "registry_claim"
+        case_root = self.root / "dataset_package" / "cases" / "case_claim"
+        case_root.mkdir(parents=True)
+        record = {
+            "schema_version": "review_task.v1",
+            "review_id": "review_claim",
+            "package_id": "pkg_claim",
+            "case_id": "case_claim",
+            "tool": "mimics",
+            "status": "ready",
+            "assignee": None,
+            "package_path": str(case_root),
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "targets": [
+                {
+                    "target_id": "target_liver",
+                    "image_id": "img_ct",
+                    "organs": ["liver"],
+                    "status": "ready",
+                }
+            ],
+            "events": [],
+        }
+        registry = FileRegistry(registry_root)
+        registry.put("reviews", record)
+
+        self.assertEqual("empty", next_review(registry_root, assignee="annotator_01")["status"])
+        claimed = next_review(registry_root, assignee="annotator_01", claim_unassigned=True)
+        self.assertEqual("review_claim", claimed["review_id"])
+        self.assertEqual("annotator_01", FileRegistry(registry_root).get("reviews", "review_claim")["assignee"])
+
+        assigned = assign_review(registry_root, "review_claim", assignee="annotator_02", actor="lead")
+        self.assertEqual("annotator_02", assigned["assignee"])
+        self.assertEqual("empty", next_review(registry_root, assignee="annotator_01")["status"])
+        self.assertEqual("review_claim", next_review(registry_root, assignee="annotator_02")["review_id"])
+
+    def test_export_worklist_can_claim_unassigned_reviews(self) -> None:
+        registry_root = self.root / "registry_worklist_claim"
+        case_root = self.root / "central_cases_claim" / "case_claim"
+        case_root.mkdir(parents=True)
+        (case_root / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "case_package.v0.5",
+                    "case_id": "case_claim",
+                    "review": {"review_id": "review_claim"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        registry = FileRegistry(registry_root)
+        registry.put(
+            "cases",
+            {
+                "schema_version": "case_manifest.v1",
+                "case_id": "case_claim",
+                "leakage_group_id": "subject_claim",
+                "leakage_group_basis": "case",
+                "leakage_group_confidence": "low",
+                "study_id": "study_claim",
+                "image_ids": ["img_ct"],
+                "data_governance": {"deidentification_status": "pending"},
+            },
+        )
+        registry.put(
+            "images",
+            {
+                "schema_version": "image_artifact.v1",
+                "image_id": "img_ct",
+                "case_id": "case_claim",
+                "modality": "CT",
+                "format": "dicom_series",
+                "path": str(case_root / "images" / "img_ct" / "dicom"),
+                "hash": "sha256:" + "0" * 64,
+                "hash_scope": "bundle_manifest",
+                "pixel_type": "int16",
+                "shape": [2, 2, 2],
+                "spacing": [1.0, 1.0, 1.0],
+                "origin": [0.0, 0.0, 0.0],
+                "direction": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                "geometry_status": "complete",
+                "geometry_evidence": {
+                    "coordinate_system": "LPS",
+                    "shape": "header",
+                    "spacing": "header",
+                    "origin": "header",
+                    "direction": "header",
+                    "assumptions": [],
+                },
+                "source": {
+                    "type": "test",
+                    "import_batch": "test",
+                    "reader": {"name": "test", "version": "1"},
+                },
+                "usability": {"annotation": "allowed", "training": "allowed", "evaluation": "allowed", "reasons": []},
+            },
+        )
+        registry.put(
+            "reviews",
+            {
+                "schema_version": "review_task.v1",
+                "review_id": "review_claim",
+                "package_id": "pkg_claim",
+                "case_id": "case_claim",
+                "tool": "mimics",
+                "status": "ready",
+                "assignee": None,
+                "package_path": str(case_root),
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "targets": [
+                    {
+                        "target_id": "target_liver",
+                        "image_id": "img_ct",
+                        "organs": ["liver"],
+                        "status": "ready",
+                    }
+                ],
+                "events": [],
+            },
+        )
+
+        export = export_assignee_worklist(
+            registry_root,
+            self.root / "worker_claim",
+            assignee="annotator_01",
+            claim_unassigned=True,
+            overwrite=True,
+        )
+
+        self.assertEqual(1, export["review_count"])
+        self.assertEqual("annotator_01", FileRegistry(registry_root).get("reviews", "review_claim")["assignee"])
+        self.assertEqual(
+            "annotator_01",
+            FileRegistry(self.root / "worker_claim" / "registry").get("reviews", "review_claim")["assignee"],
+        )
+
     def test_windows_probe_command_and_mapping_evaluation(self) -> None:
         dicom_root = self.make_dicom_series()
         geometry, details = inspect_dicom_series(dicom_root)
@@ -1650,7 +1825,7 @@ class LabelingWorkflowTests(unittest.TestCase):
 
     def test_review_console_uses_direct_submit_actions(self) -> None:
         runtime_dir = Path(__file__).resolve().parents[1] / "adapters" / "mimics" / "runtime_py35"
-        responses = iter(["Complete", "Needs Review", "Report Problem", "Task List", "Start Next Case"])
+        responses = iter(["Complete", "Needs Review", "Report Problem", "Task List", "Open Case"])
 
         class Dialogs:
             @staticmethod

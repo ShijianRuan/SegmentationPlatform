@@ -239,12 +239,12 @@ sp mimics finalize /path/to/case_package --config /path/to/mimics_workstation.ya
 
 它负责把平台流程收敛成少量 Mimics 内动作：
 
-- **Start Next Case**：读取本机 JSON 配置，调用外部平台 Python 查询 `sp review next`，必要时后台执行 `sp mimics prepare`，然后在当前 Mimics 会话内调用 `sp_open_review.py`。
+- **Open Case**：读取本机 JSON 配置，调用外部平台 Python 查询 `sp review next`，必要时用 `--claim-unassigned` 认领未分配任务，再后台执行 `sp mimics prepare`，然后在当前 Mimics 会话内调用 `sp_open_review.py`。它既可打开新任务，也可继续上次未完成任务。
 - **Complete / Needs Review / Report Problem**：把业务结果直接传给 `sp_submit_review.py`，导出 Mask 或记录阻塞原因。默认不阻塞等待最终 QC；平台 watcher 或管理员批处理独立运行 `sp mimics finalize`。
-- **Skip Case**：调用 `sp review defer`，把当前 review 暂时移出默认领取队列，然后打开下一例。它不是提交，也不是阻塞。
+- **Skip Case**：保存并关闭当前 `.mcs`，本次领取时排除当前 review 后打开下一例。它不是提交，也不是阻塞，也不改变 Registry 状态。长期移出队列由管理员运行 `sp review defer`。
 - **Save Recovery Backup**：调用 `sp_save_checkpoint.py` 保存恢复快照。
 - **Task List**：在 Mimics 弹窗内分页显示当前 review、case、image set、目标器官和当前 Mask 状态，并支持按 Missing、Ready、With Initial、Known Absent 筛选，替代常驻弹窗。
-- **Start Next Case** 可在当前项目保存并关闭后继续下一例，但每个 `.mcs` 仍只对应一个 review/case。
+- **Open Case** 可在当前项目保存并关闭后继续下一例，但每个 `.mcs` 仍只对应一个 review/case。
 
 本机配置使用 JSON，而不是 YAML，因为 Mimics 21 内 Python 3.5 只应依赖标准库：
 
@@ -254,6 +254,7 @@ sp mimics finalize /path/to/case_package --config /path/to/mimics_workstation.ya
   "registry_root": "D:\\platform_registry",
   "workstation_config": "C:\\SegmentationPlatform\\config\\mimics_workstation.verified.yaml",
   "assignee": "annotator_01",
+  "claim_unassigned": true,
   "auto_finalize": false,
   "checkpoint_keep_count": 3
 }
@@ -389,7 +390,7 @@ Mimics 21 资料没有证明存在稳定的项目保存事件回调，因此第�
 
 1. 打开 Mimics。
 2. 运行 `Script -> Scripting Library -> Start Labeling`。
-3. 选择 **Start Next Case**。
+3. 选择 **Open Case**。
 
 Console 在后台查询任务队列、准备病例、打开 `.mcs` 或导入 DICOM。任务打开后，标注者只核对：
 

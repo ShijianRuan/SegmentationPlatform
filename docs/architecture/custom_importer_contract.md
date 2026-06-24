@@ -8,7 +8,7 @@
 不要把专用 importer 当成默认路径。优先级必须是：
 
 1. `sp ingest scan`：标准 DICOM 或简单文件型图像。
-2. `sp ingest from-description`：图像、标签和 label map 可用正则或 CSV 描述。
+2. `sp ingest plan dataset_description.yaml ...`：图像、标签和 label map 可用正则或 CSV 描述。
 3. L3 预整理脚本：先把混乱目录整理成 `images.csv`、`labels.csv` 或 `dataset_description.yaml`。
 4. L4 专用 importer：只有前面三种表达不了时才写。
 
