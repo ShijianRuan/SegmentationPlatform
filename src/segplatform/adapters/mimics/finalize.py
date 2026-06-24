@@ -100,9 +100,9 @@ def _submission_identity_findings(
     submission: dict[str, Any],
     target_ids: list[str],
     targets: dict[str, dict[str, Any]],
+    expected_assignee: str | None = None,
 ) -> list[dict[str, Any]]:
     findings = []
-    expected_assignee = manifest["review"].get("assignee")
     if expected_assignee and submission.get("assignee") != expected_assignee:
         findings.append(
             {
@@ -163,7 +163,13 @@ def finalize_case(
 
     registry = FileRegistry(registry_root)
     review_record = registry.get("reviews", review_id)
-    identity_findings = _submission_identity_findings(manifest, submission, target_ids, targets)
+    identity_findings = _submission_identity_findings(
+        manifest,
+        submission,
+        target_ids,
+        targets,
+        expected_assignee=review_record.get("assignee") if "assignee" in review_record else manifest["review"].get("assignee"),
+    )
     if identity_findings:
         _mark_qc_failed(review_record, target_ids, submission.get("assignee"))
         registry.put("reviews", review_record, allow_update=True)

@@ -171,7 +171,7 @@ sp hash bundle path/to/dicom_or_mhd_bundle
 
 ```bash
 sp ingest scan /data/source --output reports/source_scan.json
-sp ingest build-requests reports/source_scan.json package_requests/ --organs liver spleen --import-batch batch_001
+sp ingest plan /data/source package_requests/ --organs-file target_organs.txt --import-batch batch_001 --workers 8
 sp package create-many package_requests/ dataset_package/ --registry registry/
 sp registry rebuild-index registry/
 ```

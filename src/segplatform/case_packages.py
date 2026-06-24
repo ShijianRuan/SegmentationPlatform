@@ -35,14 +35,14 @@ from segplatform.schema import repository_root, validate_schema
 from segplatform.vocabulary import AnatomyVocabulary
 
 
-def _copy_dicom_file_set(source_root: Path, relative_files: list[str], destination: Path) -> None:
+def _copy_dicom_file_set(source_root: Path, relative_files: list[str], destination: Path, *, copy_mode: str) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     for relative in relative_files:
         source_file = ensure_within(source_root, source_root / relative)
         if not source_file.is_file():
             raise ValidationError(f"DICOM source file does not exist: {source_file}")
         target = ensure_within(destination, destination / relative)
-        copy_path(source_file, target)
+        copy_path(source_file, target, mode=copy_mode)
 
 
 def _copy_image(
@@ -52,22 +52,23 @@ def _copy_image(
     *,
     source_files: list[str] | None = None,
     companion_paths: list[str] | None = None,
+    copy_mode: str = "copy",
 ) -> tuple[Path, str]:
     if format_name == "dicom_series":
         destination = image_root / "dicom"
         if source_files:
-            _copy_dicom_file_set(source, source_files, destination)
+            _copy_dicom_file_set(source, source_files, destination, copy_mode=copy_mode)
         else:
-            copy_path(source, destination)
+            copy_path(source, destination, mode=copy_mode)
         return destination, "dicom_path"
     if format_name == "nifti":
         suffix = ".nii.gz" if source.name.lower().endswith(".nii.gz") else ".nii"
         destination = image_root / ("image" + suffix)
-        copy_path(source, destination)
+        copy_path(source, destination, mode=copy_mode)
         return destination, "image_path"
     if format_name == "metaimage":
         destination = image_root / source.name
-        copy_path(source, destination)
+        copy_path(source, destination, mode=copy_mode)
         for companion_text in companion_paths or []:
             companion = Path(companion_text)
             if companion.exists():
@@ -75,7 +76,7 @@ def _copy_image(
                     companion_relative = companion.resolve().relative_to(source.parent.resolve())
                 except ValueError:
                     companion_relative = Path(companion.name)
-                copy_path(companion, image_root / companion_relative)
+                copy_path(companion, image_root / companion_relative, mode=copy_mode)
         return destination, "image_path"
     raise ValidationError(f"unsupported image format for package creation: {format_name}")
 
@@ -238,10 +239,13 @@ def create_case_package(
     *,
     registry_root: Path | None = None,
     overwrite: bool = False,
+    copy_mode: str = "copy",
 ) -> Path:
     request = load_data(request_path)
     if request.get("schema_version") != "case_package_request.v1":
         raise ValidationError("package request schema_version must be case_package_request.v1")
+    if copy_mode not in {"copy", "hardlink", "symlink"}:
+        raise ValidationError(f"unsupported copy_mode: {copy_mode}")
     case_id = canonical_id(str(request["case_id"]), "case_id")
     package_id = canonical_id(str(request.get("package_id", f"pkg_{case_id}")), "package_id")
     review_request = request["review"]
@@ -323,6 +327,7 @@ def create_case_package(
             format_name,
             source_files=relative_files,
             companion_paths=source_inspection.get("companion_paths", []),
+            copy_mode=copy_mode,
         )
         copied_geometry, copied_inspection = inspect_image(copied_path, format_name)
         matches, reasons = geometry_matches(source_geometry, copied_geometry)
@@ -333,12 +338,18 @@ def create_case_package(
             scan = copied_inspection["deidentification_scan"]
             allowed_tags = set(str(item) for item in image_request.get("allowed_dicom_tags", []))
             disallowed_tags = sorted(set(scan["sensitive_tags_present"]) - allowed_tags)
+            strict_deidentification = bool(request.get("data_governance", {}).get("strict_deidentification", False))
+            status = "passed"
             if disallowed_tags:
+                status = "warning"
+            burned_in = {value.upper() for value in scan["burned_in_annotation_values"] if value}
+            if "YES" in burned_in:
+                status = "warning"
+            if strict_deidentification and disallowed_tags:
                 raise ValidationError(
                     f"DICOM deidentification scan found disallowed populated tags for {image_id}: {disallowed_tags}"
                 )
-            burned_in = {value.upper() for value in scan["burned_in_annotation_values"] if value}
-            if "YES" in burned_in:
+            if strict_deidentification and "YES" in burned_in:
                 raise ValidationError(f"DICOM BurnedInAnnotation=YES requires manual review before packaging: {image_id}")
             ingest_findings.append(
                 {
@@ -348,7 +359,8 @@ def create_case_package(
                     "allowed_exceptions": sorted(allowed_tags),
                     "patient_identity_removed_values": scan["patient_identity_removed_values"],
                     "burned_in_annotation_values": scan["burned_in_annotation_values"],
-                    "status": "passed",
+                    "status": status,
+                    "strict_deidentification": strict_deidentification,
                 }
             )
         manifest_record = {
@@ -443,8 +455,7 @@ def create_case_package(
             target["base_label_id"] = group["label_id"]
             target["base_label_sha256"] = group["label_bundle_sha256"]
     data_governance = dict(request["data_governance"])
-    if data_governance.get("deidentification_status") != "verified":
-        raise ValidationError("data_governance.deidentification_status must be verified before package creation")
+    data_governance.setdefault("strict_deidentification", False)
 
     manifest = {
         "schema_version": "case_package.v0.5",
@@ -483,7 +494,11 @@ def create_case_package(
             "created_at": utc_now(),
             "status": "passed",
             "images": ingest_findings,
-            "note": "The report records tag names and policy outcomes, not original identifying values.",
+            "note": (
+                "The report records tag names and policy outcomes, not original identifying values. "
+                "Deidentification is governance metadata by default; set data_governance.strict_deidentification=true "
+                "to make these findings block package creation."
+            ),
         },
     )
 

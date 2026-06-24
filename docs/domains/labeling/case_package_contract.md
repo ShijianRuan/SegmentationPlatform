@@ -104,9 +104,10 @@ dataset_package/
   "patient_id_hash": "hmac-sha256:...",
   "study_instance_uid_hash": "hmac-sha256:...",
   "data_governance": {
-    "deidentification_status": "verified",
+    "deidentification_status": "pending",
     "profile": "internal_dicom_profile_v1",
-    "profile_version": "1.0"
+    "profile_version": "1.0",
+    "strict_deidentification": false
   },
   "created_at": "2026-06-12T10:00:00+08:00",
   "config_ref": "../../config/",
@@ -177,16 +178,16 @@ dataset_package/
 4. 每个目标组有唯一 `target_id`，并引用已存在的 `image_id`。
 5. 目标组的 `organs` 不能为空。
 6. `base_label_id` 和 `base_label_sha256` 要么同时存在，要么同时省略。
-7. `assignee` 第一阶段可选，多人工作时建议设置。
+7. `assignee` 第一阶段可选。若为空，任务可由工作站通过 `--claim-unassigned` 领取；改派只更新 Registry Review Task，不要求重建病例包。
 8. 不同目标组的标签分别绑定自己的图像空间，不能假设多个序列已配准。
 9. `target_id` 是最小提交单位；组内器官一起完成或一起进入复查。
    `known_absent` 只是兼容字段，仅在数据来源已有明确事实时使用，例如外部结构化记录已说明某器官不存在。
    它不能用于根据扫描部位猜测“哪些器官不需要标”。正常流程里，标注者打开病例后才判断目标器官是存在、无法确认还是需要复查；这些结果写入提交清单的 `organ_outcomes`。
-10. `data_governance.deidentification_status` 必须是 `verified`。
+10. `data_governance.deidentification_status` 是治理记录，不是默认阻断条件。只有 `strict_deidentification: true` 时，去标识风险才阻断病例包创建。
 11. `leakage_group_id` 和 `study_id` 对所有来源必填。
 12. `patient_id_hash` 和 `study_instance_uid_hash` 只在来源可靠且已按治理规则伪名化时记录。
 
-去标识声明不能替代导入阶段的 DICOM 标签检查。
+去标识声明不能替代导入阶段的 DICOM 标签检查。检查结果写入 `reports/ingest_report.json`；默认用于提示风险，严格治理场景再开启阻断。
 
 ### 4.2 哪些文件校验值必须稳定
 
@@ -344,7 +345,7 @@ submissions/{review_id}/labels/{image_id}/{organ}.nii.gz
 | 标签与目标图像的空间关系无法解释 | 阻断 |
 | 未知器官或未知标签值 | 阻断 |
 | 完成提交缺少目标组中的 Mask | 阻断该目标组 |
-| `review_id`、`target_id`、`assignee` 或基础标签版本不匹配 | 拒绝登记 |
+| `review_id`、`target_id`、当前 Registry assignee 或基础标签版本不匹配 | 拒绝登记 |
 | 标签内容检查失败 | 回到 `in_progress` 并生成问题报告 |
 
 不能仅因为数组大小相同就复制 affine。任何重采样必须创建新的文件记录并保存变换过程。
@@ -355,7 +356,7 @@ submissions/{review_id}/labels/{image_id}/{organ}.nii.gz
 
 第一阶段不实现在线锁服务：
 
-- 任务清单可以记录 `assignee`。
+- 任务清单可以记录 `assignee`，也可以先留空，由领取或导出工作包时认领。
 - 协调者避免把同一目标组同时分给两个人。
 - 同一病例的不同目标组可以并行。
 - 提交时用 `target_id` 和基础标签校验值阻止旧版本覆盖。

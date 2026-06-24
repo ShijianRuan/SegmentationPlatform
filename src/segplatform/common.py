@@ -86,13 +86,37 @@ def atomic_write_text(path: Path, text: str) -> None:
             temporary.unlink()
 
 
-def copy_path(source: Path, destination: Path) -> None:
+def copy_path(source: Path, destination: Path, *, mode: str = "copy") -> None:
     if destination.exists():
         raise FileExistsError(f"destination already exists: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if mode not in {"copy", "hardlink", "symlink"}:
+        raise ValueError(f"unsupported copy mode: {mode}")
+    if mode == "symlink":
+        destination.symlink_to(source.resolve(), target_is_directory=source.is_dir())
+        return
     if source.is_dir():
+        if mode == "hardlink":
+            for item in source.rglob("*"):
+                relative = item.relative_to(source)
+                target = destination / relative
+                if item.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                elif item.is_file():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        os.link(item, target)
+                    except OSError:
+                        shutil.copy2(item, target)
+            return
         shutil.copytree(source, destination)
     else:
+        if mode == "hardlink":
+            try:
+                os.link(source, destination)
+                return
+            except OSError:
+                pass
         shutil.copy2(source, destination)
 
 

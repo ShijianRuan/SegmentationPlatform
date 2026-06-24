@@ -246,7 +246,7 @@ Snapshot 创建必须执行这些限制，而不是只记录它们：
 ```bash
 sp ingest scan /data/source --output reports/source_scan.json
 sp ingest register reports/source_scan.json --registry registry/ --import-batch batch_001
-sp ingest build-requests reports/source_scan.json package_requests/ --organs liver spleen --import-batch batch_001
+sp ingest plan /data/source package_requests/ --organs-file target_organs.txt --import-batch batch_001 --workers 8
 sp package create-many package_requests/ dataset_package/ --registry registry/
 sp registry rebuild-index registry/
 ```
@@ -265,7 +265,7 @@ sp registry rebuild-index registry/
 复杂外部数据集不要继续加重 `scan`。例如 TotalSegmentator 的逐器官文件、MSD 的多标签文件、或医院批次的 CSV 配对关系，应优先使用[数据集描述契约](dataset_description_contract.md)：
 
 ```bash
-sp ingest from-description dataset_description.yaml package_requests/
+sp ingest plan dataset_description.yaml package_requests/
 sp package create-many package_requests/ dataset_package/ --registry registry/
 ```
 

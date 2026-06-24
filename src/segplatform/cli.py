@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from segplatform.adapters.mimics.prepare import prepare_case
 from segplatform.adapters.mimics.probes import evaluate_probe, run_probe
 from segplatform.case_packages import create_case_package, validate_case_package, validate_registry_record
 from segplatform.common import load_data
+from segplatform.common import write_json
 from segplatform.dataset_descriptions import build_requests_from_dataset_description
 from segplatform.distribution import collect_submissions, export_assignee_worklist
 from segplatform.errors import SegPlatformError
@@ -20,7 +22,7 @@ from segplatform.ingest import build_case_package_requests, register_scan, scan_
 from segplatform.labels import merge_labels, register_label, register_labels_from_table
 from segplatform.registry import FileRegistry
 from segplatform.review_updates import create_followup_reviews, create_followup_reviews_from_findings
-from segplatform.reviews import defer_review, mark_review_started, next_review, reactivate_review, review_stats
+from segplatform.reviews import assign_review, defer_review, mark_review_started, next_review, reactivate_review, review_stats
 from segplatform.runs import write_run_record
 from segplatform.snapshots import build_snapshot_request, create_snapshot, validate_snapshot
 
@@ -66,6 +68,35 @@ def _parse_key_value(values: list[str] | None, *, name: str) -> dict[str, str]:
     return result
 
 
+def _load_organs_file(path: Path) -> list[str]:
+    if not "".join(path.suffixes).lower().endswith((".json", ".yaml", ".yml")):
+        return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    payload = load_data(path)
+    if isinstance(payload, list):
+        return [str(item) for item in payload]
+    if isinstance(payload, dict):
+        if isinstance(payload.get("organs"), list):
+            return [str(item) for item in payload["organs"]]
+        if isinstance(payload.get("targets"), list):
+            return [str(item) for item in payload["targets"]]
+    raise SegPlatformError("organs file must be a YAML/JSON list or contain an organs list")
+
+
+def _resolve_organs(values: list[str] | None, organs_file: Path | None) -> list[str]:
+    organs = _split_values(values or [])
+    if organs_file:
+        organs.extend(_load_organs_file(organs_file))
+    seen = set()
+    result = []
+    for organ in organs:
+        if organ not in seen:
+            result.append(organ)
+            seen.add(organ)
+    if not result:
+        raise SegPlatformError("target organs are required; use --organs or --organs-file")
+    return result
+
+
 def _request_files(root: Path) -> list[Path]:
     return sorted(
         path
@@ -91,6 +122,8 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_scan = ingest_sub.add_parser("scan")
     ingest_scan.add_argument("source_root", type=Path)
     ingest_scan.add_argument("--output", type=Path, required=True)
+    ingest_scan.add_argument("--workers", type=int, default=1)
+    ingest_scan.add_argument("--progress", action="store_true")
     ingest_register = ingest_sub.add_parser("register")
     ingest_register.add_argument("scan", type=Path)
     ingest_register.add_argument("--registry", type=Path, required=True)
@@ -106,7 +139,8 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_build = ingest_sub.add_parser("build-requests")
     ingest_build.add_argument("scan", type=Path)
     ingest_build.add_argument("output_dir", type=Path)
-    ingest_build.add_argument("--organs", nargs="+", required=True)
+    ingest_build.add_argument("--organs", nargs="+")
+    ingest_build.add_argument("--organs-file", type=Path)
     ingest_build.add_argument("--import-batch", required=True)
     ingest_build.add_argument("--assignee")
     ingest_build.add_argument("--tool", default="mimics")
@@ -117,6 +151,20 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_description = ingest_sub.add_parser("from-description")
     ingest_description.add_argument("description", type=Path)
     ingest_description.add_argument("output_dir", type=Path)
+    ingest_plan = ingest_sub.add_parser("plan")
+    ingest_plan.add_argument("source", type=Path)
+    ingest_plan.add_argument("output_dir", type=Path)
+    ingest_plan.add_argument("--organs", nargs="+")
+    ingest_plan.add_argument("--organs-file", type=Path)
+    ingest_plan.add_argument("--import-batch")
+    ingest_plan.add_argument("--assignee")
+    ingest_plan.add_argument("--tool", default="mimics")
+    ingest_plan.add_argument("--source-type", default="ingest_plan")
+    ingest_plan.add_argument("--deidentification-status", default="pending")
+    ingest_plan.add_argument("--governance-profile", default="import_scan_profile")
+    ingest_plan.add_argument("--governance-profile-version", default="1")
+    ingest_plan.add_argument("--workers", type=int, default=1)
+    ingest_plan.add_argument("--progress", action="store_true")
 
     package = subparsers.add_parser("package", help="Create and validate Case Packages")
     package_sub = package.add_subparsers(dest="action", required=True)
@@ -125,12 +173,14 @@ def build_parser() -> argparse.ArgumentParser:
     package_create.add_argument("output_root", type=Path)
     package_create.add_argument("--registry", type=Path)
     package_create.add_argument("--overwrite", action="store_true")
+    package_create.add_argument("--copy-mode", choices=["copy", "hardlink", "symlink"], default="copy")
     package_create_many = package_sub.add_parser("create-many")
     package_create_many.add_argument("request_dir", type=Path)
     package_create_many.add_argument("output_root", type=Path)
     package_create_many.add_argument("--registry", type=Path)
     package_create_many.add_argument("--overwrite", action="store_true")
     package_create_many.add_argument("--continue-on-error", action="store_true")
+    package_create_many.add_argument("--copy-mode", choices=["copy", "hardlink", "symlink"], default="copy")
     package_validate = package_sub.add_parser("validate")
     package_validate.add_argument("case_root", type=Path)
 
@@ -193,6 +243,18 @@ def build_parser() -> argparse.ArgumentParser:
     mimics_probe_evaluate.add_argument("--config", type=Path, required=True)
     mimics_probe_evaluate.add_argument("--output-config", type=Path, required=True)
     mimics_probe_evaluate.add_argument("--tolerance-mm", type=float, default=1e-3)
+    mimics_nni_setup = mimics_sub.add_parser("nninteractive-setup")
+    mimics_nni_setup.add_argument("--cuda", default="cu124", choices=["cu124", "cu121", "cu118"])
+    mimics_nni_setup.add_argument("--device", default="cuda:0")
+    mimics_nni_setup.add_argument("--skip-download", action="store_true")
+    mimics_nni_refine = mimics_sub.add_parser("nninteractive-refine")
+    mimics_nni_refine.add_argument("case_root", type=Path)
+    mimics_nni_refine.add_argument("--target-id", required=True)
+    mimics_nni_refine.add_argument("--interaction-type", default="scribble", choices=["scribble", "box", "point", "lasso"])
+    mimics_nni_refine.add_argument("--include", type=lambda v: v.lower() != "false", default=True)
+    mimics_nni_refine.add_argument("--config", type=Path)
+    mimics_nni_refine.add_argument("--server-url")
+    mimics_nni_refine.add_argument("--device", default="cuda:0")
 
     review = subparsers.add_parser("review", help="Inspect offline review tasks")
     review_sub = review.add_subparsers(dest="action", required=True)
@@ -206,6 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_next.add_argument("--assignee")
     review_next.add_argument("--include-status", action="append")
     review_next.add_argument("--exclude-review-id")
+    review_next.add_argument("--claim-unassigned", action="store_true")
     review_start = review_sub.add_parser("start")
     review_start.add_argument("--registry", type=Path, required=True)
     review_start.add_argument("--review-id", required=True)
@@ -219,6 +282,12 @@ def build_parser() -> argparse.ArgumentParser:
     review_reactivate.add_argument("--registry", type=Path, required=True)
     review_reactivate.add_argument("--review-id", required=True)
     review_reactivate.add_argument("--actor")
+    review_assign = review_sub.add_parser("assign")
+    review_assign.add_argument("--registry", type=Path, required=True)
+    review_assign.add_argument("--review-id", required=True)
+    review_assign.add_argument("--assignee")
+    review_assign.add_argument("--clear-assignee", action="store_true")
+    review_assign.add_argument("--actor")
     review_followup = review_sub.add_parser("create-followup")
     review_followup.add_argument("--registry", type=Path, required=True)
     review_followup.add_argument("--output-root", type=Path, required=True)
@@ -245,6 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_export.add_argument("--local-cases-root", type=Path)
     review_export.add_argument("--include-status", action="append")
     review_export.add_argument("--limit", type=int)
+    review_export.add_argument("--claim-unassigned", action="store_true")
     review_export.add_argument("--merge", action="store_true")
     review_export.add_argument("--overwrite", action="store_true")
 
@@ -334,8 +404,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run(args: argparse.Namespace) -> int:
     if args.domain == "ingest" and args.action == "scan":
-        report = scan_source(args.source_root)
-        from segplatform.common import write_json
+        report = scan_source(args.source_root, workers=max(1, args.workers), progress=args.progress)
 
         write_json(args.output, report)
         print_json({"status": "scanned", "output": str(args.output), **report["summary"]})
@@ -360,7 +429,7 @@ def run(args: argparse.Namespace) -> int:
             build_case_package_requests(
                 args.scan,
                 args.output_dir,
-                organs=_split_values(args.organs),
+                organs=_resolve_organs(args.organs, args.organs_file),
                 import_batch=args.import_batch,
                 assignee=args.assignee,
                 tool=args.tool,
@@ -372,8 +441,64 @@ def run(args: argparse.Namespace) -> int:
         )
     elif args.domain == "ingest" and args.action == "from-description":
         print_json(build_requests_from_dataset_description(args.description, args.output_dir))
+    elif args.domain == "ingest" and args.action == "plan":
+        source = args.source.expanduser().resolve()
+        output_dir = args.output_dir.expanduser().resolve()
+        if source.is_dir():
+            if not args.import_batch:
+                raise SegPlatformError("--import-batch is required when planning from a source directory")
+            scan_path = output_dir / "source_scan.json"
+            report = scan_source(source, workers=max(1, args.workers), progress=args.progress)
+            write_json(scan_path, report)
+            result = build_case_package_requests(
+                scan_path,
+                output_dir,
+                organs=_resolve_organs(args.organs, args.organs_file),
+                import_batch=args.import_batch,
+                assignee=args.assignee,
+                tool=args.tool,
+                source_type=args.source_type,
+                deidentification_status=args.deidentification_status,
+                governance_profile=args.governance_profile,
+                governance_profile_version=args.governance_profile_version,
+            )
+            print_json({"status": "planned", "source_kind": "directory", "scan_path": str(scan_path), **result})
+        else:
+            payload = load_data(source)
+            schema_version = payload.get("schema_version") if isinstance(payload, dict) else None
+            if schema_version == "dataset_description.v1":
+                print_json(
+                    {
+                        "source_kind": "dataset_description",
+                        **build_requests_from_dataset_description(source, output_dir),
+                    }
+                )
+            elif schema_version == "ingest_scan.v1":
+                if not args.import_batch:
+                    raise SegPlatformError("--import-batch is required when planning from an ingest scan")
+                result = build_case_package_requests(
+                    source,
+                    output_dir,
+                    organs=_resolve_organs(args.organs, args.organs_file),
+                    import_batch=args.import_batch,
+                    assignee=args.assignee,
+                    tool=args.tool,
+                    source_type=args.source_type,
+                    deidentification_status=args.deidentification_status,
+                    governance_profile=args.governance_profile,
+                    governance_profile_version=args.governance_profile_version,
+                )
+                print_json({"source_kind": "ingest_scan", **result})
+            else:
+                raise SegPlatformError(f"unsupported ingest plan source schema_version: {schema_version}")
     elif args.domain == "package" and args.action == "create":
-        path = create_case_package(args.request, args.output_root, registry_root=args.registry, overwrite=args.overwrite)
+        path = create_case_package(
+            args.request,
+            args.output_root,
+            registry_root=args.registry,
+            overwrite=args.overwrite,
+            copy_mode=args.copy_mode,
+        )
         print_json({"status": "created", "case_root": str(path)})
     elif args.domain == "package" and args.action == "create-many":
         results = []
@@ -385,6 +510,7 @@ def run(args: argparse.Namespace) -> int:
                     args.output_root,
                     registry_root=args.registry,
                     overwrite=args.overwrite,
+                    copy_mode=args.copy_mode,
                 )
                 results.append({"request": str(request_path), "status": "created", "case_root": str(case_root)})
             except Exception as error:
@@ -523,6 +649,104 @@ def run(args: argparse.Namespace) -> int:
         )
         print_json(result)
         return 0 if result["status"] == "passed" else 2
+    elif args.domain == "mimics" and args.action == "nninteractive-setup":
+        import subprocess as _sp
+
+        setup_script = Path(__file__).resolve().parent.parent.parent / "scripts" / "setup_nninteractive_env.py"
+        if not setup_script.is_file():
+            raise SegPlatformError(f"Setup script not found: {setup_script}")
+        cmd = [sys.executable, str(setup_script), "--cuda", args.cuda, "--device", args.device]
+        if getattr(args, "skip_download", False):
+            cmd.append("--skip-download")
+        _sp.run(cmd, check=True)
+        return 0
+    elif args.domain == "mimics" and args.action == "nninteractive-refine":
+        from segplatform.adapters.mimics.nninteractive_bridge import run_bridge as _nni_refine
+
+        case_root = args.case_root.resolve()
+        runtime_path = case_root / "working" / "mimics_runtime.json"
+        if not runtime_path.is_file():
+            raise SegPlatformError(f"Runtime not found; run prepare first: {runtime_path}")
+        runtime = load_data(runtime_path)
+
+        # Find the target.
+        target = next(
+            (t for t in runtime.get("targets", []) if t["target_id"] == args.target_id),
+            None,
+        )
+        if target is None:
+            raise SegPlatformError(f"target_id {args.target_id} not found in runtime")
+        image_id = target["image_id"]
+
+        # Find image entry.
+        image = next(
+            (img for img in runtime.get("image_sets", []) if img["image_id"] == image_id),
+            None,
+        )
+        if image is None:
+            raise SegPlatformError(f"image_id {image_id} not found in runtime")
+
+        mapping_by_image = runtime.get("buffer_mapping_by_image_id", {})
+        buffer_mapping = mapping_by_image.get(image_id, runtime.get("buffer_mapping", {}))
+        if not buffer_mapping:
+            buffer_mapping = {"platform_to_mimics_axes": [0, 1, 2], "platform_to_mimics_flips": [False, False, False]}
+
+        # Find a platform image sidecar. The CLI debug path does not have
+        # access to Mimics ImageData, so DICOM/.mcs-only cases must be tested
+        # from inside Mimics via AI Refine.
+        image_path = image.get("image_path")
+        if image_path and not Path(image_path).is_file():
+            image_path = None
+        if image_path is None:
+            raise SegPlatformError(
+                "No NIfTI/MHA image sidecar found in runtime. "
+                "For DICOM/.mcs-only cases, run AI Refine inside Mimics."
+            )
+
+        # Find interaction buffer.
+        bridge_dir = case_root / "working" / "bridge"
+        import_dir = bridge_dir / "import" / image_id
+        if not import_dir.is_dir():
+            raise SegPlatformError(f"No import buffers for {image_id} in {import_dir}")
+        # Use the first organ's .u8 as interaction.
+        u8_files = sorted(import_dir.glob("*.u8"))
+        if not u8_files:
+            raise SegPlatformError(f"No .u8 buffers found in {import_dir}")
+
+        plat_shape = image.get("platform_shape", [])
+        axes = buffer_mapping.get("platform_to_mimics_axes", [0, 1, 2])
+        mimics_shape = [int(plat_shape[int(a)]) for a in axes]
+
+        # Load nnInteractive config.
+        config_path = Path(__file__).resolve().parent.parent.parent / "nninteractive_config.json"
+        if config_path.is_file():
+            nni_config = load_data(config_path)
+        else:
+            nni_config = {}
+        model_dir = nni_config.get("model_dir") or os.environ.get("SP_NNINTERACTIVE_MODEL_DIR", "")
+        server_url = getattr(args, "server_url", None) or nni_config.get("server_url") or os.environ.get("SP_NNINTERACTIVE_SERVER_URL")
+
+        output_dir = case_root / "working" / "nninteractive"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = str(output_dir / f"{args.target_id}_refined.u8")
+        interaction_path = str(u8_files[0])
+
+        bridge_input = {
+            "image_path": image_path,
+            "interaction_path": interaction_path,
+            "interaction_shape": list(mimics_shape),
+            "interaction_type": args.interaction_type,
+            "include_interaction": args.include,
+            "buffer_mapping": buffer_mapping,
+            "output_path": output_path,
+            "model_dir": model_dir,
+            "server_url": server_url,
+            "device": args.device,
+            "allow_local_fallback": True,
+        }
+        result = _nni_refine(bridge_input)
+        print_json(result)
+        return 0 if result["status"] != "error" else 2
     elif args.domain == "review" and args.action == "status":
         registry = FileRegistry(args.registry)
         if args.review_id:
@@ -539,6 +763,7 @@ def run(args: argparse.Namespace) -> int:
                 assignee=args.assignee,
                 include_statuses=statuses,
                 exclude_review_id=args.exclude_review_id,
+                claim_unassigned=args.claim_unassigned,
             )
         )
     elif args.domain == "review" and args.action == "start":
@@ -547,6 +772,19 @@ def run(args: argparse.Namespace) -> int:
         print_json(defer_review(args.registry, args.review_id, actor=args.actor, reason=args.reason))
     elif args.domain == "review" and args.action == "reactivate":
         print_json(reactivate_review(args.registry, args.review_id, actor=args.actor))
+    elif args.domain == "review" and args.action == "assign":
+        if args.clear_assignee and args.assignee:
+            raise SegPlatformError("use either --assignee or --clear-assignee, not both")
+        if not args.clear_assignee and not args.assignee:
+            raise SegPlatformError("review assign requires --assignee or --clear-assignee")
+        print_json(
+            assign_review(
+                args.registry,
+                args.review_id,
+                assignee=None if args.clear_assignee else args.assignee,
+                actor=args.actor,
+            )
+        )
     elif args.domain == "review" and args.action == "create-followup":
         print_json(
             create_followup_reviews(
@@ -593,6 +831,7 @@ def run(args: argparse.Namespace) -> int:
                 overwrite=args.overwrite,
                 merge=args.merge,
                 limit=args.limit,
+                claim_unassigned=args.claim_unassigned,
             )
         )
     elif args.domain == "label" and args.action == "register":

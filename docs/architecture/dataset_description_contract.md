@@ -18,7 +18,7 @@
 ```text
 外部数据集
 -> dataset_description.yaml
--> sp ingest from-description
+-> sp ingest plan
 -> case_package_request.v1
 -> sp package create-many
 ```
@@ -33,7 +33,7 @@
 | --- | --- | --- | --- |
 | L0：标准 DICOM | 有可靠 DICOM Study/Series 元数据 | `sp ingest scan` | 自动分组并生成草稿请求 |
 | L1：简单文件型图像 | NIfTI/MHD/MHA 图像文件规则简单，标签暂不导入 | `sp ingest scan` + 审阅 request | 图像进入 request，标签后补 |
-| L2：声明式数据集 | 图像、标签和 label map 可用正则或 CSV 明确描述 | `sp ingest from-description` | 生成带 `initial_labels` 的 request |
+| L2：声明式数据集 | 图像、标签和 label map 可用正则或 CSV 明确描述 | `sp ingest plan dataset_description.yaml ...` | 生成带 `initial_labels` 的 request |
 | L3：预整理脚本 | 原始结构混乱，但可以被整理成 L2 所需 CSV 或目录 | 自写短脚本输出 `dataset_description.yaml` 或 `images.csv/labels.csv` | 再走 L2 |
 | L4：专用 importer | 需要读取私有元数据、多个 sidecar、特殊压缩包或复杂规则 | 按[专用数据集 Importer 契约](custom_importer_contract.md)自写 adapter | 输出标准 request、summary 和 issues，再走 `package create-many` |
 | L5：人工隔离 | 无法确定图像-标签配对、器官语义或空间关系 | 不入库，写入问题清单 | 人工确认或放弃该批数据 |
@@ -190,7 +190,7 @@ L4 专用 importer 需要更严格的交付包，不只是一个临时脚本。�
 ## 5. 命令
 
 ```bash
-sp ingest from-description dataset_description.yaml package_requests/
+sp ingest plan dataset_description.yaml package_requests/
 sp package create-many package_requests/ dataset_package/ --registry registry/
 ```
 

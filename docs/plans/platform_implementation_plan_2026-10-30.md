@@ -334,7 +334,7 @@ python scripts/check_case_package.py packages/case_001
 
 # 已实现阶段 A DICOM 扫描、请求生成和批量病例包创建
 sp ingest scan /data/source --output reports/source_scan.json
-sp ingest build-requests reports/source_scan.json package_requests/ --organs liver spleen --import-batch batch_001
+sp ingest plan /data/source package_requests/ --organs-file target_organs.txt --import-batch batch_001 --workers 8
 sp package create-many package_requests/ dataset_package/ --registry registry/
 
 # 已实现：重建文件式 Registry 标签索引
