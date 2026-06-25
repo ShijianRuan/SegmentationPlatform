@@ -28,7 +28,7 @@
 .\scripts\windows\invoke_mimics_case.ps1 -Action ProbeEvaluate ... -OutputConfigPath ".\config\mimics_workstation.verified.yaml"
 
 # 安装 nnInteractive 环境（如需 AI 辅助标注，只需做一次，~5 GB）
-python scripts\setup_nninteractive_env.py --cuda cu124 --device cuda:0
+python scripts\setup_nninteractive_env.py --cuda cu124 --device auto
 ```
 
 ### 平台操作者：每批标注任务
@@ -105,7 +105,7 @@ D:\MyWork\
 5. 不确定时 `Labeling_Submit_or_Report_Issue` → Needs Review
 6. 数据/工具问题时 `Labeling_Submit_or_Report_Issue` → Report Problem
 7. 当前病例暂不处理时 `Labeling_Case_Navigation` → Skip Case
-8. AI 辅助：选中目标 Mask → `nnInteractive` → Point/Scribble/Box/Lasso → Finish
+8. AI 辅助：选中目标 Mask → `nnInteractive` → Add Points / Paint Scribble / Draw Box / Draw Lasso → Finish
 
 ### 平台操作者：回收和收尾
 
@@ -601,7 +601,17 @@ sp review export-worklist `
 | 建包中途失败后目录残留 | 重新运行 `sp package create`；无 `manifest.json` 的残留目录会被自动清理 |
 | 标注者误 Skip | 在 **Choose Case** 中重新打开该病例 |
 
-处理顺序是：先看终端退出码，再看 Case Package `reports/` 中的 JSON，最后看 Mimics `.log`。保留 `.mcs` 和工作目录，修正后重跑当前步骤。
+nnInteractive 不再弹出终端窗口。遇到 AI 分割失败时按以下顺序检查：
+
+1. Mimics Log Panel：确认失败发生在环境检查、服务启动、影像预处理还是预测；
+2. `nninteractive_env\models\logs\nninteractive_mimics.log`：查看 Mimics 选择的外部 Python、设备、fold 和等待时间；
+3. `nninteractive_env\models\logs\nninteractive_bridge.jsonl`：查看结构化阶段和 traceback；
+4. `nninteractive_env\models\logs\nninteractive_worker.stderr.log`：查看 worker 导入或通信错误；
+5. `nninteractive_env\models\.nninteractive_server.log`：查看 torch、模型权重、CUDA、端口和服务端错误。
+
+`ConnectionRefusedError [WinError 10061]` 不再作为正常的最终错误信息。若仍出现，优先确认工作包使用的是更新后的 `runtime_py35/nninteractive_mimics.py` 和 `nninteractive_bridge.py`，再检查上述日志。默认 `device: auto` 会在无 GPU 时使用 CPU；只有显式关闭 `allow_cpu_fallback` 才会阻断。
+
+普通标注流程故障的处理顺序仍是：先看命令退出码，再看 Case Package `reports/` 中的 JSON，最后看 Mimics `.log`。保留 `.mcs` 和工作目录，修正后重跑当前步骤。
 
 ## 12. 工作站验收清单
 

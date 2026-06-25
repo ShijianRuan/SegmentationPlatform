@@ -63,7 +63,7 @@ Mimics 内脚本不实现 Registry、标签生命周期、训练准入或医学�
 5. `runtime_py35/sp_save_checkpoint.py`：保存不依赖 `.mcs` 内部结构的 Mask 恢复快照。
 6. `runtime_py35/sp_submit_review.py`：组合选择目标组、提交前预检、批量处理空 Mask。
 7. `scripting_library/nnInteractive.py`：任意 Mimics 项目可用的独立 nnInteractive 入口。
-8. `runtime_py35/nninteractive_mimics.py` 与 `nninteractive_bridge.py`：提示采集和外部推理桥接，不读取平台任务数据。
+8. `runtime_py35/nninteractive_mimics.py` 与 `nninteractive_bridge.py`：采集批量正负点、Ellipse Scribble、Distance Measurement Box 和闭合 Spline Lasso，并调用外部推理；不读取平台任务数据。
 9. `probes/`：执行 P01、P02、P04、P05、P06。
 10. `src/segplatform/adapters/mimics/`：外部 `doctor/probe/prepare/prebuild/open/finalize` 和 buffer bridge。
 

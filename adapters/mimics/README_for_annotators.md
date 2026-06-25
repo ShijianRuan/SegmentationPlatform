@@ -88,8 +88,18 @@
 
 打开任一病例后，从 `Script -> Scripting Library -> nnInteractive` 启动 AI 工具：
 
+- 第一次提示可能需要加载模型和预处理当前影像；工具会提前在后台准备，后续提示会复用同一个会话；
+- 正常情况下不会出现黑色终端窗口；
+- Mimics 在单次预测期间可能暂时不能操作，这是 Mimics 21 同步脚本边界，不要反复点击或强制关闭；
+- 没有 NVIDIA GPU 时会自动改用 CPU，等待时间可能明显增加，但不会因为默认 `cuda:0` 直接失败；
+- 推理状态会写入 Mimics Log Panel。失败弹窗会给出日志路径，直接把该路径和错误阶段交给开发者，不需要标注者打开 JSON 排查；
+- 如果等待超过配置上限，工具会停止本次 worker，不会无限卡住；当前 Mask 会保留上一次成功结果。
+
 - 在 Project Tree 中选中要修正的 Mask，或让工具创建新的结果 Mask。
-- 通过 Point、Scribble、Box、Lasso 四种方式给 AI 提示。
+- **Add Points**：一次加入多个 Include/Exclude 点，绿色/红色临时标记帮助核对，可移除最后一个点后再统一预测。
+- **Paint Scribble**：选择 Include 或 Exclude 后，用 Ellipse Edit Mask 绘制提示区域。
+- **Draw Box**：用 Distance Measurement 两端点定义前景框。
+- **Draw Lasso**：用闭合 Spline 定义前景轮廓。
 - 每次提示后 AI 立即更新 Mask 结果。
 - Undo 撤销最后一个提示，Reset 回到初始状态。
 - Finish 结束，结果保留在 Mimics 中，可继续用标注工具手工修改后提交。

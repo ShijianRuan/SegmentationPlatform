@@ -11,31 +11,46 @@ native APIs and inference runs in an external Python 3.10+ environment.
 
 from __future__ import print_function
 
+import hashlib
 import json
+import logging
 import os
+import queue
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import uuid
 
 import mimics
 
 
 TITLE = "nnInteractive Segmentation"
-BUTTON_POINT = "Point"
-BUTTON_SCRIBBLE = "Scribble"
-BUTTON_BOX = "Box"
-BUTTON_LASSO = "Lasso"
+BUTTON_POINT = "Add Points"
+BUTTON_SCRIBBLE = "Paint Scribble"
+BUTTON_BOX = "Draw Box"
+BUTTON_LASSO = "Draw Lasso"
 BUTTON_UNDO = "Undo Last Prompt"
 BUTTON_RESET = "Reset To Start"
 BUTTON_FINISH = "Finish"
 BUTTON_FOREGROUND = "Foreground"
 BUTTON_BACKGROUND = "Background"
+BUTTON_INCLUDE_POINT = "Add Include Point"
+BUTTON_EXCLUDE_POINT = "Add Exclude Point"
+BUTTON_REMOVE_POINT = "Remove Last Point"
+BUTTON_RUN_POINTS = "Run Points"
+BUTTON_DISCARD_POINTS = "Discard Points"
 BUTTON_CREATE = "Create New Result Mask"
 BUTTON_CANCEL = "Cancel"
+BUTTON_DISCARD_SESSION = "Discard AI Session"
+BUTTON_RETRY = "Retry Prediction"
+BUTTON_START_CURRENT = "Start From Current Mask"
 
 PROMPT_MASK_PREFIX = "nnInteractive Prompt"
 DEFAULT_RESULT_NAME = "nnInteractive Result"
+ASYNC_JOB_METADATA = "nninteractive.async_job_path"
+_RUNTIME_PROBE_CACHE = {}
 
 
 def _find_root(start_dir, sentinel_files, max_depth=6):
@@ -126,20 +141,214 @@ def _first_existing_dir(candidates, description):
     raise RuntimeError("{0} not found. Checked:\n{1}".format(description, "\n".join(checked)))
 
 
+def _hidden_process_kwargs():
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    result = {"startupinfo": startupinfo}
+    if flags:
+        result["creationflags"] = flags
+    return result
+
+
+def _model_folds(model_dir):
+    result = []
+    for name in sorted(os.listdir(model_dir)):
+        checkpoint = os.path.join(model_dir, name, "checkpoint_final.pth")
+        if name.startswith("fold_") and os.path.isfile(checkpoint):
+            result.append(name[5:])
+    return result
+
+
+def _runtime_log_path(model_dir):
+    log_dir = os.path.join(os.path.dirname(model_dir), "logs")
+    if not os.path.isdir(log_dir):
+        os.makedirs(log_dir)
+    return os.path.join(log_dir, "nninteractive_mimics.log")
+
+
+def _append_runtime_log(path, event, details=None):
+    payload = {
+        "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "event": event,
+    }
+    if details:
+        payload.update(details)
+    with open(path, "a") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def _write_json_atomic(path, value):
+    parent = os.path.dirname(path)
+    if parent and not os.path.isdir(parent):
+        os.makedirs(parent)
+    temporary = path + "." + uuid.uuid4().hex + ".tmp"
+    with open(temporary, "w") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+    os.replace(temporary, path)
+
+
+def _read_json(path, default=None):
+    try:
+        return _load_json(path)
+    except (IOError, OSError, ValueError):
+        return default
+
+
+def _sha256_bytes(value):
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _object_id(obj):
+    return str(getattr(obj, "guid", "") or getattr(obj, "name", ""))
+
+
+def _metadata_get(obj, name, default=None):
+    try:
+        item = obj.metadata.find(name)
+        return item.value if item is not None else default
+    except Exception:
+        try:
+            return obj.metadata[name].value
+        except Exception:
+            return default
+
+
+def _metadata_set(obj, name, value):
+    text = "" if value is None else str(value)
+    item = None
+    try:
+        item = obj.metadata.find(name)
+    except Exception:
+        pass
+    if item is None:
+        obj.metadata.create(name=name, value=text)
+    else:
+        item.value = text
+
+
+def _metadata_delete(obj, name):
+    try:
+        obj.metadata.delete(name)
+        return
+    except Exception:
+        pass
+    try:
+        item = obj.metadata.find(name)
+        if item is not None:
+            item.value = ""
+    except Exception:
+        pass
+
+
+def _process_exists(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _mimics_log(level, message):
+    try:
+        mimics.logging.log_user_message(level=level, message=message)
+    except Exception:
+        pass
+
+
+def _probe_python(python_exe, timeout):
+    cache_key = (os.path.abspath(python_exe), int(timeout))
+    cached = _RUNTIME_PROBE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    probe = (
+        "import importlib.util,json,sys;"
+        "mods=['numpy','nibabel','torch','nnInteractive'];"
+        "missing=[m for m in mods if importlib.util.find_spec(m) is None];"
+        "print(json.dumps({"
+        "'python':sys.executable,"
+        "'version':list(sys.version_info[:3]),"
+        "'missing':missing"
+        "}))"
+    )
+    process = subprocess.Popen(
+        [python_exe, "-c", probe],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **_hidden_process_kwargs()
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise RuntimeError(
+            "Environment check timed out after {0}s for:\n{1}".format(timeout, python_exe)
+        )
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(
+            "The configured nnInteractive Python cannot import its required packages.\n"
+            "Python: {0}\n"
+            "Error: {1}".format(python_exe, detail or "unknown import failure")
+        )
+    try:
+        result = json.loads(stdout.decode("utf-8"))
+    except ValueError:
+        raise RuntimeError(
+            "The configured nnInteractive Python returned an invalid environment check result.\n"
+            "Python: {0}".format(python_exe)
+        )
+    version = result.get("version") or []
+    if version[:2] < [3, 10]:
+        raise RuntimeError(
+            "nnInteractive requires external Python 3.10 or newer.\n"
+            "Python: {0}\nVersion: {1}".format(
+                python_exe,
+                ".".join(str(value) for value in version),
+            )
+        )
+    if result.get("missing"):
+        raise RuntimeError(
+            "The configured nnInteractive Python is missing required packages: {0}\n"
+            "Python: {1}".format(
+                ", ".join(result["missing"]),
+                python_exe,
+            )
+        )
+    _RUNTIME_PROBE_CACHE[cache_key] = result
+    return result
+
+
 def _runtime_paths(config):
     root = _project_root()
     integration_root = _integration_root()
     environment_root = _environment_root()
-    python_exe = _first_existing_file(
-        [
-            os.environ.get("NNINTERACTIVE_PYTHON", ""),
-            config.get("python", ""),
-            os.path.join(environment_root, "python", "python.exe"),
-            os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
-            os.path.join(root, "nninteractive_env", "python", "python.exe"),
-        ],
-        "nnInteractive Python",
-    )
+    python_candidates = [
+        os.environ.get("NNINTERACTIVE_PYTHON", ""),
+        config.get("python", ""),
+        os.path.join(environment_root, "python", "python.exe"),
+        os.path.join(environment_root, "Scripts", "python.exe"),
+        os.path.join(root, "nninteractive_env", "Scripts", "python.exe"),
+        os.path.join(root, "nninteractive_env", "python", "python.exe"),
+    ]
+    python_exe = _first_existing_file(python_candidates, "nnInteractive Python")
     bridge_script = _first_existing_file(
         [
             os.environ.get("NNINTERACTIVE_BRIDGE", ""),
@@ -158,7 +367,20 @@ def _runtime_paths(config):
         ],
         "nnInteractive model directory",
     )
-    return python_exe, bridge_script, model_dir
+    folds = _model_folds(model_dir)
+    if not folds:
+        raise RuntimeError(
+            "The nnInteractive model directory has no usable checkpoint.\n"
+            "Expected fold_*/checkpoint_final.pth under:\n{0}".format(model_dir)
+        )
+    probe_timeout = int(
+        os.environ.get(
+            "NNINTERACTIVE_PROBE_TIMEOUT",
+            config.get("environment_probe_timeout_seconds", 180),
+        )
+    )
+    probe = _probe_python(python_exe, probe_timeout)
+    return python_exe, bridge_script, model_dir, probe, folds
 
 
 def _same_object(left, right):
@@ -279,6 +501,7 @@ def _export_image(image, path):
         "path": path,
         "shape": [int(value) for value in view.shape],
         "dtype": _buffer_dtype(view),
+        "sha256": _sha256_file(path),
     }
 
 
@@ -292,7 +515,12 @@ def _export_mask(mask, path):
         "shape": [int(value) for value in view.shape],
         "pixel_count": int(getattr(mask, "number_of_pixels", 0)),
         "byte_count": len(raw),
+        "sha256": _sha256_bytes(raw),
     }
+
+
+def _mask_sha256(mask):
+    return _sha256_bytes(mask.get_voxel_buffer().tobytes())
 
 
 def _set_mask_from_u8(mask, path, shape):
@@ -340,18 +568,225 @@ def _capture_point(image, include):
                 else "Click an area that must be excluded from the structure."
             ),
             show_message_box=True,
-            confirm=True,
+            confirm=False,
             title=TITLE,
         )
     except mimics.UserInterrupted:
         return None
     indexes = image.get_voxel_indexes(coordinates)
+    marker = None
+    try:
+        marker = mimics.analyze.create_point(
+            point=_point_coordinates(coordinates),
+            name="{0} {1} Point".format(
+                PROMPT_MASK_PREFIX,
+                "Include" if include else "Exclude",
+            ),
+            color=(0.1, 1.0, 0.2) if include else (1.0, 0.2, 0.1),
+        )
+    except Exception:
+        pass
     return {
-        "interaction_type": "point",
-        "include_interaction": bool(include),
         "point": [int(value) for value in indexes],
-        "coordinates": "mimics",
+        "include_interaction": bool(include),
+        "_marker": marker,
     }
+
+
+def _delete_point_marker(point):
+    marker = point.get("_marker")
+    if marker is None:
+        return
+    try:
+        mimics.data.points.delete(marker)
+    except Exception:
+        pass
+
+
+def _capture_point_set(image):
+    points = []
+    try:
+        while True:
+            include_count = len([point for point in points if point["include_interaction"]])
+            exclude_count = len(points) - include_count
+            run_button = "{0} ({1})".format(BUTTON_RUN_POINTS, len(points))
+            buttons = [BUTTON_INCLUDE_POINT, BUTTON_EXCLUDE_POINT]
+            if points:
+                buttons.append(BUTTON_REMOVE_POINT)
+                buttons.append(run_button)
+            buttons.append(BUTTON_DISCARD_POINTS)
+            answer = mimics.dialogs.question_box(
+                message=(
+                    "Add all points for the next prediction.\n\n"
+                    "Include points: {0}\n"
+                    "Exclude points: {1}\n\n"
+                    "Temporary green/red markers show the current point set."
+                ).format(include_count, exclude_count),
+                buttons=";".join(buttons),
+                title="Point Set",
+                ui_blocking=True,
+            )
+            if answer == BUTTON_INCLUDE_POINT:
+                point = _capture_point(image, True)
+                if point is not None:
+                    points.append(point)
+            elif answer == BUTTON_EXCLUDE_POINT:
+                point = _capture_point(image, False)
+                if point is not None:
+                    points.append(point)
+            elif answer == BUTTON_REMOVE_POINT and points:
+                _delete_point_marker(points.pop())
+            elif answer == run_button and points:
+                return {
+                    "interaction_type": "point_set",
+                    "points": [
+                        {
+                            "point": point["point"],
+                            "include_interaction": point["include_interaction"],
+                        }
+                        for point in points
+                    ],
+                    "coordinates": "mimics",
+                }
+            else:
+                return None
+    finally:
+        for point in points:
+            _delete_point_marker(point)
+
+
+def _voxel_points(image, geometry):
+    points = []
+    for point in geometry:
+        indexes = image.get_voxel_indexes(_point_coordinates(point))
+        current = [int(value) for value in indexes]
+        if not points or current != points[-1]:
+            points.append(current)
+    if len(points) > 1 and points[0] == points[-1]:
+        points.pop()
+    return points
+
+
+def _single_slice_axis(points):
+    if not points:
+        return None
+    ranges = [
+        max(point[axis] for point in points) - min(point[axis] for point in points)
+        for axis in range(3)
+    ]
+    constant_axes = [axis for axis, value in enumerate(ranges) if value == 0]
+    return constant_axes[0] if len(constant_axes) == 1 else None
+
+
+def _capture_box(image):
+    measurement = None
+    try:
+        measurement = mimics.measure.indicate_distance_measurement(
+            message=(
+                "Place the two endpoints on opposite corners of the structure.\n"
+                "The line is used only as the diagonal of a 2D foreground box."
+            ),
+            show_message_box=True,
+            confirm=True,
+            title="Foreground Box",
+        )
+        if measurement is None:
+            return None
+        points = _voxel_points(image, [measurement.point1, measurement.point2])
+        if len(points) != 2 or _single_slice_axis(points) is None:
+            mimics.dialogs.message_box(
+                "The two endpoints must define a non-degenerate box on one image slice.\n\n"
+                "Use a 2D view and place the points on opposite corners.",
+                title="Box Not Accepted",
+                ui_blocking=True,
+            )
+            return None
+        bbox = [
+            [min(points[0][axis], points[1][axis]), max(points[0][axis], points[1][axis]) + 1]
+            for axis in range(3)
+        ]
+        return {
+            "interaction_type": "box",
+            "include_interaction": True,
+            "bbox": bbox,
+            "coordinates": "mimics",
+        }
+    except mimics.UserInterrupted:
+        return None
+    finally:
+        if measurement is not None:
+            try:
+                mimics.data.distance_measurements.delete(measurement)
+            except Exception:
+                try:
+                    mimics.data.measurements.delete(measurement)
+                except Exception:
+                    pass
+
+
+def _capture_lasso(image):
+    spline = None
+    try:
+        spline = mimics.analyze.indicate_spline(
+            message=(
+                "Place control points around the structure and close the Spline before confirming.\n"
+                "The closed curve becomes a 2D foreground Lasso prompt."
+            ),
+            show_message_box=True,
+            confirm=True,
+            title="Foreground Lasso",
+        )
+        if spline is None:
+            return None
+        if not bool(getattr(spline, "closed", False)):
+            mimics.dialogs.message_box(
+                "The Spline is open. A Lasso prompt must be closed.\n\n"
+                "Run Draw Lasso again and close the curve before confirming.",
+                title="Lasso Not Accepted",
+                ui_blocking=True,
+            )
+            return None
+        points = _voxel_points(image, _spline_geometry(spline))
+        if len(set(tuple(point) for point in points)) < 3:
+            mimics.dialogs.message_box(
+                "The closed Spline contains fewer than three distinct voxel points.",
+                title="Lasso Not Accepted",
+                ui_blocking=True,
+            )
+            return None
+        if _single_slice_axis(points) is None:
+            mimics.dialogs.message_box(
+                "The Lasso must lie on one axis-aligned image slice.\n\n"
+                "Draw it in an axial, coronal, or sagittal 2D view.",
+                title="Lasso Not Accepted",
+                ui_blocking=True,
+            )
+            return None
+        return {
+            "interaction_type": "lasso",
+            "include_interaction": True,
+            "polyline_points": points,
+            "polyline_closed": True,
+            "coordinates": "mimics",
+        }
+    except mimics.UserInterrupted:
+        return None
+    finally:
+        if spline is not None:
+            try:
+                mimics.data.splines.delete(spline)
+            except Exception:
+                pass
+
+
+def _capture_scribble(image, include, temp_dir):
+    return _capture_mask_prompt(
+        image,
+        include,
+        "scribble",
+        "Ellipse",
+        temp_dir,
+    )
 
 
 def _point_coordinates(value):
@@ -367,50 +802,9 @@ def _spline_geometry(spline):
     if not geometry:
         raise RuntimeError(
             "Mimics returned a Spline without geometry_points or points. "
-            "The Scribble prompt cannot be converted to voxel coordinates."
+            "The Lasso prompt cannot be converted to voxel coordinates."
         )
     return list(geometry)
-
-
-def _capture_scribble(image, include):
-    spline = None
-    try:
-        spline = mimics.analyze.indicate_spline(
-            message=(
-                "Draw a foreground scribble through the structure."
-                if include
-                else "Draw a background scribble over an incorrect region."
-            ),
-            show_message_box=True,
-            confirm=True,
-            title=TITLE,
-        )
-        geometry = _spline_geometry(spline)
-        points = []
-        for point in geometry:
-            indexes = image.get_voxel_indexes(_point_coordinates(point))
-            current = [int(value) for value in indexes]
-            if not points or current != points[-1]:
-                points.append(current)
-        if len(points) < 2:
-            raise RuntimeError(
-                "The Scribble contains fewer than two distinct voxel points. "
-                "Draw a longer curve and try again."
-            )
-        return {
-            "interaction_type": "scribble",
-            "include_interaction": bool(include),
-            "polyline_points": points,
-            "coordinates": "mimics",
-        }
-    except mimics.UserInterrupted:
-        return None
-    finally:
-        if spline is not None:
-            try:
-                mimics.data.splines.delete(spline)
-            except Exception:
-                pass
 
 
 def _create_prompt_mask(image, include, interaction_type):
@@ -433,7 +827,7 @@ def _create_prompt_mask(image, include, interaction_type):
         raise
 
 
-def _capture_region_prompt(image, include, interaction_type, edit_type, temp_dir):
+def _capture_mask_prompt(image, include, interaction_type, edit_type, temp_dir):
     prompt_mask = _create_prompt_mask(image, include, interaction_type)
     try:
         mimics.segment.activate_edit_mask(prompt_mask, edit_type, "Draw")
@@ -454,14 +848,6 @@ def _capture_region_prompt(image, include, interaction_type, edit_type, temp_dir
                 [int(minimum[axis]), int(maximum[axis])]
                 for axis in range(3)
             ]
-            if interaction_type == "box":
-                return {
-                    "interaction_type": interaction_type,
-                    "include_interaction": bool(include),
-                    "bbox": bbox,
-                    "full_shape": full_shape,
-                    "coordinates": "mimics",
-                }
             crop = prompt[
                 bbox[0][0]:bbox[0][1],
                 bbox[1][0]:bbox[1][1],
@@ -509,18 +895,41 @@ def _capture_region_prompt(image, include, interaction_type, edit_type, temp_dir
 
 def _capture_prompt(kind, image, include, temp_dir):
     if kind == BUTTON_POINT:
-        return _capture_point(image, include)
+        return _capture_point_set(image)
     if kind == BUTTON_SCRIBBLE:
-        return _capture_scribble(image, include)
+        return _capture_scribble(image, include, temp_dir)
     if kind == BUTTON_BOX:
-        return _capture_region_prompt(image, include, "box", "Rectangle", temp_dir)
+        return _capture_box(image)
     if kind == BUTTON_LASSO:
-        return _capture_region_prompt(image, include, "lasso", "Lasso", temp_dir)
+        return _capture_lasso(image)
     raise RuntimeError("Unsupported prompt kind: {0}".format(kind))
 
 
-def _bridge_call(config, image_export, base_export, interactions, output_path):
-    python_exe, bridge_script, model_dir = _runtime_paths(config)
+def _bridge_parameters(config, image_export, base_export):
+    python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
+    runtime_log = _runtime_log_path(model_dir)
+    requested_device = os.environ.get(
+        "NNINTERACTIVE_DEVICE",
+        config.get("device", "auto"),
+    )
+    startup_timeout = int(
+        os.environ.get(
+            "NNINTERACTIVE_SERVER_STARTUP_TIMEOUT",
+            config.get("server_startup_timeout_seconds", 600),
+        )
+    )
+    prediction_timeout = int(
+        os.environ.get(
+            "NNINTERACTIVE_PREDICTION_TIMEOUT",
+            config.get("prediction_timeout_seconds", 1800),
+        )
+    )
+    set_image_timeout = int(
+        os.environ.get(
+            "NNINTERACTIVE_SET_IMAGE_TIMEOUT",
+            config.get("set_image_timeout_seconds", 1800),
+        )
+    )
     request = {
         "image_buffer_path": image_export["path"],
         "image_buffer_shape": image_export["shape"],
@@ -532,18 +941,19 @@ def _bridge_call(config, image_export, base_export, interactions, output_path):
         },
         "initial_seg_path": base_export["path"] if base_export["pixel_count"] > 0 else None,
         "initial_seg_shape": base_export["shape"],
-        "interactions": interactions,
-        "output_path": output_path,
         "model_dir": model_dir,
-        "device": os.environ.get(
-            "NNINTERACTIVE_DEVICE",
-            config.get("device", "cuda:0"),
-        ),
+        "device": requested_device,
+        "allow_cpu_fallback": bool(config.get("allow_cpu_fallback", True)),
+        "fold": config.get("fold", "auto"),
         "server_url": os.environ.get(
             "NNINTERACTIVE_SERVER_URL",
             config.get("server_url", "http://127.0.0.1:1527"),
         ),
         "auto_start_server": bool(config.get("auto_start_server", True)),
+        "server_startup_timeout_seconds": startup_timeout,
+        "prediction_timeout_seconds": prediction_timeout,
+        "set_image_timeout_seconds": set_image_timeout,
+        "log_dir": os.path.dirname(runtime_log),
         "server_idle_timeout_seconds": int(
             os.environ.get(
                 "NNINTERACTIVE_SERVER_IDLE_TIMEOUT",
@@ -551,12 +961,69 @@ def _bridge_call(config, image_export, base_export, interactions, output_path):
             )
         ),
     }
-    timeout = int(os.environ.get("NNINTERACTIVE_TIMEOUT", config.get("timeout_seconds", 300)))
+    configured_timeout = config.get("bridge_timeout_seconds", config.get("timeout_seconds"))
+    timeout = int(
+        os.environ.get(
+            "NNINTERACTIVE_TIMEOUT",
+            configured_timeout
+            if configured_timeout is not None
+            else startup_timeout + set_image_timeout + prediction_timeout + 120,
+        )
+    )
+    return {
+        "python_exe": python_exe,
+        "bridge_script": bridge_script,
+        "model_dir": model_dir,
+        "probe": probe,
+        "folds": folds,
+        "runtime_log": runtime_log,
+        "requested_device": requested_device,
+        "startup_timeout": startup_timeout,
+        "prediction_timeout": prediction_timeout,
+        "set_image_timeout": set_image_timeout,
+        "timeout": timeout,
+        "request": request,
+    }
+
+
+def _bridge_call(config, image_export, base_export, interactions, output_path):
+    parameters = _bridge_parameters(config, image_export, base_export)
+    python_exe = parameters["python_exe"]
+    bridge_script = parameters["bridge_script"]
+    runtime_log = parameters["runtime_log"]
+    requested_device = parameters["requested_device"]
+    probe = parameters["probe"]
+    folds = parameters["folds"]
+    timeout = parameters["timeout"]
+    request = dict(parameters["request"])
+    request["interactions"] = interactions
+    request["output_path"] = output_path
+    _append_runtime_log(
+        runtime_log,
+        "prediction_started",
+        {
+            "python": python_exe,
+            "python_version": probe.get("version"),
+            "cuda_available": probe.get("cuda_available"),
+            "requested_device": requested_device,
+            "folds": folds,
+            "bridge_timeout_seconds": timeout,
+        },
+    )
+    _mimics_log(
+        logging.INFO,
+        "nnInteractive inference started. Detailed log: {0}".format(runtime_log),
+    )
+    try:
+        mimics.view.show_log_panel()
+    except Exception:
+        pass
     process = subprocess.Popen(
         [python_exe, bridge_script],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        **_hidden_process_kwargs()
     )
     try:
         stdout, stderr = process.communicate(
@@ -565,26 +1032,288 @@ def _bridge_call(config, image_export, base_export, interactions, output_path):
         )
     except subprocess.TimeoutExpired:
         process.kill()
-        process.communicate()
-        raise RuntimeError("nnInteractive timed out after {0} seconds".format(timeout))
-    if process.returncode != 0:
+        stdout, stderr = process.communicate()
+        _append_runtime_log(
+            runtime_log,
+            "prediction_timed_out",
+            {
+                "timeout_seconds": timeout,
+                "stderr": stderr.decode("utf-8", "replace") if stderr else "",
+            },
+        )
         raise RuntimeError(
-            "nnInteractive bridge failed:\n{0}".format(
-                stderr.decode("utf-8", "replace") if stderr else ""
+            "nnInteractive did not finish within {0} seconds.\n"
+            "The process was stopped. Check:\n{1}".format(timeout, runtime_log)
+        )
+    if process.returncode != 0:
+        stderr_text = stderr.decode("utf-8", "replace") if stderr else ""
+        stdout_text = stdout.decode("utf-8", "replace") if stdout else ""
+        _append_runtime_log(
+            runtime_log,
+            "bridge_process_failed",
+            {
+                "returncode": process.returncode,
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+            },
+        )
+        try:
+            result = json.loads(stdout_text)
+        except ValueError:
+            result = {}
+        raise RuntimeError(
+            "nnInteractive failed during {0}.\n\n{1}\n\nLogs:\n{2}\n{3}".format(
+                result.get("stage", "bridge startup or inference"),
+                result.get("error") or stderr_text or "No diagnostic text was returned.",
+                result.get("bridge_log", runtime_log),
+                result.get("server_log", ""),
             )
         )
     try:
         result = json.loads(stdout.decode("utf-8"))
     except ValueError:
-        raise RuntimeError("nnInteractive bridge returned invalid JSON")
+        _append_runtime_log(
+            runtime_log,
+            "invalid_bridge_response",
+            {"stdout": stdout.decode("utf-8", "replace")},
+        )
+        raise RuntimeError(
+            "nnInteractive bridge returned invalid JSON.\nCheck:\n{0}".format(runtime_log)
+        )
     if result.get("status") == "error":
-        raise RuntimeError(result.get("error", "Unknown nnInteractive error"))
+        raise RuntimeError(
+            "nnInteractive failed during {0}.\n\n{1}\n\nLogs:\n{2}\n{3}".format(
+                result.get("stage", "inference"),
+                result.get("error", "Unknown nnInteractive error"),
+                result.get("bridge_log", runtime_log),
+                result.get("server_log", ""),
+            )
+        )
+    _append_runtime_log(
+        runtime_log,
+        "prediction_completed",
+        {
+            "elapsed_seconds": result.get("elapsed_seconds"),
+            "device": result.get("device"),
+            "device_warning": result.get("device_warning"),
+            "server_url": result.get("server_url"),
+            "first_call": result.get("first_call"),
+        },
+    )
+    if result.get("device_warning"):
+        _mimics_log(logging.WARNING, str(result["device_warning"]))
+    _mimics_log(
+        logging.INFO,
+        "nnInteractive inference completed in {0}s on {1}.".format(
+            result.get("elapsed_seconds", "?"),
+            result.get("device", requested_device),
+        ),
+    )
     return result
 
 
-def _run_prediction(config, image_export, base_export, target, interactions, temp_dir):
+class _BridgeWorker(object):
+    """Persistent external bridge process for one Mimics interaction session."""
+
+    def __init__(self, config, image_export, base_export):
+        self.parameters = _bridge_parameters(config, image_export, base_export)
+        self.runtime_log = self.parameters["runtime_log"]
+        self.stderr_path = os.path.join(
+            os.path.dirname(self.runtime_log),
+            "nninteractive_worker.stderr.log",
+        )
+        self.stderr_handle = open(self.stderr_path, "ab")
+        self.process = subprocess.Popen(
+            [
+                self.parameters["python_exe"],
+                self.parameters["bridge_script"],
+                "--worker",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.stderr_handle,
+            **_hidden_process_kwargs()
+        )
+        self.ready = False
+        initialize = dict(self.parameters["request"])
+        initialize["action"] = "initialize"
+        self._write(initialize)
+        _append_runtime_log(
+            self.runtime_log,
+            "worker_started",
+            {
+                "pid": self.process.pid,
+                "python": self.parameters["python_exe"],
+                "stderr_log": self.stderr_path,
+            },
+        )
+
+    def _write(self, request):
+        if self.process.poll() is not None:
+            raise RuntimeError(
+                "nnInteractive worker exited before accepting a request.\n"
+                "Check:\n{0}\n{1}".format(self.runtime_log, self.stderr_path)
+            )
+        self.process.stdin.write(
+            json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+        )
+        self.process.stdin.flush()
+
+    def _readline(self, timeout):
+        result_queue = queue.Queue()
+
+        def read_response():
+            try:
+                result_queue.put((self.process.stdout.readline(), None))
+            except Exception as error:
+                result_queue.put((b"", error))
+
+        thread = threading.Thread(target=read_response)
+        thread.daemon = True
+        thread.start()
+        try:
+            line, error = result_queue.get(timeout=timeout)
+        except queue.Empty:
+            self.process.kill()
+            raise RuntimeError(
+                "nnInteractive worker did not respond within {0} seconds.\n"
+                "Check:\n{1}\n{2}".format(timeout, self.runtime_log, self.stderr_path)
+            )
+        if error is not None:
+            raise RuntimeError(
+                "Could not read the nnInteractive worker response: {0}".format(error)
+            )
+        if not line:
+            raise RuntimeError(
+                "nnInteractive worker stopped without returning a result.\n"
+                "Check:\n{0}\n{1}".format(self.runtime_log, self.stderr_path)
+            )
+        try:
+            return json.loads(line.decode("utf-8"))
+        except ValueError:
+            raise RuntimeError(
+                "nnInteractive worker returned invalid JSON.\n"
+                "Response: {0}\nCheck:\n{1}".format(
+                    line.decode("utf-8", "replace"),
+                    self.stderr_path,
+                )
+            )
+
+    def _raise_result_error(self, result):
+        raise RuntimeError(
+            "nnInteractive failed during {0}.\n\n{1}\n\nLogs:\n{2}\n{3}\n{4}".format(
+                result.get("stage", "worker request"),
+                result.get("error", "Unknown nnInteractive error"),
+                result.get("bridge_log", self.runtime_log),
+                result.get("server_log", ""),
+                self.stderr_path,
+            )
+        )
+
+    def ensure_ready(self):
+        if self.ready:
+            return
+        timeout = (
+            self.parameters["startup_timeout"]
+            + self.parameters["set_image_timeout"]
+            + 300
+        )
+        result = self._readline(timeout)
+        if result.get("status") == "error":
+            self._raise_result_error(result)
+        if result.get("status") != "ready":
+            raise RuntimeError(
+                "nnInteractive worker did not initialize correctly: {0}".format(result)
+            )
+        self.ready = True
+        _append_runtime_log(
+            self.runtime_log,
+            "worker_ready",
+            {
+                "device": result.get("device"),
+                "device_warning": result.get("device_warning"),
+                "server_url": result.get("server_url"),
+                "first_call": result.get("first_call"),
+            },
+        )
+        if result.get("device_warning"):
+            _mimics_log(logging.WARNING, str(result["device_warning"]))
+
+    def predict(self, interactions, output_path):
+        self.ensure_ready()
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive prediction is running. Detailed log: {0}".format(
+                self.runtime_log
+            ),
+        )
+        self._write(
+            {
+                "action": "predict",
+                "interactions": interactions,
+                "output_path": output_path,
+            }
+        )
+        result = self._readline(self.parameters["prediction_timeout"] + 120)
+        if result.get("status") == "error":
+            self._raise_result_error(result)
+        _append_runtime_log(
+            self.runtime_log,
+            "prediction_completed",
+            {
+                "elapsed_seconds": result.get("elapsed_seconds"),
+                "device": result.get("device"),
+                "server_url": result.get("server_url"),
+            },
+        )
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive prediction completed in {0}s.".format(
+                result.get("elapsed_seconds", "?")
+            ),
+        )
+        return result
+
+    def close(self):
+        process = getattr(self, "process", None)
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                if self.ready:
+                    try:
+                        self._write({"action": "close"})
+                        self._readline(15)
+                    except Exception:
+                        process.kill()
+                else:
+                    process.kill()
+            try:
+                process.wait(timeout=10)
+            except Exception:
+                process.kill()
+        finally:
+            try:
+                self.stderr_handle.close()
+            except Exception:
+                pass
+            self.process = None
+
+
+def _run_prediction(
+    config,
+    image_export,
+    base_export,
+    target,
+    interactions,
+    temp_dir,
+    worker=None,
+):
     output_path = os.path.join(temp_dir, "prediction.u8")
-    result = _bridge_call(config, image_export, base_export, interactions, output_path)
+    if worker is not None:
+        result = worker.predict(interactions, output_path)
+    else:
+        result = _bridge_call(config, image_export, base_export, interactions, output_path)
     status = result.get("status")
     if status == "skipped":
         # No actionable interaction (e.g. all-empty prompts on undo replay): roll
@@ -597,6 +1326,450 @@ def _run_prediction(config, image_export, base_export, target, interactions, tem
         )
     _set_mask_from_u8(target, output_path, base_export["shape"])
     return result
+
+
+def _async_job_state_path(job_dir):
+    return os.path.join(job_dir, "job.json")
+
+
+def _async_worker_status(job_dir):
+    return _read_json(os.path.join(job_dir, "worker_status.json"), {}) or {}
+
+
+def _load_async_job(target):
+    job_dir = _metadata_get(target, ASYNC_JOB_METADATA, "")
+    if not job_dir:
+        return None
+    state = _read_json(_async_job_state_path(job_dir))
+    if not state:
+        _metadata_delete(target, ASYNC_JOB_METADATA)
+        return None
+    state["_job_dir"] = job_dir
+    return state
+
+
+def _save_async_job(state):
+    _write_json_atomic(_async_job_state_path(state["_job_dir"]), dict(
+        (key, value) for key, value in state.items() if not key.startswith("_")
+    ))
+
+
+def _close_async_job(target, state, reason):
+    if state:
+        job_dir = state["_job_dir"]
+        _write_json_atomic(
+            os.path.join(job_dir, "close.json"),
+            {
+                "reason": reason,
+                "requested_at_epoch": time.time(),
+            },
+        )
+        state["status"] = "closing"
+        state["closed_reason"] = reason
+        state["updated_at_epoch"] = time.time()
+        _save_async_job(state)
+    _metadata_delete(target, ASYNC_JOB_METADATA)
+
+
+def _cleanup_async_jobs(root, retention_days):
+    if not os.path.isdir(root):
+        return
+    cutoff = time.time() - max(1, int(retention_days)) * 86400
+    for name in os.listdir(root):
+        job_dir = os.path.join(root, name)
+        if not os.path.isdir(job_dir):
+            continue
+        state = _read_json(_async_job_state_path(job_dir), {}) or {}
+        status = state.get("status")
+        updated = float(state.get("updated_at_epoch", 0))
+        worker_status = _async_worker_status(job_dir).get("status")
+        terminal = status in (
+            "closed",
+            "closing",
+            "discarded",
+            "failed",
+            "expired",
+        ) or worker_status in ("closed", "failed", "expired")
+        if terminal and updated < cutoff:
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+
+def _start_async_job(config, image, target):
+    python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
+    jobs_root = os.path.join(os.path.dirname(model_dir), "async_jobs")
+    if not os.path.isdir(jobs_root):
+        os.makedirs(jobs_root)
+    _cleanup_async_jobs(jobs_root, config.get("async_job_retention_days", 7))
+
+    job_id = "job_" + time.strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:10]
+    job_dir = os.path.join(jobs_root, job_id)
+    inputs_dir = os.path.join(job_dir, "inputs")
+    for path in (
+        inputs_dir,
+        os.path.join(job_dir, "commands"),
+        os.path.join(job_dir, "results"),
+        os.path.join(job_dir, "prompts"),
+    ):
+        os.makedirs(path)
+
+    image_export = _export_image(image, os.path.join(inputs_dir, "image.raw"))
+    base_export = _export_mask(target, os.path.join(inputs_dir, "target_at_start.u8"))
+    if image_export["shape"] != base_export["shape"]:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise RuntimeError(
+            "Image and target Mask buffer shapes differ: {0} vs {1}".format(
+                image_export["shape"],
+                base_export["shape"],
+            )
+        )
+
+    parameters = _bridge_parameters(config, image_export, base_export)
+    initialize = dict(parameters["request"])
+    initialize["async_worker_idle_timeout_seconds"] = int(
+        config.get("async_worker_idle_timeout_seconds", 1800)
+    )
+    initialize["async_poll_seconds"] = float(config.get("async_poll_seconds", 0.5))
+    _write_json_atomic(os.path.join(job_dir, "initialize.json"), initialize)
+
+    state = {
+        "_job_dir": job_dir,
+        "schema_version": "nninteractive_async_job.v1",
+        "job_id": job_id,
+        "status": "initializing",
+        "image_guid": _object_id(image),
+        "image_name": str(getattr(image, "name", "")),
+        "target_guid": _object_id(target),
+        "target_name": str(getattr(target, "name", "")),
+        "shape": base_export["shape"],
+        "base_path": base_export["path"],
+        "base_sha256": base_export["sha256"],
+        "expected_target_sha256": base_export["sha256"],
+        "interactions": [],
+        "next_sequence": 1,
+        "pending_sequence": None,
+        "applied_sequence": 0,
+        "created_at_epoch": time.time(),
+        "updated_at_epoch": time.time(),
+        "python": python_exe,
+        "python_version": probe.get("version"),
+        "folds": folds,
+        "runtime_log": parameters["runtime_log"],
+    }
+    _save_async_job(state)
+
+    worker_log_path = os.path.join(job_dir, "async_worker.log")
+    worker_log = open(worker_log_path, "ab")
+    try:
+        process = subprocess.Popen(
+            [python_exe, bridge_script, "--async-worker", job_dir],
+            stdin=subprocess.DEVNULL,
+            stdout=worker_log,
+            stderr=subprocess.STDOUT,
+            **_hidden_process_kwargs()
+        )
+    finally:
+        worker_log.close()
+    state["pid"] = process.pid
+    state["worker_log"] = worker_log_path
+    state["updated_at_epoch"] = time.time()
+    _save_async_job(state)
+    _metadata_set(target, ASYNC_JOB_METADATA, job_dir)
+    _append_runtime_log(
+        parameters["runtime_log"],
+        "async_job_started",
+        {
+            "job_id": job_id,
+            "job_dir": job_dir,
+            "pid": process.pid,
+            "target_guid": state["target_guid"],
+        },
+    )
+    return state
+
+
+def _persist_interaction(job_dir, interaction):
+    result = dict(interaction)
+    mask_path = result.get("mask_path")
+    if mask_path:
+        suffix = os.path.splitext(mask_path)[1] or ".u8"
+        target_path = os.path.join(
+            job_dir,
+            "prompts",
+            "prompt_" + uuid.uuid4().hex + suffix,
+        )
+        shutil.copy2(mask_path, target_path)
+        result["mask_path"] = target_path
+    return result
+
+
+def _enqueue_async_prediction(state, target):
+    sequence = int(state.get("next_sequence", 1))
+    expected_hash = _mask_sha256(target)
+    command = {
+        "schema_version": "nninteractive_async_command.v1",
+        "command_id": uuid.uuid4().hex,
+        "sequence": sequence,
+        "created_at_epoch": time.time(),
+        "expected_target_sha256": expected_hash,
+        "interactions": state.get("interactions", []),
+    }
+    state["pending_sequence"] = sequence
+    state["next_sequence"] = sequence + 1
+    state["expected_target_sha256"] = expected_hash
+    state["status"] = "queued"
+    state["updated_at_epoch"] = time.time()
+    _save_async_job(state)
+    command_path = os.path.join(
+        state["_job_dir"],
+        "commands",
+        "command_{0:06d}.json".format(sequence),
+    )
+    _write_json_atomic(command_path, command)
+    return sequence
+
+
+def _async_result_path(state, sequence):
+    return os.path.join(
+        state["_job_dir"],
+        "results",
+        "result_{0:06d}.json".format(int(sequence)),
+    )
+
+
+def _show_async_running(target, state):
+    worker = _async_worker_status(state["_job_dir"])
+    stage = worker.get("stage", worker.get("status", state.get("status", "running")))
+    answer = mimics.dialogs.question_box(
+        message=(
+            "nnInteractive is still running in the background.\n\n"
+            "Stage: {0}\n"
+            "You can continue using Mimics.\n\n"
+            "Run nnInteractive again later to apply the result."
+        ).format(stage),
+        buttons="Keep Running;" + BUTTON_DISCARD_SESSION,
+        title="nnInteractive Running",
+        ui_blocking=True,
+    )
+    if answer == BUTTON_DISCARD_SESSION:
+        _close_async_job(target, state, "user_cancelled_running_job")
+        return "restart"
+    return "waiting"
+
+
+def _handle_async_result(image, target, state):
+    sequence = state.get("pending_sequence")
+    if sequence is None:
+        return "ready"
+    result_path = _async_result_path(state, sequence)
+    if not os.path.isfile(result_path):
+        worker = _async_worker_status(state["_job_dir"])
+        worker_status = worker.get("status")
+        if worker_status in ("failed", "expired", "closed") or (
+            state.get("pid") and not _process_exists(state.get("pid"))
+        ):
+            answer = mimics.dialogs.question_box(
+                message=(
+                    "The nnInteractive background worker stopped before producing a result.\n\n"
+                    "Stage: {0}\nError: {1}\n\n"
+                    "Start a new AI session from the current Mask?"
+                ).format(
+                    worker.get("stage", worker_status or "unknown"),
+                    worker.get("error", "No result file was produced."),
+                ),
+                buttons=BUTTON_START_CURRENT + ";" + BUTTON_CANCEL,
+                title="nnInteractive Worker Stopped",
+                ui_blocking=True,
+            )
+            if answer == BUTTON_START_CURRENT:
+                _close_async_job(target, state, "worker_stopped")
+                return "restart"
+            return "waiting"
+        return _show_async_running(target, state)
+
+    result = _read_json(result_path, {}) or {}
+    if result.get("status") == "error":
+        answer = mimics.dialogs.question_box(
+            message=(
+                "The background prediction failed.\n\n"
+                "Stage: {0}\n"
+                "Error: {1}\n\n"
+                "Retry keeps the same prompts. Discard starts a new AI session "
+                "from the current Mask."
+            ).format(
+                result.get("stage", "prediction"),
+                result.get("error", "Unknown error"),
+            ),
+            buttons=BUTTON_RETRY + ";" + BUTTON_DISCARD_SESSION + ";" + BUTTON_CANCEL,
+            title="nnInteractive Failed",
+            ui_blocking=True,
+        )
+        if answer == BUTTON_RETRY:
+            state["pending_sequence"] = None
+            _enqueue_async_prediction(state, target)
+            _show_async_running(target, state)
+            return "waiting"
+        if answer == BUTTON_DISCARD_SESSION:
+            _close_async_job(target, state, "prediction_failed_discarded")
+            return "restart"
+        return "waiting"
+
+    if result.get("status") != "refined":
+        raise RuntimeError(
+            "nnInteractive returned an unexpected result status: {0}".format(
+                result.get("status")
+            )
+        )
+    if _object_id(image) != state.get("image_guid") or _object_id(target) != state.get(
+        "target_guid"
+    ):
+        raise RuntimeError(
+            "The active image or target Mask no longer matches the background job. "
+            "The result was not applied."
+        )
+    current_hash = _mask_sha256(target)
+    expected_hash = result.get("expected_target_sha256")
+    if current_hash != expected_hash:
+        answer = mimics.dialogs.question_box(
+            message=(
+                "The target Mask changed while nnInteractive was running.\n\n"
+                "The background result is now stale and will not be applied. "
+                "Start a new AI session from the current Mask?"
+            ),
+            buttons=BUTTON_START_CURRENT + ";" + BUTTON_CANCEL,
+            title="nnInteractive Result Is Stale",
+            ui_blocking=True,
+        )
+        if answer == BUTTON_START_CURRENT:
+            _close_async_job(target, state, "target_changed")
+            return "restart"
+        return "waiting"
+
+    output_path = result.get("output_path")
+    if not output_path or not os.path.isfile(output_path):
+        raise RuntimeError(
+            "nnInteractive completed but the prediction buffer is missing:\n{0}".format(
+                output_path
+            )
+        )
+    _set_mask_from_u8(target, output_path, state["shape"])
+    state["pending_sequence"] = None
+    state["applied_sequence"] = int(sequence)
+    state["expected_target_sha256"] = _sha256_file(output_path)
+    state["status"] = "ready"
+    state["updated_at_epoch"] = time.time()
+    _save_async_job(state)
+    _mimics_log(
+        logging.INFO,
+        "nnInteractive result applied to Mask {0}.".format(
+            getattr(target, "name", "")
+        ),
+    )
+    return "applied"
+
+
+def _async_prompt_menu(target, state):
+    count = len(state.get("interactions", [])) if state else 0
+    buttons = [
+        BUTTON_POINT,
+        BUTTON_SCRIBBLE,
+        BUTTON_BOX,
+        BUTTON_LASSO,
+    ]
+    if state and state.get("interactions"):
+        buttons.extend([BUTTON_UNDO, BUTTON_RESET])
+    buttons.append(BUTTON_FINISH)
+    return mimics.dialogs.question_box(
+        message=(
+            "Target Mask: {0}\n"
+            "Prompts in this AI session: {1}\n\n"
+            "Submitting a prompt starts background inference and immediately "
+            "returns control to Mimics. Run nnInteractive again to apply the result."
+        ).format(getattr(target, "name", ""), count),
+        buttons=";".join(buttons),
+        title=TITLE,
+        ui_blocking=True,
+    )
+
+
+def _run_async(image, target, config):
+    state = _load_async_job(target)
+    if state is not None:
+        if _object_id(image) != state.get("image_guid") or _object_id(target) != state.get(
+            "target_guid"
+        ):
+            _close_async_job(target, state, "object_identity_changed")
+            state = None
+        else:
+            outcome = _handle_async_result(image, target, state)
+            if outcome == "waiting":
+                return 0
+            if outcome == "restart":
+                state = None
+
+    if state is not None:
+        current_hash = _mask_sha256(target)
+        if current_hash != state.get("expected_target_sha256"):
+            _close_async_job(target, state, "manual_mask_change")
+            state = None
+
+    temp_dir = tempfile.mkdtemp(prefix="mimics_nninteractive_prompt_")
+    try:
+        action = _async_prompt_menu(target, state)
+        if action == BUTTON_FINISH or not action:
+            if state is not None:
+                _close_async_job(target, state, "user_finished")
+            return 0
+        if action == BUTTON_UNDO and state is not None:
+            interactions = state.get("interactions", [])
+            if interactions:
+                interactions.pop()
+            state["interactions"] = interactions
+            if interactions:
+                _enqueue_async_prediction(state, target)
+                _show_async_running(target, state)
+            else:
+                _restore_base(target, state["base_path"], state["shape"])
+                state["expected_target_sha256"] = state["base_sha256"]
+                state["pending_sequence"] = None
+                state["status"] = "ready"
+                _save_async_job(state)
+            return 0
+        if action == BUTTON_RESET and state is not None:
+            state["interactions"] = []
+            state["pending_sequence"] = None
+            state["status"] = "ready"
+            _restore_base(target, state["base_path"], state["shape"])
+            state["expected_target_sha256"] = state["base_sha256"]
+            _save_async_job(state)
+            return 0
+
+        include = None
+        if action == BUTTON_SCRIBBLE:
+            include = _choose_sign()
+            if include is None:
+                return 0
+        prompt = _capture_prompt(action, image, include, temp_dir)
+        if prompt is None:
+            return 0
+        if state is None:
+            state = _start_async_job(config, image, target)
+        prompt = _persist_interaction(state["_job_dir"], prompt)
+        state.setdefault("interactions", []).append(prompt)
+        sequence = _enqueue_async_prediction(state, target)
+        mimics.dialogs.message_box(
+            (
+                "Background inference started.\n\n"
+                "Prompt: {0}\n"
+                "Job sequence: {1}\n\n"
+                "You can continue using Mimics. Run nnInteractive again to "
+                "check and apply the result."
+            ).format(action, sequence),
+            title="nnInteractive Running",
+            ui_blocking=False,
+        )
+        return 0
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _prompt_menu(target, interaction_count):
@@ -622,15 +1795,9 @@ def _prompt_menu(target, interaction_count):
     )
 
 
-def run():
-    image = mimics.data.images.get_active()
-    if image is None:
-        raise RuntimeError("Open a project and activate an image set before running nnInteractive.")
-    target = _select_target_mask(image)
-    if target is None:
-        return 0
-
+def _run_sync(image, target, config):
     temp_dir = tempfile.mkdtemp(prefix="mimics_nninteractive_")
+    worker = None
     try:
         image_export = _export_image(image, os.path.join(temp_dir, "image.raw"))
         base_export = _export_mask(target, os.path.join(temp_dir, "target_at_start.u8"))
@@ -642,7 +1809,16 @@ def run():
             )
 
         interactions = []
-        config = _config()
+        if bool(config.get("reuse_session", True)):
+            worker = _BridgeWorker(config, image_export, base_export)
+            try:
+                mimics.view.show_log_panel()
+            except Exception:
+                pass
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive is preparing the AI session while prompts are collected.",
+            )
         while True:
             action = _prompt_menu(target, len(interactions))
             if action == BUTTON_FINISH or not action:
@@ -664,6 +1840,7 @@ def run():
                             target,
                             interactions,
                             temp_dir,
+                            worker,
                         )
                     except Exception:
                         _restore_base(target, base_export["path"], base_export["shape"])
@@ -672,9 +1849,11 @@ def run():
                     _restore_base(target, base_export["path"], base_export["shape"])
                 continue
 
-            include = _choose_sign()
-            if include is None:
-                continue
+            include = None
+            if action == BUTTON_SCRIBBLE:
+                include = _choose_sign()
+                if include is None:
+                    continue
             prompt = _capture_prompt(action, image, include, temp_dir)
             if prompt is None:
                 continue
@@ -687,12 +1866,28 @@ def run():
                     target,
                     interactions,
                     temp_dir,
+                    worker,
                 )
             except Exception:
                 interactions.pop()
                 raise
     finally:
+        if worker is not None:
+            worker.close()
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def run():
+    image = mimics.data.images.get_active()
+    if image is None:
+        raise RuntimeError("Open a project and activate an image set before running nnInteractive.")
+    target = _select_target_mask(image)
+    if target is None:
+        return 0
+    config = _config()
+    if str(config.get("execution_mode", "async")).lower() == "async":
+        return _run_async(image, target, config)
+    return _run_sync(image, target, config)
 
 
 def main():
