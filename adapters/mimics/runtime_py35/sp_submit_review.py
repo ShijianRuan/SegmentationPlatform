@@ -6,6 +6,8 @@ from __future__ import print_function
 import os
 import shutil
 import sys
+import time
+import uuid
 
 import mimics
 
@@ -34,6 +36,10 @@ ACTION_BY_BUTTON = {
     BUTTON_PROBLEM: "report_blocked",
     BUTTON_CANCEL: "cancel",
 }
+
+
+def utc_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 ALLOWED_ACTIONS = set(["submit_complete", "submit_for_review", "report_blocked", "cancel"])
 
 BUTTON_USE_SELECTED = "Use Selected"
@@ -481,7 +487,10 @@ def main(action_override=None):
 
     submission = {
         "schema_version": "review_submission.v1",
+        "submission_id": "submission_" + uuid.uuid4().hex,
         "review_id": runtime["review_id"],
+        "worklist_id": runtime.get("worklist_id"),
+        "submitted_at": utc_now(),
         "target_ids": target_ids,
         "action": action,
         "assignee": runtime.get("assignee"),

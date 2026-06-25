@@ -168,7 +168,11 @@ def finalize_case(
         submission,
         target_ids,
         targets,
-        expected_assignee=review_record.get("assignee") if "assignee" in review_record else manifest["review"].get("assignee"),
+        expected_assignee=(
+            review_record.get("assignee")
+            if review_record.get("enforce_assignee", False)
+            else None
+        ),
     )
     if identity_findings:
         _mark_qc_failed(review_record, target_ids, submission.get("assignee"))
@@ -306,6 +310,11 @@ def finalize_case(
         }
         if target.get("base_label_id"):
             base_record = registry.get("labels", target["base_label_id"])
+            if base_record.get("artifact_lifecycle") != "active":
+                raise ValidationError(
+                    f"base label {target['base_label_id']} is {base_record.get('artifact_lifecycle')!r}; "
+                    "cannot derive a new label from a superseded base"
+                )
             usage_constraints = base_record.get("usage_constraints", usage_constraints)
             for base_segment in base_record["segments"]:
                 generators_by_organ[base_segment["organ"]] = list(

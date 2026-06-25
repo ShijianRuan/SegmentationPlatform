@@ -178,7 +178,7 @@ dataset_package/
 4. 每个目标组有唯一 `target_id`，并引用已存在的 `image_id`。
 5. 目标组的 `organs` 不能为空。
 6. `base_label_id` 和 `base_label_sha256` 要么同时存在，要么同时省略。
-7. `assignee` 第一阶段可选。若为空，任务可由工作站通过 `--claim-unassigned` 领取；改派只更新 Registry Review Task，不要求重建病例包。
+7. `assignee` 第一阶段可选，只用于中央协调和工作包筛选。标注端不查询或修改 Registry；中央改派只影响后续导出，不会远程改写已经发出的工作包。
 8. 不同目标组的标签分别绑定自己的图像空间，不能假设多个序列已配准。
 9. `target_id` 是最小提交单位；组内器官一起完成或一起进入复查。
    `known_absent` 只是兼容字段，仅在数据来源已有明确事实时使用，例如外部结构化记录已说明某器官不存在。
@@ -301,7 +301,9 @@ provenance/tool_export.json
 ```json
 {
   "schema_version": "review_submission.v1",
+  "submission_id": "submission_6d5c...",
   "review_id": "review_case001_001",
+  "submitted_at": "2026-06-24T10:30:00Z",
   "target_ids": ["target_noncontrast_abdomen"],
   "action": "submit_complete",
   "assignee": "annotator_03",
@@ -322,6 +324,8 @@ provenance/tool_export.json
 ```
 
 `organ_outcomes` 允许 `present`、`confirmed_absent` 和 `uncertain`。`submit_complete` 不能包含 `uncertain`；空 Mask 只有明确声明 `confirmed_absent` 才能作为完成结果。
+
+`submission_id` 和 `submitted_at` 均由 Mimics 提交脚本自动写入。Console 使用不可重复的 `submission_id` 区分上一版提交和新提交，因此即使重新打开与提交发生在同一秒，也不会把正在修订的病例错误恢复成旧的 `submitted` 状态；标注者不需要填写这些字段。
 
 如果工具直接导出 NIfTI，可以写入：
 
@@ -345,7 +349,8 @@ submissions/{review_id}/labels/{image_id}/{organ}.nii.gz
 | 标签与目标图像的空间关系无法解释 | 阻断 |
 | 未知器官或未知标签值 | 阻断 |
 | 完成提交缺少目标组中的 Mask | 阻断该目标组 |
-| `review_id`、`target_id`、当前 Registry assignee 或基础标签版本不匹配 | 拒绝登记 |
+| `review_id`、`target_id` 或基础标签版本不匹配 | 拒绝登记 |
+| `enforce_assignee=true` 且提交身份不匹配 | 拒绝登记 |
 | 标签内容检查失败 | 回到 `in_progress` 并生成问题报告 |
 
 不能仅因为数组大小相同就复制 affine。任何重采样必须创建新的文件记录并保存变换过程。
@@ -356,7 +361,8 @@ submissions/{review_id}/labels/{image_id}/{organ}.nii.gz
 
 第一阶段不实现在线锁服务：
 
-- 任务清单可以记录 `assignee`，也可以先留空，由领取或导出工作包时认领。
+- 任务清单可以记录 `assignee`，也可以留空；它不进入标注工作包的运行依赖。
+- Review Task 可追加 `worklist_exports` 导出历史，默认防止同一 review 被重复分发；该记录不包含标注机路径或实时进度。
 - 协调者避免把同一目标组同时分给两个人。
 - 同一病例的不同目标组可以并行。
 - 提交时用 `target_id` 和基础标签校验值阻止旧版本覆盖。

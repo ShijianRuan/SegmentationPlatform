@@ -9,6 +9,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import nibabel as nib
@@ -25,7 +26,7 @@ from segplatform.adapters.mimics.probes import build_probe_command, evaluate_pro
 from segplatform.case_packages import create_case_package
 from segplatform.common import load_data, write_json
 from segplatform.dataset_descriptions import build_requests_from_dataset_description
-from segplatform.distribution import collect_submissions, export_assignee_worklist
+from segplatform.distribution import collect_submissions, export_worklist
 from segplatform.imaging import geometry_matches, inspect_dicom_series, inspect_image, read_mask, write_mask_nifti
 from segplatform.imaging import BufferMapping
 from segplatform.ingest import build_case_package_requests, register_scan, scan_source
@@ -896,17 +897,42 @@ class LabelingWorkflowTests(unittest.TestCase):
             package_root,
             registry_root=registry_root,
         )
+        runtime_path = prepare_case(case_root, self.workstation_config(verified=True))
+        runtime = load_data(runtime_path)
 
         worker_root = self.root / "worker_annotator_01"
-        export = export_assignee_worklist(
+        export = export_worklist(
             registry_root,
             worker_root,
             assignee="annotator_01",
             overwrite=True,
         )
         self.assertEqual(1, export["review_count"])
-        local_review = FileRegistry(worker_root / "registry").get("reviews", "review_case_001_v1")
-        self.assertTrue(Path(local_review["package_path"]).is_absolute())
+        self.assertFalse((worker_root / "registry").exists())
+        worklist = load_data(worker_root / "worklist_manifest.json")
+        self.assertEqual("mimics_worklist.v2", worklist["schema_version"])
+        self.assertEqual("cases/case_001", worklist["reviews"][0]["package_path"])
+        self.assertEqual("build_on_first_open", worklist["reviews"][0]["workspace_mode"])
+        self.assertEqual(7, len(worklist["entry_scripts"]))
+        self.assertTrue((worker_root / "Labeling_Open_Next_Case.py").is_file())
+        self.assertTrue((worker_root / "Labeling_Case_Navigation.py").is_file())
+        self.assertTrue((worker_root / "Labeling_Submit_Complete.py").is_file())
+        self.assertTrue((worker_root / "Labeling_Submit_or_Report_Issue.py").is_file())
+        self.assertTrue((worker_root / "Labeling_View_Task_List.py").is_file())
+        self.assertTrue((worker_root / "nnInteractive.py").is_file())
+        self.assertTrue((worker_root / "nninteractive_bridge.py").is_file())
+        self.assertTrue((worker_root / "runtime_py35" / "nninteractive_mimics.py").is_file())
+        self.assertFalse((worker_root / "Start_Labeling.py").exists())
+        self.assertTrue((worker_root / "runtime_py35" / "sp_review_console.py").is_file())
+        review_record = FileRegistry(registry_root).get("reviews", "review_case_001_v1")
+        self.assertEqual(worklist["worklist_id"], review_record["worklist_exports"][0]["worklist_id"])
+        with self.assertRaisesRegex(ValidationError, "no reviews matched"):
+            export_worklist(
+                registry_root,
+                self.root / "second_worker",
+                assignee="annotator_01",
+            )
+        self.assertFalse((self.root / "second_worker").exists())
         returned_case = worker_root / "cases" / "case_001"
         submission = returned_case / "submissions" / "review_case_001_v1"
         submission.mkdir(parents=True)
@@ -1514,6 +1540,7 @@ class LabelingWorkflowTests(unittest.TestCase):
             json.dumps(
                 {
                     "schema_version": "case_package.v0.5",
+                    "package_id": "pkg_claim",
                     "case_id": "case_claim",
                     "review": {"review_id": "review_claim"},
                 }
@@ -1590,8 +1617,63 @@ class LabelingWorkflowTests(unittest.TestCase):
                 "events": [],
             },
         )
+        working = case_root / "working"
+        working.mkdir()
+        mcs_path = working / "review_claim.mcs"
+        mcs_path.touch()
+        (working / "mimics_runtime.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "mimics_runtime.v1",
+                    "package_root": str(case_root),
+                    "package_id": "pkg_claim",
+                    "case_id": "case_claim",
+                    "review_id": "review_claim",
+                    "mcs_path": str(mcs_path),
+                }
+            ),
+            encoding="utf-8",
+        )
 
-        export = export_assignee_worklist(
+        mismatched_runtime = load_data(working / "mimics_runtime.json")
+        mismatched_runtime["review_id"] = "review_wrong"
+        write_json(working / "mimics_runtime.json", mismatched_runtime)
+        with self.assertRaisesRegex(ValidationError, "identity mismatch"):
+            export_worklist(
+                registry_root,
+                self.root / "worker_mismatch",
+                assignee="annotator_01",
+                claim_unassigned=True,
+                overwrite=True,
+            )
+        self.assertFalse((self.root / "worker_mismatch").exists())
+        mismatched_runtime["review_id"] = "review_claim"
+        write_json(working / "mimics_runtime.json", mismatched_runtime)
+
+        def fail_manifest_publish(path: Path, value: object) -> None:
+            if path.name == "worklist_manifest.json":
+                raise OSError("simulated manifest publish failure")
+            write_json(path, value)
+
+        with (
+            patch("segplatform.distribution.write_json", side_effect=fail_manifest_publish),
+            self.assertRaisesRegex(OSError, "simulated manifest publish failure"),
+        ):
+            export_worklist(
+                registry_root,
+                self.root / "worker_publish_failure",
+                assignee="annotator_01",
+                claim_unassigned=True,
+                overwrite=True,
+            )
+        rolled_back = FileRegistry(registry_root).get("reviews", "review_claim")
+        self.assertIsNone(rolled_back["assignee"])
+        self.assertFalse(rolled_back.get("worklist_exports"))
+        self.assertFalse(
+            (self.root / "worker_publish_failure" / "worklist_manifest.json").exists()
+        )
+
+        export = export_worklist(
             registry_root,
             self.root / "worker_claim",
             assignee="annotator_01",
@@ -1601,10 +1683,18 @@ class LabelingWorkflowTests(unittest.TestCase):
 
         self.assertEqual(1, export["review_count"])
         self.assertEqual("annotator_01", FileRegistry(registry_root).get("reviews", "review_claim")["assignee"])
+        self.assertFalse((self.root / "worker_claim" / "registry").exists())
         self.assertEqual(
             "annotator_01",
-            FileRegistry(self.root / "worker_claim" / "registry").get("reviews", "review_claim")["assignee"],
+            load_data(self.root / "worker_claim" / "worklist_manifest.json")["recipient_hint"],
         )
+
+        with self.assertRaisesRegex(ValidationError, "--claim-unassigned requires --assignee"):
+            export_worklist(
+                registry_root,
+                self.root / "invalid_claim",
+                claim_unassigned=True,
+            )
 
     def test_windows_probe_command_and_mapping_evaluation(self) -> None:
         dicom_root = self.make_dicom_series()
@@ -1823,42 +1913,7 @@ class LabelingWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "shape differs"):
             sp_common.match_images(image_container, [expected])
 
-    def test_review_console_uses_direct_submit_actions(self) -> None:
-        runtime_dir = Path(__file__).resolve().parents[1] / "adapters" / "mimics" / "runtime_py35"
-        responses = iter(["Complete", "Needs Review", "Report Problem", "Task List", "Open Case"])
-
-        class Dialogs:
-            @staticmethod
-            def question_box(**_kwargs):
-                return next(responses)
-
-        fake_mimics = types.SimpleNamespace(dialogs=Dialogs())
-        previous_mimics = sys.modules.get("mimics")
-        sys.modules["mimics"] = fake_mimics
-        sys.path.insert(0, str(runtime_dir))
-        self.addCleanup(lambda: sys.path.remove(str(runtime_dir)))
-
-        def restore_mimics() -> None:
-            if previous_mimics is None:
-                sys.modules.pop("mimics", None)
-            else:
-                sys.modules["mimics"] = previous_mimics
-
-        self.addCleanup(restore_mimics)
-        spec = importlib.util.spec_from_file_location(
-            "sp_review_console_submit_actions_test", runtime_dir / "sp_review_console.py"
-        )
-        module = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-
-        self.assertEqual("submit_complete", module.choose_console_action(True))
-        self.assertEqual("submit_for_review", module.choose_console_action(True))
-        self.assertEqual("report_blocked", module.choose_console_action(True))
-        self.assertEqual("summary", module.choose_console_action(True))
-        self.assertEqual("next", module.choose_console_action(False))
-
-    def test_review_console_qc_failure_message_is_actionable(self) -> None:
+    def test_review_console_rebases_a_movable_worklist_runtime(self) -> None:
         runtime_dir = Path(__file__).resolve().parents[1] / "adapters" / "mimics" / "runtime_py35"
 
         class Dialogs:
@@ -1886,38 +1941,181 @@ class LabelingWorkflowTests(unittest.TestCase):
         assert spec.loader is not None
         spec.loader.exec_module(module)
 
-        reports = self.root / "reports"
-        reports.mkdir()
-        (reports / "review_report.json").write_text(
+        old_root = self.root / "central" / "case_001"
+        new_root = self.root / "copied_anywhere" / "case_001"
+        runtime = {
+            "package_root": str(old_root),
+            "mcs_path": str(old_root / "working" / "review_001.mcs"),
+            "reports_dir": str(old_root / "reports"),
+            "submissions_dir": str(old_root / "submissions" / "review_001"),
+            "image_sets": [
+                {
+                    "dicom_path": str(old_root / "images" / "img" / "dicom"),
+                    "image_path": None,
+                }
+            ],
+            "import_buffers": [
+                {"path": str(old_root / "working" / "bridge" / "liver.u8")}
+            ],
+            "checkpoint_buffers": [],
+        }
+
+        rebased = module.rebase_runtime(runtime, str(new_root), "worklist_001")
+
+        self.assertEqual(str(new_root), rebased["package_root"])
+        self.assertEqual(str(new_root / "working" / "review_001.mcs"), rebased["mcs_path"])
+        self.assertEqual(str(new_root / "reports"), rebased["reports_dir"])
+        self.assertEqual(
+            str(new_root / "images" / "img" / "dicom"),
+            rebased["image_sets"][0]["dicom_path"],
+        )
+        self.assertIsNone(rebased["assignee"])
+        self.assertEqual("worklist_001", rebased["worklist_id"])
+        self.assertEqual("new", rebased["mode"])
+
+        worklist_root = self.root / "worklist"
+        entry = {
+            "review_id": "review_001",
+            "package_path": "cases/case_001",
+        }
+        submission_root = worklist_root / "cases" / "case_001" / "submissions" / "review_001"
+        submission_root.mkdir(parents=True)
+        submission_path = submission_root / "submission_manifest.json"
+        submission_path.write_text(
+            json.dumps({"worklist_id": "older_worklist", "action": "submit_complete"}),
+            encoding="utf-8",
+        )
+        manifest = {"worklist_id": "worklist_001", "reviews": [entry]}
+        state = {"items": {}}
+        module.refresh_worklist_state(str(worklist_root), manifest, state)
+        self.assertEqual("available", state["items"]["review_001"]["status"])
+
+        submission_path.write_text(
+            json.dumps({"worklist_id": "worklist_001", "action": "submit_complete"}),
+            encoding="utf-8",
+        )
+        module.refresh_worklist_state(str(worklist_root), manifest, state)
+        self.assertEqual("submitted", state["items"]["review_001"]["status"])
+
+        state["items"]["review_001"].update(
+            {
+                "status": "in_progress",
+                "last_submitted_at": "2026-06-24T10:00:00Z",
+                "last_opened_at": "2026-06-24T11:00:00Z",
+            }
+        )
+        module.refresh_worklist_state(str(worklist_root), manifest, state)
+        self.assertEqual("in_progress", state["items"]["review_001"]["status"])
+
+        submission_path.write_text(
             json.dumps(
                 {
-                    "schema_version": "review_report.v1",
-                    "review_id": "review_001",
-                    "status": "failed",
-                    "findings": [
-                        {
-                            "severity": "error",
-                            "code": "missing_mask",
-                            "message": "target_liver/liver: exported Mask is missing",
-                        },
-                        {
-                            "severity": "error",
-                            "code": "base_label_mismatch",
-                            "message": "target_liver: base label version does not match",
-                        },
-                    ],
+                    "worklist_id": "worklist_001",
+                    "submission_id": "submission_new",
+                    "action": "submit_complete",
                 }
             ),
             encoding="utf-8",
         )
+        module.refresh_worklist_state(str(worklist_root), manifest, state)
+        self.assertEqual("submitted", state["items"]["review_001"]["status"])
+        self.assertEqual(
+            "submission_new",
+            state["items"]["review_001"]["last_submission_key"],
+        )
 
-        message = module.build_qc_failure_message(str(self.root), RuntimeError("raw traceback"))
-        self.assertIn("Platform QC did not accept this submission", message)
-        self.assertIn("missing_mask", message)
-        self.assertIn("check the listed organ Mask exists", message)
-        self.assertIn("base_label_mismatch", message)
-        self.assertIn("ask the platform operator", message)
-        self.assertIn("Technical report:", message)
+        mcs_path = new_root / "working" / "review_001.mcs"
+        mcs_path.parent.mkdir(parents=True)
+        mcs_path.write_bytes(b"project")
+        runtime["prebuilt_marker_path"] = str(new_root / "working" / "prebuilt_workspace.json")
+        resumed = module.rebase_runtime(runtime, str(new_root), "worklist_001")
+        self.assertEqual("resume", resumed["mode"])
+
+        marker_path = new_root / "working" / "prebuilt_workspace.json"
+        marker_path.write_text("{}", encoding="utf-8")
+        prebuilt = module.rebase_runtime(runtime, str(new_root), "worklist_001")
+        self.assertEqual("prebuilt", prebuilt["mode"])
+
+    def test_review_console_direct_submit_entry_has_no_action_menu(self) -> None:
+        runtime_dir = Path(__file__).resolve().parents[1] / "adapters" / "mimics" / "runtime_py35"
+
+        class Dialogs:
+            @staticmethod
+            def question_box(**_kwargs):
+                raise AssertionError("direct submit must not show an action-selection menu")
+
+        fake_mimics = types.SimpleNamespace(dialogs=Dialogs())
+        previous_mimics = sys.modules.get("mimics")
+        sys.modules["mimics"] = fake_mimics
+        sys.path.insert(0, str(runtime_dir))
+        self.addCleanup(lambda: sys.path.remove(str(runtime_dir)))
+
+        def restore_mimics() -> None:
+            if previous_mimics is None:
+                sys.modules.pop("mimics", None)
+            else:
+                sys.modules["mimics"] = previous_mimics
+
+        self.addCleanup(restore_mimics)
+        spec = importlib.util.spec_from_file_location(
+            "sp_review_console_direct_action_test", runtime_dir / "sp_review_console.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        recorded = []
+        module.load_worklist = lambda: (str(self.root), {"worklist_id": "worklist_001", "reviews": []})
+        module.load_worklist_state = lambda _root, _manifest: (
+            str(self.root / "worklist_progress.json"),
+            {"current_review_id": "review_001", "items": {}},
+        )
+        module.refresh_worklist_state = lambda _root, _manifest, state: state
+        module.current_review_context = lambda: {
+            "review_id": "review_001",
+            "package_root": str(self.root / "case_001"),
+        }
+        module.submit_current_review = (
+            lambda _root, _manifest, _state_path, _state, action: recorded.append(action) or 0
+        )
+
+        self.assertEqual(0, module.main("submit_complete"))
+        self.assertEqual(["submit_complete"], recorded)
+
+    def test_review_console_groups_only_related_secondary_actions(self) -> None:
+        runtime_dir = Path(__file__).resolve().parents[1] / "adapters" / "mimics" / "runtime_py35"
+        responses = iter(["Continue Last Case", "Choose Case", "Skip Case", "Needs Review", "Report Problem"])
+
+        class Dialogs:
+            @staticmethod
+            def question_box(**_kwargs):
+                return next(responses)
+
+        fake_mimics = types.SimpleNamespace(dialogs=Dialogs())
+        previous_mimics = sys.modules.get("mimics")
+        sys.modules["mimics"] = fake_mimics
+        sys.path.insert(0, str(runtime_dir))
+        self.addCleanup(lambda: sys.path.remove(str(runtime_dir)))
+
+        def restore_mimics() -> None:
+            if previous_mimics is None:
+                sys.modules.pop("mimics", None)
+            else:
+                sys.modules["mimics"] = previous_mimics
+
+        self.addCleanup(restore_mimics)
+        spec = importlib.util.spec_from_file_location(
+            "sp_review_console_grouped_actions_test", runtime_dir / "sp_review_console.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        self.assertEqual("continue", module.choose_navigation_action(None, True))
+        self.assertEqual("choose", module.choose_navigation_action(None, False))
+        self.assertEqual("skip", module.choose_navigation_action({"review_id": "review_001"}, False))
+        self.assertEqual("submit_for_review", module.choose_issue_action())
+        self.assertEqual("report_blocked", module.choose_issue_action())
 
     def test_review_console_summary_reports_mask_state(self) -> None:
         runtime_dir = Path(__file__).resolve().parents[1] / "adapters" / "mimics" / "runtime_py35"
@@ -2317,6 +2515,122 @@ class LabelingWorkflowTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "adapters" / "mimics"
         for path in sorted(root.rglob("*.py")):
             py_compile.compile(str(path), doraise=True)
+
+    def test_initial_label_rejects_simultaneous_organ_and_label_map(self) -> None:
+        dicom_root = self.make_dicom_series()
+        geometry, _ = inspect_dicom_series(dicom_root)
+        mask = np.zeros(geometry.shape, dtype=np.uint8)
+        mask[1:4, 1:4, 1] = 1
+        source_mask = self.root / "ambig.nii.gz"
+        write_mask_nifti(source_mask, mask, geometry)
+        request = load_data(self.make_request(dicom_root, source_mask))
+        request["initial_labels"][0]["label_map"] = {"liver": 1}
+        request_path = self.root / "ambig_request.yaml"
+        request_path.write_text(yaml.safe_dump(request, sort_keys=False), encoding="utf-8")
+        with self.assertRaisesRegex(ValidationError, "both 'organ' and 'label_map'"):
+            create_case_package(request_path, self.root / "ambig_package")
+
+    def test_ingest_warns_when_one_study_has_multiple_patient_ids(self) -> None:
+        series_root = self.make_dicom_series()
+        second_slice = sorted(series_root.glob("*.dcm"))[1]
+        dataset = pydicom.dcmread(second_slice)
+        dataset.PatientID = "PSEUDO_OTHER"
+        dataset.save_as(second_slice, enforce_file_format=True)
+        scan = scan_source(series_root)
+        self.assertTrue(scan["findings"])
+        self.assertEqual("study_with_multiple_patient_ids", scan["findings"][0]["code"])
+        self.assertEqual(1, scan["summary"]["finding_count"])
+
+    def test_snapshot_require_all_organs_rejects_missing_organ(self) -> None:
+        dicom_root = self.make_dicom_series()
+        geometry, _ = inspect_dicom_series(dicom_root)
+        source_mask = self.root / "liver_only.nii.gz"
+        write_mask_nifti(source_mask, np.zeros(geometry.shape, dtype=np.uint8), geometry)
+        registry_root = self.root / "registry_require_all"
+        create_case_package(
+            self.make_request(dicom_root, source_mask),
+            self.root / "require_all_package",
+            registry_root=registry_root,
+        )
+        registry = FileRegistry(registry_root)
+        liver_label_id = registry.find_labels(case_id="case_001", image_id="img_venous", organ="liver")[0]["label_id"]
+        snapshot_request = {
+            "schema_version": "snapshot_request.v1",
+            "snapshot_id": "snapshot_require_all",
+            "task_id": "abdomen_task",
+            "task_label_map": {"background": 0, "liver": 1, "spleen": 2},
+            "label_policy": {"allow_lifecycle_status": ["candidate_label"]},
+            "require_all_organs": True,
+            "cases": [
+                {
+                    "case_id": "case_001",
+                    "image_id": "img_venous",
+                    "split": "train",
+                    "segments": [{"organ": "liver", "label_id": liver_label_id}],
+                }
+            ],
+            "preprocess_profile": {"name": "none"},
+            "usage_constraints": {
+                "model_training": "allowed",
+                "commercial_use": "needs_policy",
+                "redistribution": "needs_policy",
+            },
+        }
+        snapshot_request_path = self.root / "snapshot_require_all.yaml"
+        snapshot_request_path.write_text(yaml.safe_dump(snapshot_request, sort_keys=False), encoding="utf-8")
+        with self.assertRaisesRegex(ValidationError, "requires all organs but is missing"):
+            create_snapshot(snapshot_request_path, registry_root)
+
+    def test_derived_dicom_series_uids_are_deterministic(self) -> None:
+        from segplatform.imaging import write_derived_dicom_series
+
+        affine = np.diag([1.0, 1.5, 2.0, 1.0])
+        source = self.root / "src.nii.gz"
+        nib.save(nib.Nifti1Image(np.zeros((6, 5, 3), dtype=np.int16), affine), str(source))
+        dest1 = self.root / "derived1"
+        dest2 = self.root / "derived2"
+        write_derived_dicom_series(source, dest1, format_name="nifti", modality="CT", case_id="case_x", study_id="study_x")
+        write_derived_dicom_series(source, dest2, format_name="nifti", modality="CT", case_id="case_x", study_id="study_x")
+        uids1 = {pydicom.dcmread(p, stop_before_pixels=True).StudyInstanceUID for p in dest1.glob("*.dcm")}
+        uids2 = {pydicom.dcmread(p, stop_before_pixels=True).StudyInstanceUID for p in dest2.glob("*.dcm")}
+        self.assertEqual(uids1, uids2)
+        self.assertEqual(1, len(uids1))
+
+    def test_registry_put_allow_update_rejects_identity_field_change(self) -> None:
+        registry = FileRegistry(self.root / "registry_immutable")
+        base_image = {
+            "schema_version": "image_artifact.v1",
+            "image_id": "img_imm",
+            "case_id": "case_imm",
+            "modality": "CT",
+            "format": "dicom_series",
+            "path": str(self.root / "img"),
+            "hash": "sha256:" + "0" * 64,
+            "hash_scope": "bundle_manifest",
+            "pixel_type": "int16",
+            "shape": [2, 2, 2],
+            "spacing": [1.0, 1.0, 1.0],
+            "origin": [0.0, 0.0, 0.0],
+            "direction": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "geometry_status": "complete",
+            "geometry_evidence": {
+                "coordinate_system": "LPS",
+                "shape": "header",
+                "spacing": "header",
+                "origin": "header",
+                "direction": "header",
+                "assumptions": [],
+            },
+            "source": {"type": "test", "import_batch": "test", "reader": {"name": "test", "version": "1"}},
+            "usability": {"annotation": "allowed", "training": "allowed", "evaluation": "allowed", "reasons": []},
+        }
+        registry.put("images", base_image)
+        moved = {**base_image, "case_id": "case_other"}
+        with self.assertRaisesRegex(ValidationError, "immutable field 'case_id'"):
+            registry.put("images", moved, allow_update=True)
+        refreshed = {**base_image, "modality": "MR"}
+        registry.put("images", refreshed, allow_update=True)
+        self.assertEqual("MR", registry.get("images", "img_imm")["modality"])
 
 
 if __name__ == "__main__":

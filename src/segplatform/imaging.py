@@ -12,7 +12,7 @@ import pydicom
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, MRImageStorage, SecondaryCaptureImageStorage, generate_uid
 
-from segplatform.common import hash_directory, hash_file_set, prefixed_sha256
+from segplatform.common import hash_file_set, prefixed_sha256
 from segplatform.errors import ConfigurationError, ValidationError
 
 
@@ -104,7 +104,8 @@ def _dicom_headers(root: Path) -> list[Any]:
 
 
 def inspect_dicom_series(root: Path) -> tuple[Geometry, dict[str, Any]]:
-    return _inspect_dicom_headers(_dicom_headers(root), hash_value=hash_directory(root))
+    headers = _dicom_headers(root)
+    return _inspect_dicom_headers(headers, hash_value=hash_file_set([path for path, _ in headers], root=root))
 
 
 def inspect_dicom_files(paths: list[Path], *, root: Path) -> tuple[Geometry, dict[str, Any]]:
@@ -412,9 +413,10 @@ def write_derived_dicom_series(
         sop_class_uid = MRImageStorage
     else:
         sop_class_uid = SecondaryCaptureImageStorage
-    study_uid = generate_uid()
-    series_uid = generate_uid()
-    frame_uid = generate_uid()
+    source_hash = prefixed_sha256(source)
+    study_uid = generate_uid(entropy_srcs=[source_hash, "study"])
+    series_uid = generate_uid(entropy_srcs=[source_hash, "series"])
+    frame_uid = generate_uid(entropy_srcs=[source_hash, "frame"])
     direction = np.asarray(lps_geometry.direction, dtype=float).reshape(3, 3)
     spacing = lps_geometry.spacing
     origin = np.asarray(lps_geometry.origin, dtype=float)
@@ -426,7 +428,7 @@ def write_derived_dicom_series(
         file_meta = FileMetaDataset()
         file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
         file_meta.MediaStorageSOPClassUID = sop_class_uid
-        file_meta.MediaStorageSOPInstanceUID = generate_uid()
+        file_meta.MediaStorageSOPInstanceUID = generate_uid(entropy_srcs=[source_hash, "sop", str(index)])
         dataset = FileDataset(
             str(destination / f"slice_{index + 1:04d}.dcm"),
             {},

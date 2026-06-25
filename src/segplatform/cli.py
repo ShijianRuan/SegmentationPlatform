@@ -16,7 +16,7 @@ from segplatform.case_packages import create_case_package, validate_case_package
 from segplatform.common import load_data
 from segplatform.common import write_json
 from segplatform.dataset_descriptions import build_requests_from_dataset_description
-from segplatform.distribution import collect_submissions, export_assignee_worklist
+from segplatform.distribution import collect_submissions, export_worklist
 from segplatform.errors import SegPlatformError
 from segplatform.ingest import build_case_package_requests, register_scan, scan_source
 from segplatform.labels import merge_labels, register_label, register_labels_from_table
@@ -243,19 +243,6 @@ def build_parser() -> argparse.ArgumentParser:
     mimics_probe_evaluate.add_argument("--config", type=Path, required=True)
     mimics_probe_evaluate.add_argument("--output-config", type=Path, required=True)
     mimics_probe_evaluate.add_argument("--tolerance-mm", type=float, default=1e-3)
-    mimics_nni_setup = mimics_sub.add_parser("nninteractive-setup")
-    mimics_nni_setup.add_argument("--cuda", default="cu124", choices=["cu124", "cu121", "cu118"])
-    mimics_nni_setup.add_argument("--device", default="cuda:0")
-    mimics_nni_setup.add_argument("--skip-download", action="store_true")
-    mimics_nni_refine = mimics_sub.add_parser("nninteractive-refine")
-    mimics_nni_refine.add_argument("case_root", type=Path)
-    mimics_nni_refine.add_argument("--target-id", required=True)
-    mimics_nni_refine.add_argument("--interaction-type", default="scribble", choices=["scribble", "box", "point", "lasso"])
-    mimics_nni_refine.add_argument("--include", type=lambda v: v.lower() != "false", default=True)
-    mimics_nni_refine.add_argument("--config", type=Path)
-    mimics_nni_refine.add_argument("--server-url")
-    mimics_nni_refine.add_argument("--device", default="cuda:0")
-
     review = subparsers.add_parser("review", help="Inspect offline review tasks")
     review_sub = review.add_subparsers(dest="action", required=True)
     review_status = review_sub.add_parser("status")
@@ -307,14 +294,21 @@ def build_parser() -> argparse.ArgumentParser:
     review_from_finding.add_argument("--review-suffix", default="finding")
     review_from_finding.add_argument("--allow-no-base", action="store_true")
     review_from_finding.add_argument("--overwrite", action="store_true")
-    review_export = review_sub.add_parser("export-worklist")
+    review_export = review_sub.add_parser(
+        "export-worklist",
+        help="Export a movable Mimics worklist with no annotator-side Registry or Python dependency",
+    )
     review_export.add_argument("--registry", type=Path, required=True)
-    review_export.add_argument("--assignee", required=True)
+    review_export.add_argument("--assignee", help="Optional central filter and recipient hint")
     review_export.add_argument("--output-root", type=Path, required=True)
-    review_export.add_argument("--local-cases-root", type=Path)
     review_export.add_argument("--include-status", action="append")
     review_export.add_argument("--limit", type=int)
     review_export.add_argument("--claim-unassigned", action="store_true")
+    review_export.add_argument(
+        "--include-distributed",
+        action="store_true",
+        help="Allow reviews already exported in another worklist to be exported again",
+    )
     review_export.add_argument("--merge", action="store_true")
     review_export.add_argument("--overwrite", action="store_true")
 
@@ -649,104 +643,6 @@ def run(args: argparse.Namespace) -> int:
         )
         print_json(result)
         return 0 if result["status"] == "passed" else 2
-    elif args.domain == "mimics" and args.action == "nninteractive-setup":
-        import subprocess as _sp
-
-        setup_script = Path(__file__).resolve().parent.parent.parent / "scripts" / "setup_nninteractive_env.py"
-        if not setup_script.is_file():
-            raise SegPlatformError(f"Setup script not found: {setup_script}")
-        cmd = [sys.executable, str(setup_script), "--cuda", args.cuda, "--device", args.device]
-        if getattr(args, "skip_download", False):
-            cmd.append("--skip-download")
-        _sp.run(cmd, check=True)
-        return 0
-    elif args.domain == "mimics" and args.action == "nninteractive-refine":
-        from segplatform.adapters.mimics.nninteractive_bridge import run_bridge as _nni_refine
-
-        case_root = args.case_root.resolve()
-        runtime_path = case_root / "working" / "mimics_runtime.json"
-        if not runtime_path.is_file():
-            raise SegPlatformError(f"Runtime not found; run prepare first: {runtime_path}")
-        runtime = load_data(runtime_path)
-
-        # Find the target.
-        target = next(
-            (t for t in runtime.get("targets", []) if t["target_id"] == args.target_id),
-            None,
-        )
-        if target is None:
-            raise SegPlatformError(f"target_id {args.target_id} not found in runtime")
-        image_id = target["image_id"]
-
-        # Find image entry.
-        image = next(
-            (img for img in runtime.get("image_sets", []) if img["image_id"] == image_id),
-            None,
-        )
-        if image is None:
-            raise SegPlatformError(f"image_id {image_id} not found in runtime")
-
-        mapping_by_image = runtime.get("buffer_mapping_by_image_id", {})
-        buffer_mapping = mapping_by_image.get(image_id, runtime.get("buffer_mapping", {}))
-        if not buffer_mapping:
-            buffer_mapping = {"platform_to_mimics_axes": [0, 1, 2], "platform_to_mimics_flips": [False, False, False]}
-
-        # Find a platform image sidecar. The CLI debug path does not have
-        # access to Mimics ImageData, so DICOM/.mcs-only cases must be tested
-        # from inside Mimics via AI Refine.
-        image_path = image.get("image_path")
-        if image_path and not Path(image_path).is_file():
-            image_path = None
-        if image_path is None:
-            raise SegPlatformError(
-                "No NIfTI/MHA image sidecar found in runtime. "
-                "For DICOM/.mcs-only cases, run AI Refine inside Mimics."
-            )
-
-        # Find interaction buffer.
-        bridge_dir = case_root / "working" / "bridge"
-        import_dir = bridge_dir / "import" / image_id
-        if not import_dir.is_dir():
-            raise SegPlatformError(f"No import buffers for {image_id} in {import_dir}")
-        # Use the first organ's .u8 as interaction.
-        u8_files = sorted(import_dir.glob("*.u8"))
-        if not u8_files:
-            raise SegPlatformError(f"No .u8 buffers found in {import_dir}")
-
-        plat_shape = image.get("platform_shape", [])
-        axes = buffer_mapping.get("platform_to_mimics_axes", [0, 1, 2])
-        mimics_shape = [int(plat_shape[int(a)]) for a in axes]
-
-        # Load nnInteractive config.
-        config_path = Path(__file__).resolve().parent.parent.parent / "nninteractive_config.json"
-        if config_path.is_file():
-            nni_config = load_data(config_path)
-        else:
-            nni_config = {}
-        model_dir = nni_config.get("model_dir") or os.environ.get("SP_NNINTERACTIVE_MODEL_DIR", "")
-        server_url = getattr(args, "server_url", None) or nni_config.get("server_url") or os.environ.get("SP_NNINTERACTIVE_SERVER_URL")
-
-        output_dir = case_root / "working" / "nninteractive"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = str(output_dir / f"{args.target_id}_refined.u8")
-        interaction_path = str(u8_files[0])
-
-        bridge_input = {
-            "image_path": image_path,
-            "interaction_path": interaction_path,
-            "interaction_shape": list(mimics_shape),
-            "interaction_type": args.interaction_type,
-            "include_interaction": args.include,
-            "buffer_mapping": buffer_mapping,
-            "output_path": output_path,
-            "model_dir": model_dir,
-            "server_url": server_url,
-            "device": args.device,
-            "allow_local_fallback": True,
-        }
-        result = _nni_refine(bridge_input)
-        print_json(result)
-        return 0 if result["status"] != "error" else 2
     elif args.domain == "review" and args.action == "status":
         registry = FileRegistry(args.registry)
         if args.review_id:
@@ -822,16 +718,16 @@ def run(args: argparse.Namespace) -> int:
     elif args.domain == "review" and args.action == "export-worklist":
         statuses = set(args.include_status or []) or None
         print_json(
-            export_assignee_worklist(
+            export_worklist(
                 args.registry,
                 args.output_root,
                 assignee=args.assignee,
-                local_cases_root=args.local_cases_root,
                 include_statuses=statuses,
                 overwrite=args.overwrite,
                 merge=args.merge,
                 limit=args.limit,
                 claim_unassigned=args.claim_unassigned,
+                include_distributed=args.include_distributed,
             )
         )
     elif args.domain == "label" and args.action == "register":

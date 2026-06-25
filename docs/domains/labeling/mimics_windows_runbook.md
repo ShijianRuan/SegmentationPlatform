@@ -2,7 +2,152 @@
 
 > 病例包版本：v0.5。  
 > 状态：代码已准备并通过本地自动化测试；Mimics 21 的实际 API 与空间映射证据由 Windows 工作站运行后生成。  
-> 目标：让管理员在 Windows 机器上完成工作站初始化、探针验收和平台收尾；标注者只打开 Mimics，并通过 Scripting Library 中的 **Start Labeling** 领取、保存和提交任务。
+> 目标：平台准备机完成探针、数据准备、分发和收尾；标注机只安装 Mimics，并运行工作包自带的语义化 `Labeling_*.py` 入口。
+
+## 快速部署清单
+
+以下是一次完整标注批次的端到端步骤。每步的详细说明和故障处理见后续各节。
+
+### 角色分工
+
+| 角色 | 机器上需要什么 | 做什么 |
+|------|--------------|--------|
+| 平台操作者 | 项目仓库 + Python 3.10+ + Mimics 21 + Registry | 探针校准、数据摄入、病例包创建、工作包导出、提交回收、QC 收尾 |
+| 标注者 | 仅 Mimics Research 21 | 接收工作包 → 设 Scripting Library → 编辑 Mask → 提交 |
+
+### 平台操作者：一次性准备
+
+```powershell
+# 工作站验收
+.\scripts\windows\setup_mimics_workstation.ps1 `
+  -MimicsExecutable "C:\Program Files\Materialise\Mimics Research 21.0\MimicsResearch.exe"
+
+# 探针校准 → 生成 verified 配置
+.\scripts\windows\invoke_mimics_case.ps1 -Action Doctor -ConfigPath ".\config\mimics_workstation.local.yaml"
+.\scripts\windows\invoke_mimics_case.ps1 -Action ProbeRun -ConfigPath ".\config\mimics_workstation.local.yaml" -CaseRoot "D:\cases\pkg_probe"
+.\scripts\windows\invoke_mimics_case.ps1 -Action ProbeEvaluate ... -OutputConfigPath ".\config\mimics_workstation.verified.yaml"
+
+# 安装 nnInteractive 环境（如需 AI 辅助标注，只需做一次，~5 GB）
+python scripts\setup_nninteractive_env.py --cuda cu124 --device cuda:0
+```
+
+### 平台操作者：每批标注任务
+
+```powershell
+# 1. 数据摄入 → 生成病例包请求
+sp ingest plan D:\data\source D:\requests `
+  --organs liver spleen kidney_left kidney_right `
+  --import-batch batch_001
+
+# 2. 创建病例包 + 写入 Registry
+sp package create-many D:\requests D:\dataset_package `
+  --registry D:\platform_registry `
+  --continue-on-error
+
+# 3. 为 Mimics 准备（生成 runtime + import buffer）
+sp mimics prepare-many D:\dataset_package\cases `
+  --config .\config\mimics_workstation.verified.yaml `
+  --continue-on-error
+
+# 4. 可选：后台预生成 .mcs（减少标注者首次等待）
+sp mimics prebuild-many D:\dataset_package\cases `
+  --config .\config\mimics_workstation.verified.yaml `
+  --continue-on-error
+
+# 5. 导出可移动工作包
+sp review export-worklist `
+  --registry D:\platform_registry `
+  --output-root D:\transfer\batch_001 `
+  --limit 30
+```
+
+`export-worklist` 自动把六个 `Labeling_*.py` 标注脚本、`runtime_py35\` 内部脚本和病例包一并复制到输出目录。如果仓库中已准备好 nnInteractive 脚本，`nnInteractive.py` 和 `nninteractive_bridge.py` 也会自动包含。
+
+### 标注者：一次性配置
+
+标注者收到的 `batch_001\` 目录，复制到本机任意位置（如 `D:\MyWork\`）。
+
+**如果包含 nnInteractive**：平台操作者需额外把离线 bundle 解压到工作包的父目录：
+
+```text
+D:\MyWork\
+  nninteractive_env\          ← 离线 bundle（平台操作者提供，只需一次）
+    python\
+    models\
+  batch_001\                  ← 工作包
+    Labeling_Open_Next_Case.py
+    nnInteractive.py
+    runtime_py35\
+    cases\
+    worklist_manifest.json
+```
+
+标注者只需做一件事：Mimics → `File → Preferences → Scripting → Scripting Library` → 指向 `D:\MyWork\batch_001\`。
+
+`Script → Scripting Library` 中出现 7 个入口：
+
+| 入口 | 时机 |
+|------|------|
+| `Labeling_Open_Next_Case` | 打开下一个待处理病例（高频） |
+| `Labeling_Case_Navigation` | 继续上次、选择或跳过病例 |
+| `Labeling_Submit_Complete` | 标注完成，直接提交（高频） |
+| `Labeling_Submit_or_Report_Issue` | 需要复查或报告数据问题 |
+| `Labeling_View_Task_List` | 忘记任务范围时查看 |
+| `Labeling_Save_Recovery_Backup` | 长时间工作后保存灾备快照 |
+| `nnInteractive` | AI 辅助分割 |
+
+### 标注者：日常工作
+
+1. 打开 Mimics → `Labeling_Open_Next_Case` → 核对任务摘要 → 编辑 Mask
+2. 随时 Ctrl+S 保存 `.mcs`（保存进度 ≠ 提交）
+3. 完成一段器官后可选 `Labeling_Save_Recovery_Backup`
+4. 完成整个病例后 `Labeling_Submit_Complete`
+5. 不确定时 `Labeling_Submit_or_Report_Issue` → Needs Review
+6. 数据/工具问题时 `Labeling_Submit_or_Report_Issue` → Report Problem
+7. 当前病例暂不处理时 `Labeling_Case_Navigation` → Skip Case
+8. AI 辅助：选中目标 Mask → `nnInteractive` → Point/Scribble/Box/Lasso → Finish
+
+### 平台操作者：回收和收尾
+
+标注者完成后，把工作包目录拷回。平台操作者：
+
+```powershell
+# 1. 收集提交 → 复制到中央病例包
+sp mimics collect-submissions D:\returned\batch_001\cases `
+  D:\dataset_package\cases `
+  --registry D:\platform_registry `
+  --overwrite
+
+# 2. 批量 QC + 登记 Label Artifact
+sp mimics finalize-many D:\dataset_package\cases `
+  --config .\config\mimics_workstation.verified.yaml `
+  --registry D:\platform_registry `
+  --continue-on-error
+
+# 3. 查看进度
+sp review stats --registry D:\platform_registry
+```
+
+### 需求变化
+
+**追加器官**（已标完 liver+spleen，要加 kidney）：
+
+```powershell
+sp review create-followup `
+  --registry D:\platform_registry `
+  --output-root D:\dataset_package `
+  --case-id case_001 `
+  --organs kidney_left kidney_right `
+  --review-suffix add_kidney
+```
+
+已完成工作不丢失；标注者打开新 review 时看到 liver+spleen 已存在，只需标 kidney。
+
+**数据集增长**（50 例基础上新增 20 例）：重新 `ingest plan → package create-many → export-worklist`，新例生成独立增量工作包。
+
+**只分发部分**：`--limit 30`。**重发已分发的**：`--include-distributed`。
+
+---
 
 ## 1. 运行边界
 
@@ -10,12 +155,12 @@
 
 | 环境 | 负责内容 | 操作者如何使用 |
 | --- | --- | --- |
-| Windows Python 3.10+ | Case Package、Registry、几何校验、buffer 转换、最终 NIfTI 和标签登记 | 通过 `sp` 命令或 PowerShell 脚本运行 |
+| 平台 Python 3.10+ | Case Package、Registry、几何校验、buffer 转换、最终 NIfTI 和标签登记 | 只在平台准备/QC 机器通过 `sp` 命令运行 |
 | Mimics 21 内置 Python 3.5 | DICOM 导入、`.mcs`、Mask 创建与编辑、Mask buffer 导出、交互弹窗 | 由 Mimics `-run_script` 或软件内脚本入口运行 |
 
 Mimics 内置 Python 不负责读取 NIfTI、维护 Registry 或安装现代第三方依赖。标注者也不需要手工执行数据格式转换。
 
-## 2. Windows 机器需要准备什么
+## 2. 平台准备机需要什么
 
 1. Windows 10/11 机器。
 2. Mimics Research 21 和可用许可证。
@@ -36,7 +181,9 @@ D:\SegmentationPlatform\data\registry\   Registry
 
 Case Package 可以在其他机器生成后整体复制到 Windows。推荐把主 Registry 留在平台机器，避免多份 Registry 分叉。
 
-## 3. 一次性初始化
+标注机只需要第 1-3 项，不需要 Python、项目仓库或 Registry。
+
+## 3. 平台准备机一次性初始化
 
 以 PowerShell 打开项目目录：
 
@@ -45,23 +192,10 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 .\scripts\windows\setup_mimics_workstation.ps1 `
   -MimicsExecutable "C:\Program Files\Materialise\Mimics Research 21.0\MimicsResearch.exe" `
-  -WorkRoot "D:\SegmentationPlatform\work" `
-  -RegistryRoot "D:\SegmentationPlatform\data\registry" `
-  -Assignee "annotator_01"
+  -WorkRoot "D:\SegmentationPlatform\work"
 ```
 
-脚本会创建项目专用 `.venv`、安装平台依赖、生成
-`config\mimics_workstation.local.yaml`。如果提供 `RegistryRoot` 和 `Assignee`，还会生成
-`adapters\mimics\scripting_library\sp_review_console.local.json`，供 Mimics 内 **Start Labeling** 使用。
-默认配置包含 `claim_unassigned: true`，表示本工作站可以从未分配队列领取任务。
-
-在 Mimics 的 `File -> Preferences -> Scripting` 中，把 Scripting Library 路径设置为：
-
-```text
-C:\SegmentationPlatform\adapters\mimics\scripting_library
-```
-
-不要把 `runtime_py35` 直接设为 Scripting Library；那是内部脚本目录，会把诊断、打开、提交等实现脚本暴露给标注者。
+脚本会创建项目专用 `.venv`、安装平台依赖并生成 `config\mimics_workstation.local.yaml`。它只用于平台准备/QC 机器，不在标注机执行。
 
 如果机器使用其他 Python：
 
@@ -156,7 +290,7 @@ $Registry = "D:\SegmentationPlatform\data\registry"
 
 ### 6.1 平台准备病例
 
-平台可以提前批量准备病例，也可以不提前准备，让 **Start Labeling** 在标注者点击 **Open Case** 后后台执行。提前准备时可运行：
+平台必须在导出工作包前完成 prepare：
 
 ```powershell
 .\scripts\windows\invoke_mimics_case.ps1 `
@@ -189,17 +323,17 @@ sp mimics prebuild-many D:\SegmentationPlatform\data\packages\cases `
   --continue-on-error
 ```
 
-`prebuild` 会启动 Mimics `-background_mode`，调用内部 `sp_open_review.py --background-prebuild`，导入 DICOM、创建受管 Mask、注入初始 buffer、保存 `.mcs`，并写入 `working\prebuilt_workspace.json`。重复运行时，已有预生成 marker 的任务返回 `already_prebuilt`；已有普通 `.mcs` 的任务返回 `already_exists`，避免后台覆盖标注者现场。确需重建时才加 `-RebuildWorkspace` 或 `--rebuild-workspace`。
+`prebuild` 会启动 Mimics `-background_mode`，调用内部 `sp_open_review.py --background-prebuild`，导入 DICOM、创建受管 Mask、注入初始 buffer、保存 `.mcs`，并写入 `working\prebuilt_workspace.json`。它是减少首次打开等待的可选加速，不是工作包导出的硬前提。没有 `.mcs` 时，标注机首次打开会在 Mimics 内完成同样的导入和创建流程。重复运行时，已有预生成 marker 的任务返回 `already_prebuilt`；已有普通 `.mcs` 的任务返回 `already_exists`。
 
 ### 6.2 打开 Mimics
 
-正式标注时，标注者只手动打开 Mimics，然后在 Scripting Library 运行 **Start Labeling**。Console 会读取本机 JSON 配置，查询分配给当前 assignee 的任务；若开启 `claim_unassigned`，也会认领未分配任务。必要时后台运行 `prepare`，并在当前 Mimics 会话中打开 `.mcs` 或导入 DICOM。若管理员已提前 `prebuild`，标注者首次打开也只需打开 `.mcs`，不等待首次导入。
+正式标注时，建议把工作包根目录设为 Scripting Library。标注者也可以使用 `Script -> Run Script` 直接选择 `Labeling_*.py`。这些入口只读取工作包，不连接 Registry、不调用外部 Python、不认领任务。
 
 `invoke_mimics_case.ps1 -Action Open` 只作为管理员调试入口保留，不作为标注者日常步骤。
 
 Mimics 启动后会自动：
 
-- 导入 DICOM，或打开/重新打开 `working\<review_id>.mcs`；
+- 首次打开时导入 DICOM，或直接打开/重新打开 `working\<review_id>.mcs`；
 - 按 Series UID 和形状匹配 image set；
 - 显式设置当前 active image；
 - 创建每个目标器官对应的 Mask；
@@ -214,13 +348,13 @@ Mimics 启动后会自动：
 标注者只需要：
 
 1. 打开 Mimics。
-2. 运行 `Script -> Scripting Library -> Start Labeling`。
-3. 选择 **Open Case**，核对病例、序列数量、目标器官统计和初始 Mask 是否合理。
+2. 默认运行 `Labeling_Open_Next_Case.py`；需要继续、选择或跳过时运行 `Labeling_Case_Navigation.py`。
+3. 核对病例、序列数量、目标器官统计和初始 Mask。
 4. 使用 Mimics 工具修正对应的 `SP__<target_id>__<organ>` Mask。
 5. 随时保存 `.mcs`，关闭 Mimics 后可以继续。
-6. 忘记当前任务范围时，在 Console 中选择 **Task List** 重新显示病例、序列、目标器官统计和当前 Mask 状态。Task List 在 Mimics 弹窗内分页显示，并可按 Missing、Ready、With Initial、Known Absent 筛选；完整清单仍会写入 `reports\mimics_task_list.txt` 作为技术记录。
-7. 长时间工作、完成一个阶段或准备离开工作站前，在 Console 中选择 **Save Recovery Backup**。
-8. 当前病例暂时不处理时，选择 **Skip Case**；它不会提交，也不会标记为阻塞。
+6. 忘记任务范围时运行 `Labeling_View_Task_List.py`。
+7. 长时间工作后运行 `Labeling_Save_Recovery_Backup.py`。
+8. 当前病例暂时不处理时，在 `Labeling_Case_Navigation.py` 中选择 Skip Case。
 9. 不修改以 `sp.` 开头的 Mask metadata。
 10. 不把 Mask 移到另一个 image set。
 
@@ -228,7 +362,7 @@ Mimics 启动后会自动：
 
 ### 6.4 在当前 Mimics 会话提交
 
-完成、需要复查或遇到阻塞时，仍在 **Start Labeling** 中直接选择 **Complete**、**Needs Review** 或 **Report Problem**。Console 会在当前已打开病例的 Mimics 会话中调用内部提交脚本，不需要标注者填写命令行参数、文件路径或再次选择提交类型。
+完成时直接运行 `Labeling_Submit_Complete.py`。需要复查或遇到阻塞时运行 `Labeling_Submit_or_Report_Issue.py`，再在两个异常结果中选择。
 
 | 动作 | 平台语义 |
 | --- | --- |
@@ -237,13 +371,13 @@ Mimics 启动后会自动：
 | Report Problem | 数据、图像集或工具问题导致无法继续 |
 | Cancel | 不提交，继续保留 `.mcs` 当前进度 |
 
-**Skip Case** 不在提交表里。它只保存并关闭当前 `.mcs`，本次领取时排除当前 review 后打开下一例；不会把 review 设为 `deferred`。管理员需要长期移出队列时才运行 `sp review defer`，需要放回队列时运行 `sp review reactivate`。不要用 Report Problem 表示“先放一边”。
+Case Navigation 中的 Skip Case 只保存并关闭当前 `.mcs`，在本地进度中标记为暂缓并打开下一例；不会改变中央 Review。不要用 Report Problem 表示“先放一边”。
 
 当任务包含 2–5 个 target 时，脚本允许逐个勾选后一次提交任意组合。提交前会聚合检查 Mask
 完整性、image set、基础版本和 shape；检查失败时直接显示主要问题，并写入
 `reports\mimics_submit_precheck.json`。
 
-最常见路径是单 target、无空 Mask、选择 **Complete**：Console 不再弹出提交意图对话框，只执行导出并显示完成提示。
+最常见路径是单 target、无空 Mask 时直接运行 `Labeling_Submit_Complete.py`：只执行导出并显示完成提示。
 
 空 Mask 必须明确选择：
 
@@ -307,7 +441,7 @@ sp mimics finalize-many D:\returned\cases `
 
 不同标注者可以分别返回、分别 collect、分别 finalize。无需等所有标注者完成后再统一处理；中央 Registry 会追加通过 QC 的 Label Artifact，失败项只影响对应 review。
 
-平台会检查 review、target、assignee、base label、相对路径边界、buffer hash 和尺寸、空间映射、图像和器官对应关系、空 Mask outcome，以及最终 NIfTI 的物理几何。
+平台会检查 review、target、base label、相对路径边界、buffer hash 和尺寸、空间映射、图像和器官对应关系、空 Mask outcome，以及最终 NIfTI 的物理几何。只有 Review 显式启用 `enforce_assignee=true` 时才检查 assignee。
 
 | 提交动作 | 标签状态 | Review 状态 |
 | --- | --- | --- |
@@ -342,9 +476,9 @@ sp review stats --registry $Registry
 `verified_label` 不会被覆盖写。需要继续修正时：
 
 1. 平台创建新的 review 版本和新 Case Package，旧 verified label 作为 `base_label_id`。
-2. 平台可提前执行 `Prepare` 或 `Prebuild`，也可等待 Console 打开任务时后台准备。
+2. 平台必须执行 `Prepare`，并可选执行 `Prebuild`。
 3. Mimics 首次创建新 review 的 Mask 时导入旧标签。
-4. 标注者通过 **Start Labeling** 打开新任务，修正并重新提交。
+4. 标注者通过对应的打开和提交入口修正并重新提交。
 5. Finalize 生成新的 Label Artifact，并保留旧版本和父子来源关系。
 
 命令示例：
@@ -365,15 +499,14 @@ sp review create-followup `
 
 ## 8. `.mcs` 损坏时恢复
 
-**Start Labeling** 的 **Save Recovery Backup** 会把全部受管 Mask 保存为 gzip 压缩的 `.u8.gz`：
+`Labeling_Save_Recovery_Backup.py` 会把全部受管 Mask 保存为 gzip 压缩的 `.u8.gz`：
 
 ```text
 working\checkpoints\<review_id>\<timestamp>\
 ```
 
 Mimics 21 文档没有提供可依赖的“每次保存项目后自动回调脚本”接口，因此 recovery backup 是显式
-灾备动作，不会在每次 Ctrl+S 后自动执行。默认只保留最新 3 份；数量由
-`sp_review_console.local.json` 中的 `checkpoint_keep_count` 控制。
+灾备动作，不会在每次 Ctrl+S 后自动执行。默认只保留最新 3 份；平台可在 `worklist_manifest.json` 中统一调整 `checkpoint_keep_count`。
 
 如果 `.mcs` 无法打开：
 
@@ -391,84 +524,61 @@ recovery backup 时退回初始标签或空 Mask。
 
 ## 9. 多标注者使用
 
-第一阶段采用离线文件式 Registry，建议遵守：
+中央 Registry 不进入标注机。并行标注遵守：
 
-1. 一个 review 同一时间只由一个 assignee 领取或处理。
-2. 一个 Case Package 同一时刻只由一个标注者写入。
-3. 不同标注者使用不同 Case Package 目录，可以并行工作。
-4. Registry 应由一个平台操作进程写入，不让多人同时直接编辑 JSON。
-5. 标注结果回收时复制完整 Case Package，而不是仅复制 `.mcs` 或 `.u8`。
+1. 同一个可写工作包副本同一时刻只由一个标注者写入。
+2. 不同标注者使用不同工作包副本，可以并行工作。
+3. 同一病例需要双人独立标注时，导出两个独立 review/工作包。
+4. 标注结果回收时返回工作包或完整 `cases\*\submissions\`，不只复制 `.mcs` 或单个 `.u8`。
 
 同一病例需要双人独立标注时，创建两个 review 和两个工作目录，最终另行比较或仲裁，不在同一 `.mcs` 中混合。
 
-### 9.1 共享盘模式
+### 9.1 导出可移动工作包
 
-如果 Windows 工作站可以访问中央共享盘，最简单：
-
-1. 中央机维护唯一 Registry 和病例包目录。
-2. 每台工作站的 `sp_review_console.local.json` 指向同一个 Registry，但使用不同 `assignee`。
-3. 标注者只打开 Mimics，运行 **Start Labeling**。
-4. 中央机定期运行 `sp mimics finalize-many`。
-
-该模式下不需要复制病例包，但 Registry 仍应由平台侧单写者管理。阶段 A 不建议多台机器同时执行 finalize。
-
-### 9.2 离线分发模式
-
-如果没有共享盘，中央机为每个标注者生成本地工作包：
+中央机可以按中央 assignee 筛选，也可以不指定 assignee，直接导出一批可自由处理的病例：
 
 ```powershell
 sp review export-worklist `
   --registry D:\SegmentationPlatform\data\registry `
-  --assignee annotator_01 `
-  --output-root D:\transfer\annotator_01_worklist `
-  --claim-unassigned `
+  --output-root D:\transfer\batch_001_worklist `
+  --limit 30 `
   --overwrite
 ```
 
-把 `annotator_01_worklist\` 拷到标注者机器。该目录包含：
+工作包可复制到任意盘符，平台不需要知道最终路径。目录包含：
 
-- `cases\`：只含这个标注者分到的病例；
-- `registry\`：只含这个标注者领取任务所需的轻量 Registry；
-- `worklist_manifest.json`：记录本次分发的 review 和本地路径。
+- `Labeling_*.py`：打开、提交、查看、跳过和恢复备份的直接入口；
+- `nnInteractive.py`：AI 交互分割工具（若仓库中已准备好 nnInteractive 脚本，导出时自动包含）；
+- `runtime_py35\`：Mimics 内部脚本（标注与 AI 工具共用）；
+- `cases\`：病例包和预生成 `.mcs`；
+- `nninteractive_bridge.py`：AI 工具的外部推理桥接（若可用，与 `nnInteractive.py` 同时出现）；
+- `worklist_manifest.json`：平台冻结的相对路径清单；
+- `worklist_progress.json`：可重建的本地进度，不是配置或 Registry。
 
-工作站配置中的 `RegistryRoot` 指向本地 `registry\`，`Start Labeling` 就能在本机领取任务，不依赖中央 Registry 在线可用。标注完成后，把工作包拷回中央机，运行 `sp mimics collect-submissions` 和 `sp mimics finalize-many`。
+标注者可以任选病例、跳过、继续或重新打开已提交病例。标注完成后，把工作包拷回中央机，运行 `sp mimics collect-submissions` 和 `sp mimics finalize-many`。
 
-标注中新增病例时，用 `--merge` 更新已有工作包，不覆盖标注者本地已有工作：
+中央 Registry 只记录 review 被导出到哪个 `worklist_id`，以防下一批再次拿到同一 review；它不知道工作包在标注机上的路径，也不接收标注过程中的实时进度。工作包丢失需要重发时显式加 `--include-distributed`。双人独立标注应创建两个 review，不应把同一个可写 review 复制给两个人。
+
+标注中新增病例时，默认导出一个新的增量工作包。平台无法也不应远程修改已经复制到标注机的目录：
 
 ```powershell
 sp review export-worklist `
   --registry D:\SegmentationPlatform\data\registry `
-  --assignee annotator_01 `
-  --output-root D:\transfer\annotator_01_worklist `
-  --claim-unassigned `
-  --merge
+  --output-root D:\transfer\batch_002_increment
 ```
 
-只想先分发一部分病例时，加 `--limit 30`。被标注者 Skip 的病例不会改变 Registry 状态；需要长期移出队列时运行：
-
-```powershell
-sp review defer `
-  --registry D:\SegmentationPlatform\data\registry `
-  --review-id review_case_001 `
-  --actor lead
-```
-
-重新放回队列时运行 `sp review reactivate --review-id review_case_001 --actor lead`。
+`--merge` 只适用于平台仍持有同一个 staging 工作包、尚未重新分发的情况。`--assignee annotator_01` 仍可作为中央筛选条件，但不会在标注机形成身份或路径依赖。Skip 只修改本地 `worklist_progress.json`，不改变中央 Review。
 
 ## 10. Windows 与其他机器之间传输什么
 
-送往 Windows：
-
-- 完整项目仓库；
-- 共享盘模式：中央 Case Package 路径；离线模式：`sp review export-worklist` 生成的工作包；
-- 工作站本地配置模板。
+送往标注机：仅 `sp review export-worklist` 生成的完整工作包。
 
 从 Windows 带回：
 
 - 离线模式：返回工作包中的 `cases\*\submissions\` 和 `reports\`，由 `sp mimics collect-submissions` 收回中央病例包；
-- 首次验收时的 probe evidence、评估报告和 verified 配置。
+- probe evidence 和 verified 配置留在平台准备机。
 
-平台机器运行 Finalize 后，最终 `labels/` 和更新后的 Registry 留在平台侧。只有当 Windows 与平台机器共享同一存储时，才在 Windows 直接运行 Finalize。
+平台机器运行 Finalize 后，最终 `labels/` 和更新后的 Registry 留在平台侧。标注机不运行 Finalize。
 
 `.mcs` 是 Mimics 的工作状态文件，便于继续标注，但它不是平台标签、QC 报告或 Registry 的替代品。
 
@@ -489,7 +599,7 @@ sp review defer `
 | Finalize geometry 失败 | 保留报告，禁止人工强制登记 |
 | `.mcs` 损坏 | 使用 `Prepare -RebuildWorkspace`，从 recovery backup 重建 |
 | 建包中途失败后目录残留 | 重新运行 `sp package create`；无 `manifest.json` 的残留目录会被自动清理 |
-| 标注者误 Skip | 管理员运行 `sp review reactivate` |
+| 标注者误 Skip | 在 **Choose Case** 中重新打开该病例 |
 
 处理顺序是：先看终端退出码，再看 Case Package `reports/` 中的 JSON，最后看 Mimics `.log`。保留 `.mcs` 和工作目录，修正后重跑当前步骤。
 

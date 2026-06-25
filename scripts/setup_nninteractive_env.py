@@ -19,7 +19,7 @@ What this does:
     3. Installs nnInteractive and its dependencies
     4. Installs nibabel for NIfTI I/O in the bridge
     5. Downloads model weights (~400 MB) from HuggingFace
-    6. Creates start/stop batch files for Windows
+    6. Creates optional manual-start diagnostics scripts
     7. Writes nninteractive_config.json
 
 After setup, the Mimics bridge can auto-start the server. For manual checks:
@@ -38,6 +38,7 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 
@@ -53,6 +54,7 @@ CONFIG_PATH = PROJECT_ROOT / "nninteractive_config.json"
 HF_REPO = "nnInteractive/nnInteractive"
 MODEL_NAME = "nnInteractive_v1.0"
 MODEL_DIR = ENV_DIR / "models"
+NNINTERACTIVE_VERSION = "2.4.2"
 
 # PyTorch CUDA index URLs by CUDA version.
 CUDA_INDEXES = {
@@ -68,29 +70,52 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 
 def create_venv() -> None:
-    """Create a fresh Python 3.10+ virtual environment."""
-    if ENV_DIR.exists():
-        print(f"[skip] Virtual environment already exists: {ENV_DIR}")
-        return
-
-    print("Creating virtual environment ...")
-    # Try to find Python 3.10+.
-    python_exe = sys.executable
-    version_info = sys.version_info
-    if version_info < (3, 10):
-        # Search for python3.10, python3.11, python3.12, python3.
-        for candidate in ["python3.12", "python3.11", "python3.10", "python3"]:
-            found = shutil.which(candidate)
-            if found:
-                python_exe = found
-                break
+    """Create or repair the isolated Python environment without redownloading weights."""
+    if VENV_PYTHON.is_file():
+        try:
+            run([str(VENV_PYTHON), "-c", "import sys; assert sys.version_info >= (3, 10)"])
+        except (OSError, subprocess.CalledProcessError):
+            print(f"[repair] Existing Python is not usable: {VENV_PYTHON}")
         else:
-            print("ERROR: Python 3.10+ is required. Install it first.")
-            print("  https://www.python.org/downloads/")
-            sys.exit(1)
+            print(f"[skip] Virtual environment already exists: {ENV_DIR}")
+            return
 
-    run([python_exe, "-m", "venv", str(ENV_DIR)])
-    print(f"  Created: {ENV_DIR}")
+    preserved_models = None
+    if ENV_DIR.exists():
+        print(f"[repair] Incomplete virtual environment found: {ENV_DIR}")
+        models = ENV_DIR / "models"
+        if models.is_dir():
+            preserved_models = PROJECT_ROOT / (
+                ".nninteractive_models_recovery_" + uuid.uuid4().hex
+            )
+            models.replace(preserved_models)
+        shutil.rmtree(ENV_DIR)
+
+    try:
+        print("Creating virtual environment ...")
+        python_exe = sys.executable
+        version_info = sys.version_info
+        if version_info < (3, 10):
+            for candidate in ["python3.12", "python3.11", "python3.10", "python3"]:
+                found = shutil.which(candidate)
+                if found:
+                    python_exe = found
+                    break
+            else:
+                raise RuntimeError("Python 3.10+ is required")
+
+        run([python_exe, "-m", "venv", str(ENV_DIR)])
+        if not VENV_PYTHON.is_file():
+            raise RuntimeError(f"virtual environment did not create {VENV_PYTHON}")
+    except Exception:
+        if preserved_models is not None and preserved_models.exists():
+            ENV_DIR.mkdir(parents=True, exist_ok=True)
+            preserved_models.replace(ENV_DIR / "models")
+        raise
+    else:
+        if preserved_models is not None and preserved_models.exists():
+            preserved_models.replace(ENV_DIR / "models")
+        print(f"  Created: {ENV_DIR}")
 
 
 def install_pytorch(cuda_version: str) -> None:
@@ -116,7 +141,7 @@ def install_packages() -> None:
     print("Installing nnInteractive and dependencies ...")
 
     packages = [
-        "nninteractive>=2.4.0",
+        "nninteractive=={0}".format(NNINTERACTIVE_VERSION),
         "nibabel>=5.2",
         "huggingface_hub",
     ]
@@ -129,7 +154,7 @@ def install_packages() -> None:
 def download_weights() -> None:
     """Download nnInteractive model weights from HuggingFace."""
     model_path = MODEL_DIR / MODEL_NAME
-    if model_path.is_dir() and (model_path / "inference_info.json").is_file():
+    if model_path.is_dir() and (model_path / "inference_session_class.json").is_file():
         print(f"[skip] Model weights already present: {model_path}")
         return
 
@@ -156,7 +181,7 @@ print("Download complete:", "{MODEL_DIR / MODEL_NAME}")
     )
 
     # Verify download.
-    expected = model_path / "inference_info.json"
+    expected = model_path / "inference_session_class.json"
     if not expected.is_file():
         print(f"ERROR: Model download incomplete. Missing: {expected}")
         print("Try: huggingface-cli download nnInteractive/nnInteractive --include 'nnInteractive_v1.0/*' --local-dir {0}".format(MODEL_DIR))
@@ -168,7 +193,7 @@ print("Download complete:", "{MODEL_DIR / MODEL_NAME}")
 def create_server_scripts(device: str) -> None:
     """Create Windows batch file and Linux shell script to start/stop the server."""
     model_path = MODEL_DIR / MODEL_NAME
-    if not (model_path / "inference_info.json").is_file():
+    if not (model_path / "inference_session_class.json").is_file():
         print("ERROR: Model weights not found. Run download_weights first.")
         sys.exit(1)
 
@@ -261,9 +286,11 @@ def write_runtime_config(device: str) -> None:
     config = {
         "schema_version": "nninteractive_config.v1",
         "python": str(VENV_PYTHON),
-        "bridge_script": str(PROJECT_ROOT / "src" / "segplatform" / "adapters" / "mimics" / "nninteractive_bridge.py"),
+        "bridge_script": str(PROJECT_ROOT / "adapters" / "mimics" / "nninteractive_bridge.py"),
         "model_dir": str(MODEL_DIR / MODEL_NAME),
         "server_url": "http://127.0.0.1:1527",
+        "auto_start_server": True,
+        "server_idle_timeout_seconds": 1800,
         "device": device,
         "env_dir": str(ENV_DIR),
     }
@@ -293,14 +320,16 @@ def print_instructions() -> None:
         print("  2. Verify it's running:")
         print(f"     {ENV_DIR / 'bin' / 'check_server.sh'}")
     print()
-    print("  3. In the MIMICS Review Console config, set:")
-    print(f"     SP_NNINTERACTIVE_PYTHON={VENV_PYTHON}")
-    print(f"     SP_NNINTERACTIVE_MODEL_DIR={MODEL_DIR / MODEL_NAME}")
+    print("  3. Optional environment overrides:")
+    print(f"     NNINTERACTIVE_PYTHON={VENV_PYTHON}")
+    print(f"     NNINTERACTIVE_MODEL_DIR={MODEL_DIR / MODEL_NAME}")
     print()
-    print("  4. In MIMICS, open a case and press 'AI Refine'")
+    print("  4. In Mimics, open any project, select one target Mask, then run:")
+    print("     Script -> Scripting Library -> nnInteractive")
     print()
-    print("The Mimics bridge can auto-start the server on first AI Refine.")
-    print("Manual server startup is only needed for diagnostics.")
+    print("The Mimics bridge can auto-start the server on first prediction.")
+    print("Manual server startup is only needed for diagnostics; stop it with Ctrl+C")
+    print("before returning to the default auto-managed mode.")
     print()
     print("=" * 64)
 

@@ -36,16 +36,16 @@
 
 下面沿完整的标注链路走一遍，每一步说明做什么、产出什么、怎么验证。涉及三个角色：平台操作者（运行命令）、标注者（只在 Mimics 内操作）、平台脚本（自动执行）。
 
-### 阶段 1：一次性工作站配置
+### 阶段 1：平台准备环境验收
 
-**谁做**：平台操作者，在每台 Mimics 21 工作站上执行一次。
+**谁做**：平台操作者，在标准 Mimics 21 构建上执行。标注者机器不安装平台 Python，也不创建本机配置。
 
 **目标**：确认这台机器能可靠地导入平台 DICOM、操作 Mask 并原样导出。
 
 **步骤**：
 
 1. 安装 Mimics Research 21.0，确认许可含 Scripting 模块。在 `File → Preferences → Scripting` 中配置 Python 3.5.2。
-2. 把 `adapters/mimics/scripting_library/` 设为 Scripting Library；`runtime_py35/` 是内部实现目录，不直接暴露给标注者。
+2. 在平台准备机上把 `adapters/mimics/scripting_library/` 设为 Scripting Library；`runtime_py35/` 是内部实现目录。
 3. 创建 `config/mimics_workstation.yaml`，记录 Mimics 路径和工作目录。
 4. 运行环境诊断：
    ```powershell
@@ -63,7 +63,7 @@
    ```
    **产出**：`mimics_workstation.verified.yaml`，其中 `buffer_mapping.status=verified`。轴排列和翻转值来自体模实际测量，不是手工猜测。
 
-**验证方式**：检查 `buffer_mapping.status` 是否为 `verified`；不是 verified 时不允许注入初始标签和回收提交。
+**验证方式**：检查 `buffer_mapping.status` 是否为 `verified`；不是 verified 时不允许注入初始标签和回收提交。平台应把同一 Mimics 版本、构建和已验证导入路径视为一个兼容性 profile，按 profile 准备工作包。标注者不填写 profile，但工作包会在打开时检查 Mimics 版本。
 
 ---
 
@@ -114,7 +114,7 @@ sp package create-many /data/package_requests /data/dataset_package \
 
 `sp ingest plan` 是推荐统一入口。输入是目录时，它会先生成 `source_scan.json` 再生成可审阅 request；输入是已有 scan JSON 时，只生成 request；输入是 `dataset_description.v1` 时，走描述文件路径。中间的请求文件允许人工批量检查和修改，比如只保留静脉期、补充初始标签或调整目标器官。扫描报告不保存原始 PatientID，只保存哈希、相对路径和导入可用性。
 
-`--organs` 不是实施者必须手写上百个参数。大任务使用 `--organs-file`，支持 YAML/JSON 的 `organs` 数组或一行一个器官的 TXT。`assignee` 不建议在建包阶段定死；可先留空，后续由工作站领取未分配任务或管理员批量导出工作包时认领。
+`--organs` 不是实施者必须手写上百个参数。大任务使用 `--organs-file`，支持 YAML/JSON 的 `organs` 数组或一行一个器官的 TXT。`assignee` 不建议在建包阶段定死；可先留空，分发时仅作为中央筛选或记录提示。
 
 注意：`package create-many --registry` 仍会登记 Case 和 Image Artifact，这是为了兼容“一步创建标注工作包”的路径。但从架构上，Registry 中的图像资产不应依赖病例包存在；只想登记图像时使用阶段 2A。
 
@@ -188,24 +188,33 @@ sp package validate /data/dataset_package/cases/case_001
 
 **谁做**：平台操作者或后台脚本。
 
-**目标**：把病例包和 Registry 变成 Mimics 内 `Start Labeling` 可以领取的任务队列。这个阶段不要求标注者参与。
+**目标**：把病例包预生成为可移动、无需 Registry 的 Mimics 工作包。这个阶段不要求标注者参与。
 
 ```bash
-sp review next --registry /data/platform_registry \
-  --assignee annotator_01 \
-  --claim-unassigned
-sp mimics prepare /data/dataset_package/cases/case_001 --config mimics_workstation.yaml
+sp mimics prepare-many /data/dataset_package/cases \
+  --config mimics_workstation.verified.yaml \
+  --continue-on-error
+
+# 可选加速：在兼容的 Mimics 准备机预生成 .mcs
+sp mimics prebuild-many /data/dataset_package/cases \
+  --config mimics_workstation.verified.yaml \
+  --continue-on-error
+
+sp review export-worklist \
+  --registry /data/platform_registry \
+  --output-root /transfer/batch_001 \
+  --limit 30
 ```
 
-平台可以提前批量运行 `prepare`，也可以让 `Start Labeling` 在标注者点击 **Open Case** 后后台调用 `prepare`。两种方式都不能暴露给标注者。
+平台必须在导出工作包前完成 `prepare`。`prebuild` 是可选加速，不是正确性前提：若工作包没有 `.mcs`，首次打开时由 Mimics 内脚本直接导入工作包中的 DICOM、创建 Mask、注入已准备好的 buffer 并保存 `.mcs`。所有 `Labeling_*.py` 都不运行外部平台命令。
 
 **平台提前做的事**：
 
 - 批量创建病例包和 Registry 记录；
-- 可选地为每个标注者分配 `review_id`；也可以让 review 先保持未分配，由工作站领取时认领；
-- 配置 `adapters/mimics/scripting_library/sp_review_console.local.json`，或由 Windows setup 脚本生成；
-- 可选批量运行 `sp mimics prepare`，生成 `working/mimics_runtime.json` 和导入缓冲区；
-- 运行 `sp review next` 检查队列是否能取到下一例。
+- 可选地按中央 `assignee` 筛选 review，但不把身份配置带到标注机；
+- 批量运行 `sp mimics prepare-many`；
+- 可选运行 `sp mimics prebuild-many`，减少标注者首次打开等待；
+- 用 `sp review export-worklist` 生成包含脚本、相对路径清单和病例的可移动工作包；有 `.mcs` 时一并携带。
 
 **`prepare` 后台做的事**：
 
@@ -234,21 +243,39 @@ sp mimics prepare /data/dataset_package/cases/case_001 --config mimics_workstati
   submissions_dir: submissions/review_case001_001/
   ```
 
-**`Start Labeling` 打开任务时做的事**：
+**Mimics 直接入口打开任务时做的事**：
 
 - 在 Mimics 内调用 `sp_review_console.py`；
-- 通过外部 Python 查询 `sp review next`；
-- 如本例尚未准备，后台调用 `sp mimics prepare`；如平台已提前预生成工作区，则直接打开 `.mcs`；
-- 标记 Review 为 `in_progress`；
+- 读取工作包中的 `worklist_manifest.json` 和自动生成的 `worklist_progress.json`；
+- 按顺序打开下一例、继续上次或由标注者选择任意病例；
+- 按工作包当前路径重绑定 runtime 和 Mask metadata；
 - 在当前 Mimics 会话里调用 `sp_open_review.py`；
-- `sp_open_review.py` 导入 DICOM 或打开 `.mcs` → 用 UID 哈希 + shape 将 image set 与 `image_id` 一一匹配 → 为任务目标创建/找到平台受管 Mask → 写入 7 个 metadata（review_id、target_id、image_id、organ、base_label_id/hash、package_root）→ 如有 import buffer 则在首次创建时注入 → 保存 `.mcs`。background prebuild 模式不弹窗，只写 `working/prebuilt_workspace.json`；标注者首次打开预生成 `.mcs` 时显示一次摘要并清除 marker；续标（resume）不再弹（可随时用 Task List 重看）。`known_absent` 只在建包前已有明确事实时跳过对应 Mask；不能用于根据扫描部位预猜器官不存在。
+- 有预生成 `.mcs` 时直接打开；没有时在 Mimics 内完成首次 DICOM 导入、Mask 创建和初始 buffer 注入；
+- 核对工作包要求的 Mimics 版本，校验 image set 和受管 Mask，并更新移动后的 `package_root`。
+
+`worklist_progress.json` 不是本机配置，也不包含 Python、Mimics、Registry 或固定盘符路径。它只是由 Console 自动维护的“上次打开哪例、哪些例已提交或暂时跳过”记录；删除后可由工作包内容重建。
+
+已提交病例通过 Choose Case 重新打开后，本地状态立即回到 `in_progress`。旧的 `submission_manifest.json` 仍作为上一版提交记录保留；Console 通过 `submission_id` 判断磁盘上的提交是否仍是同一版，不会在刷新清单时把正在修订的病例错误覆盖回 `submitted`。再次提交后才生成新的 `submission_id/submitted_at` 并恢复提交状态。
+
+**为什么取消本机 Console 配置**：
+
+旧方案让标注机保存 `platform_python`、`registry_root`、`workstation_config` 和 `assignee`，再由 Console 查询中央任务并调用平台命令。这把控制面、机器路径和标注操作耦合在一起：每台机器都要配置，换盘符会失效，离线分发困难，标注者还可能被平台环境错误阻塞。
+
+当前边界改为：
+
+- 中央平台决定准备哪些病例，并生成不可变的工作包清单；
+- 导出前强制核对中央 Review、病例包 `manifest.json` 和 `mimics_runtime.json` 的 `review_id/package_id/case_id`，任一不一致都阻断分发；
+- 工作包复制到哪里都可以，Console 只解析相对路径；
+- 标注者在包内自由选择、继续、跳过和重新提交；
+- 中央平台只回收实际提交的结果，不读取标注机本地进度；
+- 严格身份审计是可选模式，若 Review 显式设置 `enforce_assignee=true`，身份由平台在导出工作包时冻结，不由标注者配置。
 
 **验证方式**：
 
 - `prepare` 后检查 `working/mimics_runtime.json` 和 `working/bridge/import/` 是否有内容
-- `sp mimics prebuild-workspace CASE --config CONFIG --dry-run` 应生成包含 `-background_mode` 和 `--background-prebuild` 的命令；Windows 实机运行成功后应生成 `working/prebuilt_workspace.json`
-- `Start Labeling` 打开后 Mimics 弹窗显示任务摘要（病例号、序列数、器官统计和少量预览）
-- Registry 中 Review 状态更新为 `in_progress`
+- 可选的 `sp mimics prebuild-workspace CASE --config CONFIG --dry-run` 应生成包含 `-background_mode` 和 `--background-prebuild` 的命令；Windows 实机运行成功后应生成 `working/prebuilt_workspace.json`
+- `Labeling_Open_Next_Case.py` 或其他打开入口成功后，Mimics 显示一次任务摘要
+- 标注机只更新 `worklist_progress.json`，不连接或修改中央 Registry
 - 报告写入 `reports/mimics_open_report.json`
 
 ---
@@ -260,15 +287,28 @@ sp mimics prepare /data/dataset_package/cases/case_001 --config mimics_workstati
 **标注者看到的流程**：
 
 1. 打开 Mimics。
-2. 运行 `Script → Scripting Library → Start Labeling`。
-3. 选择 **Open Case**，它会打开新任务或继续上次未完成任务，并在首次打开时显示任务摘要。**核对**：病例是否正确、序列数量是否合理、目标器官统计是否符合本次任务。
-4. 如不一致 → 通过 `Start Labeling` 进入提交动作并报告阻塞，不编辑。
+2. 建议把工作包根目录设为 Scripting Library；也可从 `Script → Run Script` 直接选择入口。
+3. 默认运行 `Labeling_Open_Next_Case.py`；需要继续、选择或跳过时运行 `Labeling_Case_Navigation.py`。
+4. 首次打开时核对病例、序列数量和目标器官统计；如不一致，运行 `Labeling_Submit_or_Report_Issue.py` 并选择 Report Problem。
 5. 如一致 → 使用 Mimics 正常工具编辑每个 Mask。每个 Mask 的名称、metadata 由平台管理，标注者不改。
 6. 随时 Ctrl+S 保存 `.mcs`。保存只保留进度，不触发提交。
-7. 长时间工作、完成一大段器官或准备离开工作站前，可在 `Start Labeling` 里选择 **Save Recovery Backup**，额外保存一份独立于 `.mcs` 的 Mask 恢复快照。它是灾备，不是日常保存。
-8. 关闭软件后，下次仍打开 Mimics 并进入 `Start Labeling` 继续。
+7. 长时间工作、完成一大段器官或准备离开工作站前，可运行 `Labeling_Save_Recovery_Backup.py`。
+8. 关闭软件后，下次在 `Labeling_Case_Navigation.py` 中选择 Continue Last Case。
 
-任务器官很多时，**Task List** 在 Mimics 弹窗内分页显示，并可按 Missing、Ready、With Initial、Known Absent 筛选；完整清单仍写入 `reports/mimics_task_list.txt` 作为技术记录。标注者优先在 Mimics 内用筛选定位待处理 Mask，不需要为了看完整清单手动打开 TXT。
+工作包只暴露 6 个入口：
+
+| 入口 | 行为 |
+| --- | --- |
+| `Labeling_Open_Next_Case.py` | 高频默认动作，直接打开下一例 |
+| `Labeling_Case_Navigation.py` | 低频导航：继续、选择或跳过 |
+| `Labeling_Submit_Complete.py` | 高频默认提交，直接按完成处理 |
+| `Labeling_Submit_or_Report_Issue.py` | 异常结果：Needs Review 或 Report Problem |
+| `Labeling_View_Task_List.py` | 直接查看任务清单 |
+| `Labeling_Save_Recovery_Backup.py` | 直接保存灾备快照 |
+
+这不是六套业务逻辑。入口只传递动作，实际状态、打开、提交和校验仍由共享控制器实现。这样避免一个万能菜单，也避免把每个细小分支都拆成独立脚本。
+
+任务器官很多时，运行 `Labeling_View_Task_List.py`。清单在 Mimics 弹窗内分页显示，并可按 Missing、Ready、With Initial、Known Absent 筛选。
 
 **标注者不需要知道的事**：标签生命周期、文件哈希、NIfTI 格式、训练编号、Registry 路径。
 
@@ -280,19 +320,19 @@ sp mimics prepare /data/dataset_package/cases/case_001 --config mimics_workstati
 
 **标注者的操作**：
 
-1. `Script → Scripting Library → Start Labeling`
-2. 直接选择 **Complete**、**Needs Review** 或 **Report Problem**
-3. 如果有多个目标组，选择要提交的目标组 — 一个、多个（2–5 个时模拟勾选）或全部
-4. 如有空 Mask，弹出聚合清单 — 只显示数量和前若干项，完整清单写入报告；可统一选择"全部确认不存在""全部待复查"或逐项判断
-5. 等待脚本提示 "已导出，仍需平台检查"
+1. 已完成时运行 `Labeling_Submit_Complete.py`
+2. 医学判断不确定或遇到数据/工具问题时运行 `Labeling_Submit_or_Report_Issue.py`
+4. 如果有多个目标组，选择要提交的目标组 — 一个、多个或全部
+5. 如有空 Mask，确认其语义
+6. 等待脚本提示 "已导出，仍需平台检查"
 
-单目标组、无空 Mask 的常见完成路径只有一个业务选择：**Complete**。后续等待来自 Mask buffer 读取和文件写出，不能完全消除，但不应再增加无意义确认。
+单目标组、无空 Mask 的常见完成路径是直接运行 `Labeling_Submit_Complete.py`。不会先显示功能总菜单或提交类型菜单。
 
-当前病例暂时不处理时，标注者选择 **Skip Case**，不是 **Report Problem**。Skip 只保存并关闭当前 `.mcs`，在本次会话中排除当前 review 后打开下一例；它不改变 Registry 状态，所以下次仍可继续。需要长期移出队列时，由管理员运行 `sp review defer`；需要放回队列时运行 `sp review reactivate`。
+当前病例暂时不处理时，在 `Labeling_Case_Navigation.py` 中选择 Skip Case，而不是 Report Problem。
 
 **脚本在后台做的事**（`sp_submit_review.py`）：
 
-- **提交完成**：检查所有 Mask 存在且绑定正确 → 空 Mask 确认语义 → `get_voxel_buffer()` 导出每个 Mask 为 `.u8` 到 staging 目录 → 生成 `export_manifest.json` 和 `submission_manifest.json`（action=submit_complete）→ 一次性发布到 `submissions/{review_id}/` → 保存 `.mcs` → 弹窗提示
+- **提交完成**：检查所有 Mask 存在且绑定正确 → 空 Mask 确认语义 → `get_voxel_buffer()` 导出每个 Mask 为 `.u8` 到 staging 目录 → 生成 `export_manifest.json` 和带 `submission_id/submitted_at` 的 `submission_manifest.json`（action=submit_complete）→ 一次性发布到 `submissions/{review_id}/` → 保存 `.mcs` → 弹窗提示
 - **提交复查**：同提交完成，action=submit_for_review，记录不确定原因
 - **报告阻塞**：不要求所有 Mask 完成，写入阻塞类型和原因
 
@@ -321,7 +361,7 @@ sp mimics finalize-many /data/dataset_package/cases \
 
 **`finalize` 做的事**（这是最关键的 QC 闸门，全部检查通过才写 Registry）：
 
-1. **身份检查**：review_id、target_id、assignee 与 Registry 记录是否匹配
+1. **身份检查**：review_id、target_id 是否匹配；只有 Review 显式设置 `enforce_assignee=true` 时才检查 assignee
 2. **完整性检查**：每个 target 要求的所有器官是否都有导出（或已声明 confirmed_absent）
 3. **基础版本检查**：提交的 base_label_id 和 base_label_hash 与病例包初始标签是否一致
 4. **哈希检查**：导出 buffer 的 SHA-256 与 export_manifest 记录是否一致
@@ -338,23 +378,23 @@ sp mimics finalize-many /data/dataset_package/cases \
 
 如果提交基于旧 `base_label_id`，`submit_complete` 会把 base 中未重标的器官 carry-forward 到新 Label Artifact，并把旧 base 标记为 `superseded`。因此“补标 kidney”不会丢掉已完成的 liver/spleen；Snapshot 默认只看到新的 active 标签。`submit_for_review` 产生 draft，不会 supersede 旧 verified 标签。
 
-`sp_review_console.py` 支持 `auto_finalize=true`，可以在提交后立即调用 `finalize`；阶段 A 推荐默认 `false`，由平台独立 watcher 或批处理收尾，避免标注者等待长时间 QC。确需开启时，Console 会把 `review_report.json` 中的主要 finding 翻译成弹窗动作建议：可修的 Mask 问题提示返修，base label、序列、几何、hash 等平台问题提示联系管理员。
+`sp_review_console.py` 不执行 finalize。提交只写回工作包，平台回收后统一或分批运行 QC，标注者不等待平台处理。
 
 多标注者不要求统一等所有人完成后一次性处理。每个标注者或每批返回的病例都可以独立运行 `collect-submissions` 和 `finalize-many`，通过的标签会追加到中央 Registry；未返回或 QC 失败的病例留在原状态，不影响其他病例。
 
 无共享盘时，中央机和工作站之间使用离线工作包：
 
 ```bash
-# 中央机或工作站初始化时，为某个标注者导出本地工作包
+# 中央机导出任意可移动工作包；--assignee 仅是可选筛选
 sp review export-worklist \
   --registry /data/platform_registry \
-  --assignee annotator_01 \
-  --output-root /transfer/annotator_01_worklist \
+  --output-root /transfer/batch_001_worklist \
+  --limit 30 \
   --overwrite
 
-# 标注者完成后，把返回目录中的 submissions 收回中央病例包
+# 标注者完成后，返回目录可以位于任意盘符；平台只从其内容收回 submissions
 sp mimics collect-submissions \
-  /transfer/annotator_01_returned/cases \
+  /transfer/returned_batch_001/cases \
   /data/dataset_package/cases \
   --registry /data/platform_registry \
   --overwrite
@@ -366,19 +406,20 @@ sp mimics finalize-many /data/dataset_package/cases \
   --continue-on-error
 ```
 
-共享盘时不需要导出和收集工作包：所有工作站指向同一病例包目录和 Registry，中央机定期运行 `finalize-many`。阶段 A 仍要求 Registry 单写者，避免多人直接编辑 JSON。
+平台不要求知道工作包被复制到标注机后的绝对路径，也不让标注机直接连接 Registry。若使用共享盘，也应共享导出的工作包，而不是把中央 Registry 暴露给标注者。
 
-数据集标注中继续增加病例时，不覆盖标注者本地工作包。中央机创建新增病例包后，使用增量分发：
+每次导出后，中央 Review 只追加一条 `worklist_exports` 记录，用于防止下一次批量导出重复选中同一 review；它不追踪标注者本地进度。默认重复导出会被跳过。工作包确实丢失时可用 `--include-distributed` 重发；需要双人独立标注时应创建两个独立 review，而不是让两个人写同一个 review 的副本。
+
+数据集标注中继续增加病例时，不远程修改已经发出的目录。中央机创建新增病例包后，导出新的增量工作包：
 
 ```bash
 sp review export-worklist \
   --registry /data/platform_registry \
-  --assignee annotator_01 \
-  --output-root /transfer/annotator_01_worklist \
-  --merge
+  --output-root /transfer/batch_002_increment \
+  --limit 20
 ```
 
-如果只想先给标注者一部分病例，加 `--limit 30`。未分发的 review 仍留在中央队列，不需要用 blocked 伪装。
+标注者分别从两个工作包运行各自的 `Labeling_*.py`。`--merge` 只用于平台仍持有同一 staging 工作包时补充内容，不能远程更新已经复制走的标注机目录。
 
 **验证方式**：
 
@@ -401,11 +442,11 @@ sp review export-worklist \
 [每任务] 平台操作者
   分配 review_id + 可选提前 prepare/prebuild .mcs
          │
-[标注者] 打开 Mimics → Start Labeling → Open Case
+[标注者] 打开 Mimics → Labeling_Open_Next_Case.py
          │
-[标注者] 在 Mimics 中编辑 Mask → 随时保存 .mcs → 可选 Save Recovery Backup
+[标注者] 编辑 Mask → 随时保存 .mcs → 可选 Labeling_Save_Recovery_Backup.py
          │
-[标注者] Start Labeling → Complete / Needs Review / Report Problem → 导出 .u8 或记录阻塞原因
+[标注者] 运行对应 Submit/Report 脚本 → 导出 .u8 或记录阻塞原因
          │
 [平台后台]
   sp mimics finalize 或 watcher → 身份/完整/哈希/几何 QC
@@ -463,7 +504,7 @@ Mimics 内置 Python 不安装 nibabel、pydicom 或 SimpleITK。它只运行 `s
 - `dicom_path`：给 Mimics 21 导入的工作影像，`dicom_sha256` 校验它；
 - `mimics_import.strategy: derived_dicom_series`：说明该 DICOM 是工具工作格式，不是原始数据。
 
-因此标注者仍然只从 Mimics 的 **Start Labeling** 进入，不需要知道原始数据是 DICOM、NIfTI 还是 MHD。批量使用前仍要在 Windows Mimics 21 实机上做一次方向、灰度和 Mask 往返验证。
+因此标注者仍然只使用 Mimics 中的 `Labeling_*.py`，不需要知道原始数据是 DICOM、NIfTI 还是 MHD。
 
 RAW/MHD 不是被否定的路径。MHD 的 `.raw` 只是体素字节，关键空间信息在 `.mhd` header；Mimics 21 标准图像导入资料只明确到 xy/z resolution 和方向确认，`test_images(force_raw_import=True)` 也没有给出完整的脚本化 RAW header 契约。阶段 A 因此默认派生 DICOM。后续若 POC 证明 RAW 的维度、像素类型、字节序、slice 顺序、方向预答和 P03/P05 都稳定，则可以把 RAW 作为节省存储和导入时间的可选优化。
 
@@ -648,26 +689,7 @@ P05 不是收集到坐标就结束。`probe-evaluate` 必须得到唯一轴排�
 
 ## 8. 标注者完整流程
 
-管理员先完成一次性配置：
-
-```powershell
-copy C:\SegmentationPlatform\config\mimics_review_console.example.json `
-  C:\SegmentationPlatform\adapters\mimics\scripting_library\sp_review_console.local.json
-```
-
-本机 JSON 至少记录：
-
-- 外部平台 Python；
-- Registry 根目录；
-- verified 工作站配置；
-- 当前标注者 assignee；
-- 是否允许本机从未分配队列认领任务（`claim_unassigned`）；
-- 是否在提交后立刻 `auto_finalize`；
-- recovery backup 保留数量（默认 `checkpoint_keep_count=3`）。
-
-`assignee` 是工作站/标注者身份，不要求病例包在创建时已经写死同一个 assignee。若配置 `claim_unassigned: true`，Console 会调用 `sp review next --claim-unassigned`，把第一个未分配任务登记到当前 assignee 后打开；已完成的提交和标签版本不受后续改派影响。
-
-平台可提前批量运行 `prepare`。如果工作站已通过 Mimics Gate，平台也可以提前运行 `prebuild-workspace` 或 `prebuild-many`，把首次 DICOM 导入、Mask 创建和初始标签注入前移到标注者不在场的时间。没有提前准备时，`Start Labeling` 会在打开下一例时后台调用 `prepare`，并在当前 Mimics 会话内完成首次打开。
+标注机不做平台配置。平台在准备机完成 `prepare/prebuild`，随后导出工作包：
 
 ```powershell
 sp mimics prebuild-workspace D:\dataset_package\cases\case_001 `
@@ -676,6 +698,12 @@ sp mimics prebuild-workspace D:\dataset_package\cases\case_001 `
 sp mimics prebuild-many D:\dataset_package\cases `
   --config C:\SegmentationPlatform\config\mimics_workstation.yaml `
   --continue-on-error
+
+sp review export-worklist `
+  --registry D:\platform_registry `
+  --output-root D:\transfer\batch_001 `
+  --limit 30 `
+  --overwrite
 ```
 
 `prebuild` 默认只处理尚未有 `.mcs` 的任务；已有 `working/prebuilt_workspace.json` 的任务会跳过为 `already_prebuilt`，已有普通 `.mcs` 的任务会跳过为 `already_exists`，避免后台覆盖标注者正在编辑的工作现场。确需重建时显式加 `--rebuild-workspace`。
@@ -689,7 +717,7 @@ sp mimics prebuild-many D:\dataset_package\cases `
 
 同一图像的初始逐器官 Mask 会登记成一份多 segment Label Artifact。若一个目标组的全部器官都来自该 Artifact，病例包会自动把它设为目标组的基础标签，后续提交必须回传相同 ID 和 bundle hash。
 
-标注者打开 Mimics 后运行 `Script -> Scripting Library -> Start Labeling`，选择 **Open Case**。Console 后台调用 `sp_open_review.py`，内部脚本完成：
+标注者默认运行 `Labeling_Open_Next_Case.py`，非默认导航使用 `Labeling_Case_Navigation.py`。共享控制器调用 `sp_open_review.py`，内部脚本完成：
 
 - 首次任务导入 DICOM；预生成或继续任务打开专属 `.mcs`。
 - 使用 Series UID 哈希和 shape 唯一匹配 image set。
@@ -706,13 +734,13 @@ sp mimics prebuild-many D:\dataset_package\cases `
 标注者只执行：
 
 1. 打开 Mimics。
-2. 运行 **Start Labeling**。
-3. 打开下一例或继续当前例。
+2. 运行与目的对应的 `Labeling_*.py` 入口。
+3. 打开下一例、继续上一例或选择任意病例。
 4. 核对病例、序列和目标器官统计；完整器官清单通过 Mimics 内的 Task List 分页和状态筛选查看，必要时再查 `reports/mimics_task_list.txt`。
 5. 使用 Mimics 正常工具编辑 Mask。
 6. 可随时保存 `.mcs` 并关闭。
-7. 长时间工作、完成一段器官或离开工作站前，可在 Console 里选择 **Save Recovery Backup**。
-8. 完成时在 Console 里直接选择 **Complete**；不确定时选择 **Needs Review**；数据或工具问题导致无法继续时选择 **Report Problem**。
+7. 长时间工作后可运行 `Labeling_Save_Recovery_Backup.py`。
+8. 根据结果运行 `Labeling_Submit_Complete.py` 或 `Labeling_Submit_or_Report_Issue.py`。
 9. 如有 2–5 个目标组，可勾选任意组合一次提交。
 
 保存 `.mcs` 不会创建正式标签。提交脚本也只写出缓冲区和提交意图。
@@ -730,7 +758,7 @@ sp mimics finalize D:\dataset_package\cases\case_001 `
 
 `finalize` 先完成全部预检，再写任何 Registry 标签：
 
-- `review_id`、`target_id`、assignee 和基础标签版本。
+- `review_id`、`target_id` 和基础标签版本；assignee 仅在显式强制时检查。
 - 每个目标组要求的全部器官。
 - export manifest 中的 `image_id`。
 - export buffer 使用相对 Case Package 的路径，且不能逃逸病例包目录。
@@ -764,15 +792,15 @@ sp ingest plan /data/new_cases /data/new_requests \
 sp package create-many /data/new_requests /data/dataset_package \
   --registry /data/platform_registry \
   --continue-on-error
+sp mimics prepare-many /data/dataset_package/cases \
+  --config mimics_workstation.verified.yaml \
+  --continue-on-error
 sp review export-worklist \
   --registry /data/platform_registry \
-  --assignee annotator_01 \
-  --output-root /transfer/annotator_01_worklist \
-  --claim-unassigned \
-  --merge
+  --output-root /transfer/batch_002_increment
 ```
 
-`--merge` 只补充新 review，不覆盖标注者本地已经在做的病例。
+新增工作包独立分发，不覆盖标注者已经在做的病例。需要中央记录接收者时可加 `--assignee annotator_01`；它只是筛选和提示，不是标注端运行条件。
 
 ### 10.2 标注任务追加器官
 
@@ -828,8 +856,8 @@ sp review create-followup \
 | 需求 | 做法 |
 | --- | --- |
 | 只先分发 N 例 | `sp review export-worklist --limit N` |
-| 标注者临时跳过当前病例 | Mimics 中选择 **Skip Case**，只在本次领取时跳过当前 review，不改变 Registry 状态 |
-| 管理员把跳过病例放回队列 | `sp review reactivate --registry /data/platform_registry --review-id review_xxx` |
+| 标注者临时跳过当前病例 | Mimics 中选择 **Skip Case**，只修改工作包进度；可用 **Choose Case** 随时重开 |
+| 中央管理员长期暂停某 review | 在下一次分发前使用 `sp review defer --registry ...`；不会远程修改已发出的工作包 |
 
 `deferred` 不等于 `blocked`。前者只是暂不处理，后者表示数据或工具问题导致无法继续。
 
@@ -895,8 +923,8 @@ sp snapshot validate /data/platform_registry/snapshots/snap_abdomen_v1.json
 
 | 情况 | 处理 |
 | --- | --- |
-| Mimics 打开失败 | 查看 `reports/mimics_open_error.json`，修复后由 **Start Labeling** 重新打开 |
-| 标注中断 | 保存 `.mcs`，以后仍打开 Mimics 并通过 **Start Labeling** 继续 |
+| Mimics 打开失败 | 查看 `reports/mimics_open_error.json`，修复后重新运行对应打开入口 |
+| 标注中断 | 保存 `.mcs`，以后在 `Labeling_Case_Navigation.py` 中继续 |
 | Mask 错序列 | 提交脚本阻断；不要手工改 header |
 | Mimics 提交前检查失败 | 查看弹窗和 `reports/mimics_submit_precheck.json` |
 | 提交 QC 失败 | 弹窗显示主要 finding 和动作建议；完整技术细节见 `reports/review_report.json` |
@@ -913,13 +941,13 @@ sp snapshot validate /data/platform_registry/snapshots/snap_abdomen_v1.json
 | 手写 10000 份 YAML 不可行 | 推荐 `sp ingest plan` + `sp package create-many`。`plan` 可以从目录、scan JSON 或 dataset description 生成 request，人工只审阅规则和异常项。 |
 | 图像和标签规则复杂 | 使用 `sp ingest plan dataset_description.yaml ...`，用正则或 CSV 明确图像-标签配对和 label value 映射；仍表达不了时按 L4 importer 契约输出标准 request 和 issues。 |
 | 一个 `.mcs` 多病例能否减少启动成本 | 阶段 A 不采用。单 `.mcs` 多病例会放大项目损坏、Mask 误绑定、部分提交、多人分派和失败回滚的风险。当前选择一个 review/case 一个 `.mcs`，用批量发现和批量创建降低平台侧成本。 |
-| prepare/open/finalize 是否仍需逐病例 | 已提供 `sp mimics prepare-many`、`sp mimics prebuild-many`、`sp mimics finalize-many`、`sp review stats`、`sp review export-worklist` 和 `sp mimics collect-submissions`。标注者不直接运行 `open`，而是在 Mimics 内通过 **Start Labeling** 领取下一例。 |
+| prepare/open/finalize 是否仍需逐病例 | 已提供批量平台命令。标注者不运行平台 `open`，只运行工作包中的直接 Mimics 入口。 |
 | Registry 标签查询 O(N) | 文件式 Registry 已维护 `_indexes/labels_by_case_image_organ.json`。旧 Registry 可运行 `sp registry rebuild-index /data/platform_registry` 生成索引。 |
 | 空间信息不完整 | 数据导入契约允许 `complete/partial/index_only`，但 Mimics 病例包当前仍要求可控的工具空间。纯 RAW 和无法证明空间的来源应先创建带明确假设的派生图像，或停在导入报告中。 |
 | 部分器官标签 | Snapshot 支持按病例列出实际 segment 子集。不能把未标器官当背景；训练导出层后续要显式实现 ignore/排除策略。 |
 | 几千病例手写 Snapshot `label_id` 不可行 | 使用 `sp snapshot build-request` 从 Registry 自动生成请求草稿；人工只审阅 skipped/ambiguous 项和 split。 |
 | 标注中追加器官或返修 | 使用 `sp review create-followup` 创建增量 review；旧 submissions/reports 不删除，旧 Label Artifact superseded 而非覆盖。 |
-| 不想标完全部分配病例 | 使用 `--limit` 控制分发数量；标注者用 **Skip Case** 临时跳过当前例，管理员用 `sp review defer` 长期移出队列。 |
+| 不想标完工作包中的全部病例 | 标注者可任选、跳过或停止，平台只回收实际提交的病例；`--limit` 仅控制每次工作包大小。 |
 
 ## 14. 非线性流程和当前缺口
 
@@ -965,9 +993,8 @@ Label Artifact(s)
 | 从复杂描述生成请求 | `sp ingest plan dataset_description.yaml REQUESTS` | 数据集描述 | `case_package_request.v1` | 用于图像/标签配对、label map、CSV |
 | 只登记图像资产 | `sp ingest register source_scan.json --registry REGISTRY --import-batch BATCH` | scan JSON | `cases/`、`images/` | 不创建 review，可后续复用 |
 | 创建病例包 | `sp package create-many REQUESTS PACKAGE --registry REGISTRY --copy-mode hardlink` | request 目录 | `cases/{case_id}/manifest.json`、Review Task | `hardlink` 降低复制成本 |
-| 领取下一例 | `sp review next --assignee A --claim-unassigned` | Registry | 一个 review/package path | Mimics Console 后台调用 |
-| 改派任务 | `sp review assign --review-id R --assignee A` | Review Task | 更新 assignee 和事件 | 不重建病例包，不影响已完成标签 |
-| 导出本地工作包 | `sp review export-worklist --assignee A --claim-unassigned --limit N` | Registry、中央病例包 | 本地 `cases/` 和最小 Registry | 多工作站无共享盘时使用 |
+| 中央筛选或改派 | `sp review assign --review-id R --assignee A` | Review Task | 更新协调信息 | 不影响已导出工作包或标签 |
+| 导出可移动工作包 | `sp review export-worklist --limit N` | Registry、已 prepare 病例包 | `Labeling_*.py`、runtime、cases、相对路径 manifest | `--assignee A` 仅作可选筛选；默认跳过已分发 review |
 | 回收提交 | `sp mimics collect-submissions RETURNED CENTRAL --registry REGISTRY` | 标注者返还目录 | 中央 `submissions/`、`reports/` | 后续再 finalize |
 | 批量收尾 | `sp mimics finalize-many CASES --registry REGISTRY --config CONFIG` | 已提交病例包 | Label Artifact、review_report | 标注者不执行 |
 | 追加外部标签 | `sp label register-many table.csv --registry REGISTRY` | CSV/JSON/YAML 表 | Label Artifact | 适合 source label 或算法标签 |
@@ -981,7 +1008,9 @@ Label Artifact(s)
 | `source_scan.json` | `sp ingest plan` 或 `sp ingest scan` | 数据发现报告，不写 Registry |
 | `case_package_request.v1` | `plan`、description 或 importer | 可审阅建包请求，说明图像、目标器官和初始标签 |
 | `manifest.json` | `sp package create*` | 单病例包事实来源，给 Mimics 和 finalize 使用 |
-| `mimics_runtime.json` | `sp mimics prepare` | Mimics 内脚本的运行计划 |
+| `mimics_runtime.json` | `sp mimics prepare` | Mimics 内脚本的运行计划；路径在工作包首次打开时自动重绑定 |
+| `worklist_manifest.json` | `sp review export-worklist` | 工作包病例清单，所有路径相对工作包根目录 |
+| `worklist_progress.json` | Mimics Console | 可删除、可重建的本地进度，不是配置或 Registry |
 | `submission_manifest.json` | Mimics 内提交脚本 | 标注者选择的提交动作和目标组 |
 | `export_manifest.json` | Mimics 内提交脚本 | 导出的 Mask buffer 列表和 hash |
 | `review_report.json` | `finalize` | 平台 QC 结果和问题说明 |

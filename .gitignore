@@ -10,3 +10,7 @@ outputs/
 hatch-pet-runs/
 pipelines/nnunet/gpu*.sh
 pipelines/nnunet/SmallTools.ipynb
+nninteractive_env/
+nninteractive_config.json
+nninteractive_bundle.zip
+build/

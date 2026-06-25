@@ -19,7 +19,12 @@ src/segplatform/adapters/mimics/
 
 adapters/mimics/
   scripting_library/
-    Start_Labeling.py
+    Labeling_Open_Next_Case.py
+    Labeling_Case_Navigation.py
+    Labeling_Submit_Complete.py
+    Labeling_Submit_or_Report_Issue.py
+    Labeling_View_Task_List.py
+    Labeling_Save_Recovery_Backup.py
   runtime_py35/
     sp_review_console.py
     sp_common.py
@@ -43,22 +48,24 @@ adapters/mimics/
 | 位置 | 运行环境 | 职责 |
 | --- | --- | --- |
 | `src/segplatform/adapters/mimics/` | 外部现代 Python | 病例包检查、医学格式读写、启动 Mimics、空间 QC、提交入库 |
-| `adapters/mimics/scripting_library/` | Mimics Scripting Library | 标注者日常可见入口，只放 `Start_Labeling.py` |
-| `adapters/mimics/runtime_py35/` | Mimics Python 3.5.2 | 内部实现脚本，调用 Mimics API、管理 image set 和 Mask、保存 `.mcs`、导出提交缓冲区 |
+| `adapters/mimics/scripting_library/` | Mimics Scripting Library | 放置语义明确的 `Labeling_*.py` 标注入口和独立工具入口 `nnInteractive.py` |
+| `adapters/mimics/runtime_py35/` | Mimics Python 3.5.2 | 调用 Mimics API；平台脚本和独立工具在运行时不互相依赖 |
 | `adapters/mimics/probes/` | Mimics Python 3.5.2 | 单次会话验证 API、图像绑定、轴顺序、空间往返和选择性导出 |
 
 Mimics 内脚本不实现 Registry、标签生命周期、训练准入或医学格式长期存储。保存 `.mcs` 也不等于提交或验证标签。
 
 ## 当前可用代码
 
-1. `scripting_library/Start_Labeling.py`：Mimics 菜单中给标注者使用的唯一入口。
-2. `runtime_py35/sp_review_console.py`：任务领取、保存 recovery backup、提交和可选 finalize 的内部控制台。
+1. `scripting_library/Labeling_*.py`：打开、继续、选择、提交、查看、跳过和恢复备份的直接入口。
+2. `runtime_py35/sp_review_console.py`：这些入口共享的工作包状态和动作分发实现，不显示功能总菜单。
 3. `runtime_py35/sp_diagnostics.py`：工作站 API 诊断。
 4. `runtime_py35/sp_open_review.py`：导入或恢复任务、匹配 image set、创建 Mask 和保存 `.mcs`。
 5. `runtime_py35/sp_save_checkpoint.py`：保存不依赖 `.mcs` 内部结构的 Mask 恢复快照。
 6. `runtime_py35/sp_submit_review.py`：组合选择目标组、提交前预检、批量处理空 Mask。
-7. `probes/`：执行 P01、P02、P04、P05、P06。
-8. `src/segplatform/adapters/mimics/`：外部 `doctor/probe/prepare/prebuild/open/finalize` 和 buffer bridge。
+7. `scripting_library/nnInteractive.py`：任意 Mimics 项目可用的独立 nnInteractive 入口。
+8. `runtime_py35/nninteractive_mimics.py` 与 `nninteractive_bridge.py`：提示采集和外部推理桥接，不读取平台任务数据。
+9. `probes/`：执行 P01、P02、P04、P05、P06。
+10. `src/segplatform/adapters/mimics/`：外部 `doctor/probe/prepare/prebuild/open/finalize` 和 buffer bridge。
 
 代码存在不代表 Mimics 已通过准入。`sp mimics probe-run` 在一个 Mimics 会话内收集 P01/P02/P04/P05/P06，`sp mimics probe-evaluate` 自动比较 DICOM LPS 几何并生成工作站 verified 配置。初始 Mask 注入和提交回收要求默认 `buffer_mapping.status=verified`；若 P05 证明个别 `image_id` 需要不同轴映射，可在 `buffer_mapping_by_image_id` 中加入同样 verified 的覆盖项。
 
@@ -76,22 +83,24 @@ Mimics 内脚本不实现 Registry、标签生命周期、训练准入或医学�
 
 ## 标注者入口
 
-日常入口是 Mimics 内的 `Script -> Scripting Library -> Start Labeling`。管理员把
-`adapters/mimics/scripting_library/` 配置为 Scripting Library 目录，并把
-`config/mimics_review_console.example.json` 复制为
-`adapters/mimics/scripting_library/sp_review_console.local.json`。
+平台导出的每个工作包根目录都自带一组 `Labeling_*.py` 和 `runtime_py35/`。建议把工作包根目录设置为 Scripting Library；也可以使用 `Script -> Run Script` 直接选择对应脚本。
 
-标注者只做三件事：
+标注机不需要安装平台 Python，不需要 Registry、工作站 YAML、assignee 配置或本机 JSON。
 
-1. 打开 Mimics。
-2. 运行 **Start Labeling**，选择 **Open Case**。
-3. 编辑 Mask，并在同一 Console 中选择 **Complete**、**Needs Review**、**Report Problem**、**Skip Case**、**Task List** 或 **Save Recovery Backup**。
+标注者运行的脚本名就是动作含义，例如：
 
-**Task List** 是当前稳定的非阻塞任务清单入口：它在 Mimics 弹窗内分页显示当前病例、目标器官统计和受管 Mask 状态，并支持按 Missing、Ready、With Initial、Known Absent 筛选。Project Tree 常驻注释对象仍需 Mimics 21 实机 POC 证明，不能作为生产依赖。
+- `Labeling_Open_Next_Case.py`
+- `Labeling_Case_Navigation.py`
+- `Labeling_Submit_Complete.py`
+- `Labeling_Submit_or_Report_Issue.py`
+- `Labeling_View_Task_List.py`
+- `Labeling_Save_Recovery_Backup.py`
 
-`prepare`、`prebuild`、`open`、`finalize` 仍保留为平台/管理员命令，用于批量准备、预生成 `.mcs`、调试和后台收尾，不作为标注者日常步骤。`prebuild` 通过 Mimics `-background_mode` 调用 `sp_open_review.py --background-prebuild`，成功后写入 `working/prebuilt_workspace.json`；已有普通 `.mcs` 默认跳过，避免覆盖标注者现场。路径、文件名、标签编号、格式转换、Registry 写入和最终 QC 由平台处理。
+高频入口 Open Next、Submit Complete、Task List 和 Recovery Backup 直接执行。Case Navigation 只收纳继续、选择和跳过；Submit or Report Issue 只收纳 Needs Review 和 Report Problem。没有全功能总菜单。
 
-多工作站无共享盘时，平台侧使用 `sp review export-worklist --claim-unassigned` 为每个标注者导出本地工作包；标注完成后使用 `sp mimics collect-submissions` 把 `submissions/` 收回中央病例包，再运行 `sp mimics finalize-many`。标注者仍只在 Mimics 内使用 **Start Labeling**。
+`prepare` 和 `finalize` 只在平台准备/QC 机器运行。导出工作包前必须完成 `prepare`；`prebuild` 是可选加速。没有预生成 `.mcs` 时，Console 会在标注机的 Mimics 内直接导入工作包 DICOM、创建 Mask 并保存项目，仍不调用外部 Python。Console 不会自动 finalize。
+
+平台侧使用 `sp review export-worklist` 导出可移动工作包。`--assignee` 只是可选的中央筛选和分发提示，不参与标注端运行。标注完成后使用 `sp mimics collect-submissions` 收回提交，再运行 `sp mimics finalize-many`。
 
 ## 不属于本目录
 

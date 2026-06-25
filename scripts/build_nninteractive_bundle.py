@@ -3,12 +3,12 @@
 """Build a portable nnInteractive bundle for distribution to annotator machines.
 
 This script is run ONCE by the platform manager on a machine with internet
-access. It produces a self-contained zip archive that annotators simply
-unzip into their SegmentationPlatform project directory — no Python, no pip,
-no downloads, no GPU driver checks needed.
+access. It produces a self-contained zip archive with the inference runtime,
+weights, bridge, and Mimics scripts. The target Windows workstation still
+needs a compatible NVIDIA driver and a licensed Mimics Research 21 install.
 
 Principle:
-  - Embed a portable Python 3.12 (Windows embeddable or Linux conda-standalone)
+  - Embed the official Windows Python 3.12 embeddable distribution
   - pip-install all dependencies into it via --target
   - Download model weights from HuggingFace
   - Make all paths relative so the bundle works from any location
@@ -21,8 +21,9 @@ Output:
     nninteractive_bundle.zip
 
 Annotator usage (each annotator does once):
-    unzip nninteractive_bundle.zip -d D:\\\\SegmentationPlatform\\\\
-    # Done. No further steps.
+    unzip nninteractive_bundle.zip -d D:\\\\MimicsTools\\\\
+    # Point Mimics Scripting Library to:
+    # D:\\MimicsTools\\nninteractive_env\\mimics\\scripting_library
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ BUILD_DIR = PROJECT_ROOT / "build" / BUNDLE_NAME
 ENV_DIR_NAME = "nninteractive_env"
 MODEL_NAME = "nnInteractive_v1.0"
 MODEL_REPO = "nnInteractive/nnInteractive"
+NNINTERACTIVE_VERSION = "2.4.2"
 
 # PyTorch wheels by CUDA version (Windows, Python 3.12, CUDA 12.4).
 PYTORCH_INDEX = "https://download.pytorch.org/whl/cu124"
@@ -67,7 +69,7 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 def _setup_portable_python_win(build_env: Path) -> Path:
     """Download and configure Python embeddable for Windows."""
-    python_dir = build_env / "python"
+    python_dir = build_env / ENV_DIR_NAME / "python"
     python_dir.mkdir(parents=True, exist_ok=True)
     python_exe = python_dir / "python.exe"
 
@@ -81,9 +83,12 @@ def _setup_portable_python_win(build_env: Path) -> Path:
         import urllib.request
 
         urllib.request.urlretrieve(PYTHON_EMBED_URL, embed_zip)
-    except Exception:
-        print("  Download failed. Falling back to system Python for the build.")
-        return Path(sys.executable)
+    except Exception as error:
+        raise RuntimeError(
+            "Could not download the Windows embeddable Python distribution. "
+            "A system interpreter cannot be substituted because the resulting bundle "
+            "would not be self-contained."
+        ) from error
 
     print("  Extracting ...")
     shutil.unpack_archive(embed_zip, python_dir)
@@ -97,8 +102,8 @@ def _setup_portable_python_win(build_env: Path) -> Path:
         # Uncomment "import site"
         content = content.replace("#import site", "import site")
         # Add Lib/site-packages to the path.
-        if "Lib/site-packages" not in content:
-            content += "\nLib/site-packages\n"
+        if "../Lib/site-packages" not in content:
+            content += "\n../Lib/site-packages\n"
         pth_file.write_text(content)
 
     # Install pip via get-pip.py.
@@ -108,9 +113,10 @@ def _setup_portable_python_win(build_env: Path) -> Path:
         import urllib.request
 
         urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", get_pip)
-    except Exception:
-        print("  Could not download get-pip.py. Bundle won't have pip.")
-        return python_exe
+    except Exception as error:
+        raise RuntimeError(
+            "Could not download get-pip.py; the portable bundle cannot be completed."
+        ) from error
 
     run([str(python_exe), str(get_pip), "--no-warn-script-location"])
 
@@ -125,12 +131,10 @@ def _setup_portable_python_win(build_env: Path) -> Path:
 
 
 def _setup_portable_python_linux(build_env: Path) -> Path:
-    """On Linux, use the system Python and create a relocatable venv."""
-    # We use --copies to copy rather than symlink the interpreter.
-    venv_dir = build_env / "python"
-    if not (venv_dir / "bin" / "python").is_file():
-        run([sys.executable, "-m", "venv", "--copies", str(venv_dir)])
-    return venv_dir / "bin" / "python"
+    raise RuntimeError(
+        "A Windows nnInteractive bundle must be built on Windows. "
+        "Copied virtual environments are not reliably relocatable across systems."
+    )
 
 
 def setup_portable_python(build_env: Path) -> Path:
@@ -171,7 +175,7 @@ def install_packages(python_exe: Path, site_packages: Path) -> None:
 
     # Install nnInteractive and bridge dependencies.
     run(pip_args + [
-        "nninteractive>=2.4.0",
+        f"nninteractive=={NNINTERACTIVE_VERSION}",
         "nibabel>=5.2",
         "huggingface_hub",
     ])
@@ -184,7 +188,7 @@ def install_packages(python_exe: Path, site_packages: Path) -> None:
 def download_weights(build_env: Path, python_exe: Path, site_packages: Path) -> Path:
     """Download nnInteractive model weights from HuggingFace."""
     model_path = build_env / ENV_DIR_NAME / "models" / MODEL_NAME
-    if (model_path / "inference_info.json").is_file():
+    if (model_path / "inference_session_class.json").is_file():
         print(f"[skip] Model weights already present: {model_path}")
         return model_path
 
@@ -219,6 +223,7 @@ print("Download complete.")
 
 def create_activation_scripts(build_env: Path) -> None:
     """Create scripts that set up the Python path for the bundle."""
+    (build_env / ENV_DIR_NAME).mkdir(parents=True, exist_ok=True)
     # Windows batch file to run any Python script in the bundle env.
     if sys.platform == "win32":
         bat = build_env / ENV_DIR_NAME / "python_env.bat"
@@ -242,20 +247,18 @@ def create_activation_scripts(build_env: Path) -> None:
     sh.chmod(0o755)
 
     # Create the start_server.bat/sh inside the env.
-    model_path = build_env / ENV_DIR_NAME / "models" / MODEL_NAME
-    python_exe = build_env / ENV_DIR_NAME / "python" / "python.exe" if sys.platform == "win32" else build_env / ENV_DIR_NAME / "python" / "bin" / "python"
-
     if sys.platform == "win32":
         server_bat = build_env / ENV_DIR_NAME / "start_server.bat"
         server_bat.write_text(
             "@echo off\r\n"
             "setlocal\r\n"
-            f'set "PYTHON={python_exe}"\r\n'
-            f'set "MODEL_DIR={model_path}"\r\n'
+            'set "ROOT=%~dp0"\r\n'
+            'set "PYTHON=%ROOT%python\\python.exe"\r\n'
+            f'set "MODEL_DIR=%ROOT%models\\{MODEL_NAME}"\r\n'
             'set "HOST=127.0.0.1"\r\n'
             'set "PORT=1527"\r\n'
             'set "DEVICE=cuda:0"\r\n'
-            f'set "PYTHONPATH={build_env / ENV_DIR_NAME / "Lib" / "site-packages"}"\r\n'
+            'set "PYTHONPATH=%ROOT%Lib\\site-packages"\r\n'
             'echo nnInteractive Server: http://%HOST%:%PORT%\r\n'
             '"%PYTHON%" -m nnInteractive.inference.server.main '
             '--model-dir "%MODEL_DIR%" --fold all '
@@ -270,7 +273,33 @@ def create_activation_scripts(build_env: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-#  Step 5: Package into zip
+#  Step 5: Include standalone Mimics integration
+# ---------------------------------------------------------------------------
+
+def include_mimics_integration(build_env: Path) -> None:
+    """Copy the standalone bridge and Mimics scripts into the bundle."""
+    integration_root = build_env / ENV_DIR_NAME / "mimics"
+    runtime_dir = integration_root / "runtime_py35"
+    library_dir = integration_root / "scripting_library"
+    for directory in (runtime_dir, library_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(
+        PROJECT_ROOT / "adapters" / "mimics" / "runtime_py35" / "nninteractive_mimics.py",
+        runtime_dir / "nninteractive_mimics.py",
+    )
+    shutil.copy2(
+        PROJECT_ROOT / "adapters" / "mimics" / "scripting_library" / "nnInteractive.py",
+        library_dir / "nnInteractive.py",
+    )
+    shutil.copy2(
+        PROJECT_ROOT / "adapters" / "mimics" / "nninteractive_bridge.py",
+        integration_root / "nninteractive_bridge.py",
+    )
+
+
+# ---------------------------------------------------------------------------
+#  Step 6: Package into zip
 # ---------------------------------------------------------------------------
 
 def create_zip(build_env: Path) -> Path:
@@ -291,7 +320,7 @@ def create_zip(build_env: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-#  Step 6: Verify
+#  Step 7: Verify
 # ---------------------------------------------------------------------------
 
 def verify_bundle(build_env: Path) -> bool:
@@ -385,7 +414,11 @@ def main() -> None:
     create_activation_scripts(build_env)
     print()
 
-    # Step 5: Verify.
+    # Step 5: Include the independent Mimics entry and bridge.
+    include_mimics_integration(build_env)
+    print()
+
+    # Step 6: Verify.
     print("Verifying bundle ...")
     ok = verify_bundle(build_env)
     if not ok:
@@ -393,7 +426,7 @@ def main() -> None:
         sys.exit(1)
     print()
 
-    # Step 6: Zip.
+    # Step 7: Zip.
     if not args.skip_zip:
         zip_path = create_zip(build_env)
         print()
@@ -401,9 +434,10 @@ def main() -> None:
         print("  Bundle ready for distribution!")
         print(f"  {zip_path}")
         print()
-        print("  Annotators: unzip this file into your project directory.")
-        print("  unzip nninteractive_bundle.zip -d D:\\SegmentationPlatform\\")
-        print("  That\'s it — no Python, no pip, no downloads needed.")
+        print("  Unzip on the target Windows workstation:")
+        print("  unzip nninteractive_bundle.zip -d D:\\MimicsTools\\")
+        print("  Set Mimics Scripting Library to:")
+        print("  D:\\MimicsTools\\nninteractive_env\\mimics\\scripting_library")
         print("=" * 60)
     else:
         print("=" * 60)

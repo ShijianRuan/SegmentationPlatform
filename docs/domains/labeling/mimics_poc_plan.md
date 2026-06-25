@@ -272,7 +272,7 @@ machine:
 **操作**
 
 1. 通过 `-run_script` 传入任务清单和输出目录。
-2. 用 **Start Labeling** 连续领取多个任务。
+2. 用 `Labeling_Open_Next_Case.py` 连续打开多个任务。
 3. 对无人工步骤使用 background mode。
 4. 人为制造一个失败病例。
 
@@ -482,7 +482,7 @@ machine:
 - 保存重开后仍存在；
 - 不需要额外不可控模块许可。
 
-若任一条件不满足，生产流程继续使用 **Start Labeling -> Task List**，不依赖 Project Tree 注释。
+若任一条件不满足，生产流程继续使用 `Labeling_View_Task_List.py`，不依赖 Project Tree 注释。
 
 ## 4. 执行顺序
 

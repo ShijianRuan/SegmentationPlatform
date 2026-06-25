@@ -96,6 +96,7 @@ def create_snapshot(request_path: Path, registry_root: Path) -> dict[str, Any]:
     registry = FileRegistry(registry_root)
     vocabulary = AnatomyVocabulary()
     label_map = _validate_label_map(dict(request["task_label_map"]), vocabulary)
+    require_all_organs = bool(request.get("require_all_organs", False))
     allowed_statuses = set(request["label_policy"]["allow_lifecycle_status"])
     if not request.get("cases"):
         raise ValidationError("snapshot request must contain at least one case")
@@ -182,6 +183,13 @@ def create_snapshot(request_path: Path, registry_root: Path) -> dict[str, Any]:
                     "admission_result": admission,
                 }
             )
+        if require_all_organs:
+            required_organs = {organ for organ in label_map if organ != "background"}
+            missing_organs = sorted(required_organs - seen_organs)
+            if missing_organs:
+                raise ValidationError(
+                    f"{case_record['case_id']}/{image_id}: snapshot requires all organs but is missing {missing_organs}"
+                )
         snapshot_cases.append(
             {
                 "case_id": case_record["case_id"],
@@ -400,6 +408,7 @@ def build_snapshot_request(
         "task_label_map": label_map,
         "label_policy": {"allow_lifecycle_status": allowed_statuses},
         "cases": cases,
+        "require_all_organs": require_all_organs,
         "preprocess_profile": {"name": preprocess_name},
         "usage_constraints": {
             "model_training": "needs_policy",
