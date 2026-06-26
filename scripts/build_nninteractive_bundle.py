@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -46,9 +47,36 @@ MODEL_NAME = "nnInteractive_v1.0"
 MODEL_REPO = "nnInteractive/nnInteractive"
 NNINTERACTIVE_VERSION = "2.4.2"
 
-# PyTorch wheels by CUDA version (Windows, Python 3.12, CUDA 12.4).
-PYTORCH_INDEX = "https://download.pytorch.org/whl/cu124"
+# PyTorch wheels by CUDA version.
 PYTORCH_VERSION = "2.6.0"
+_PYTORCH_CUDA_INDEXES = {
+    "cu124": "https://download.pytorch.org/whl/cu124",
+    "cu121": "https://download.pytorch.org/whl/cu121",
+    "cu118": "https://download.pytorch.org/whl/cu118",
+}
+# Mirrors that also host PyTorch CUDA wheels.
+_PYTORCH_CUDA_MIRRORS: dict[str, dict[str, str]] = {
+    "tsinghua": {
+        "cu124": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/pytorch/",
+        "cu121": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/pytorch/",
+        "cu118": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/pytorch/",
+    },
+    "aliyun": {
+        "cu124": "https://mirrors.aliyun.com/pytorch-wheels/cu124/",
+        "cu121": "https://mirrors.aliyun.com/pytorch-wheels/cu121/",
+        "cu118": "https://mirrors.aliyun.com/pytorch-wheels/cu118/",
+    },
+}
+_PYPI_MIRRORS: dict[str, str] = {
+    "tsinghua": "https://pypi.tuna.tsinghua.edu.cn/simple",
+    "aliyun":   "https://mirrors.aliyun.com/pypi/simple",
+    "ustc":     "https://pypi.mirrors.ustc.edu.cn/simple",
+    "tencent":  "https://mirrors.cloud.tencent.com/pypi/simple",
+    "huawei":   "https://repo.huaweicloud.com/repository/pypi/simple",
+}
+_HF_MIRRORS: dict[str, str] = {
+    "tsinghua": "https://hf-mirror.com",
+}
 
 # Python embeddable distribution for Windows.
 PYTHON_VERSION = "3.12.9"
@@ -61,6 +89,33 @@ PYTHON_EMBED_URL = (
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     print(f"  $ {' '.join(cmd)}")
     return subprocess.run(cmd, check=True, **kwargs)
+
+
+def _detect_cuda_version() -> str | None:
+    """Auto-detect installed CUDA version. Returns "cu124" etc. or None."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi"], capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            match = re.search(r"CUDA Version:\s*(\d+\.\d+)", result.stdout)
+            if match:
+                major, minor = match.group(1).split(".")[:2]
+                key = f"cu{major}{minor}"
+                if key in _PYTORCH_CUDA_INDEXES:
+                    return key
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
+def _resolve_pypi_mirror(mirror: str | None) -> str | None:
+    if mirror is None:
+        return None
+    if mirror in _PYPI_MIRRORS:
+        return _PYPI_MIRRORS[mirror]
+    if mirror.startswith("http://") or mirror.startswith("https://"):
+        return mirror
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -148,37 +203,82 @@ def setup_portable_python(build_env: Path) -> Path:
 #  Step 2: Install packages
 # ---------------------------------------------------------------------------
 
-def install_packages(python_exe: Path, site_packages: Path) -> None:
-    """Install nnInteractive and all dependencies into the bundle."""
+def install_packages(python_exe: Path, site_packages: Path,
+                      cuda_version: str = "cu124",
+                      mirror_alias: str | None = None) -> str:
+    """Install nnInteractive and all dependencies into the bundle.
+
+    Returns the resolved device string ("cuda:0" or "cpu").
+    """
     marker = site_packages / "nnInteractive" / "__init__.py"
     if marker.is_file():
         print(f"[skip] Packages already installed: {site_packages}")
-        return
+        return f"cuda:0" if cuda_version != "cpu" else "cpu"
 
     print("Installing PyTorch + nnInteractive + dependencies ...")
-
-    # Create a temporary directory for pip target install.
     site_packages.mkdir(parents=True, exist_ok=True)
 
-    pip_args = [
+    pip_base = [
         str(python_exe), "-m", "pip", "install",
         "--target", str(site_packages),
         "--no-warn-script-location",
         "--prefer-binary",
     ]
 
-    # Install PyTorch first (largest, most likely to fail).
-    run(pip_args + [
-        f"torch=={PYTORCH_VERSION}",
-        "--index-url", PYTORCH_INDEX,
-    ])
+    # Resolve PyTorch CUDA index.
+    if cuda_version == "cpu":
+        pytorch_index = _resolve_pypi_mirror(mirror_alias)
+        print("  Installing PyTorch (CPU-only) ...")
+    else:
+        if cuda_version not in _PYTORCH_CUDA_INDEXES:
+            print(f"ERROR: Unknown CUDA version '{cuda_version}'.")
+            sys.exit(1)
+        pytorch_index = _PYTORCH_CUDA_INDEXES[cuda_version]
+        if mirror_alias and mirror_alias in _PYTORCH_CUDA_MIRRORS:
+            mirrors = _PYTORCH_CUDA_MIRRORS[mirror_alias]
+            if cuda_version in mirrors:
+                pytorch_index = mirrors[cuda_version]
+                print(f"  Using {mirror_alias} mirror for PyTorch CUDA wheels")
+        print(f"  Installing PyTorch {PYTORCH_VERSION} ({cuda_version}) ...")
+
+    pytorch_cmd = pip_base + [f"torch=={PYTORCH_VERSION}"]
+    if pytorch_index:
+        pytorch_cmd.extend(["--index-url", pytorch_index])
+    run(pytorch_cmd)
+
+    # Verify CUDA in the target Python.
+    if cuda_version != "cpu":
+        print("  Verifying PyTorch CUDA ...")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(site_packages)
+        result = subprocess.run(
+            [str(python_exe), "-c",
+             "import torch; "
+             "print('torch', torch.__version__); "
+             "print('cuda_available', torch.cuda.is_available()); "
+             "print('cuda_version', torch.version.cuda "
+             "if torch.cuda.is_available() else 'N/A')"],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        print(f"  {result.stdout.strip()}")
+        if "cuda_available True" not in result.stdout:
+            print("  WARNING: PyTorch CUDA wheel installed but GPU not usable.")
+            print("  The bundle will fall back to CPU on GPU-less machines.")
+            print("  This is expected if the build machine has no NVIDIA GPU.")
 
     # Install nnInteractive and bridge dependencies.
-    run(pip_args + [
+    pypi_index = _resolve_pypi_mirror(mirror_alias)
+    pkg_cmd = pip_base + [
         f"nninteractive=={NNINTERACTIVE_VERSION}",
         "nibabel>=5.2",
         "huggingface_hub",
-    ])
+    ]
+    if pypi_index:
+        pkg_cmd.extend(["--index-url", pypi_index])
+        print(f"  Using mirror for packages: {pypi_index}")
+    run(pkg_cmd)
+
+    return f"cuda:0" if cuda_version != "cpu" else "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -257,11 +357,16 @@ def create_activation_scripts(build_env: Path) -> None:
             f'set "MODEL_DIR=%ROOT%models\\{MODEL_NAME}"\r\n'
             'set "HOST=127.0.0.1"\r\n'
             'set "PORT=1527"\r\n'
-            'set "DEVICE=cuda:0"\r\n'
+            'set "DEVICE=auto"\r\n'
             'set "PYTHONPATH=%ROOT%Lib\\site-packages"\r\n'
+            'if /I "%DEVICE%"=="auto" (\r\n'
+            '  for /f "delims=" %%D in (\'"%PYTHON%" -c "import torch; '
+            "print('cuda:0' if torch.cuda.is_available() else 'cpu')\"') "
+            'do set "DEVICE=%%D"\r\n'
+            ')\r\n'
             'echo nnInteractive Server: http://%HOST%:%PORT%\r\n'
             '"%PYTHON%" -m nnInteractive.inference.server.main '
-            '--model-dir "%MODEL_DIR%" --fold all '
+            '--model-dir "%MODEL_DIR%" '
             '--host %HOST% --port %PORT% '
             '--device %DEVICE% '
             '--idle-timeout-seconds 1800 '
@@ -366,6 +471,25 @@ def main() -> None:
         description="Build portable nnInteractive bundle for annotator distribution."
     )
     parser.add_argument(
+        "--cuda",
+        default="auto",
+        help=(
+            "CUDA version for PyTorch. "
+            "'auto' (default): auto-detect from system. "
+            "'cpu': CPU-only PyTorch. "
+            "Explicit: cu124, cu121, cu118."
+        ),
+    )
+    parser.add_argument(
+        "--mirror",
+        default=None,
+        help=(
+            "PyPI mirror for faster downloads. "
+            "Pre-defined: tsinghua, aliyun, ustc, tencent, huawei. "
+            "Or provide a full mirror URL."
+        ),
+    )
+    parser.add_argument(
         "--skip-download",
         action="store_true",
         help="Skip model weight download.",
@@ -382,6 +506,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Resolve CUDA version.
+    cuda_version = args.cuda.strip().lower()
+    if cuda_version == "auto":
+        detected = _detect_cuda_version()
+        if detected:
+            cuda_version = detected
+            print(f"[auto-detect] CUDA {cuda_version} found via nvidia-smi")
+        else:
+            cuda_version = "cu124"  # default for Windows GPU workstations
+            print(f"[auto-detect] No CUDA found, defaulting to {cuda_version}")
+
+    mirror_alias = args.mirror.strip() if args.mirror else None
+
     build_env = BUILD_DIR
     build_env.mkdir(parents=True, exist_ok=True)
 
@@ -393,6 +530,9 @@ def main() -> None:
     print("  Building nnInteractive portable bundle")
     print(f"  Build directory: {build_env}")
     print(f"  Platform: {sys.platform}")
+    print(f"  CUDA: {cuda_version}")
+    if mirror_alias:
+        print(f"  Mirror: {mirror_alias}")
     print("=" * 60)
     print()
 
@@ -402,7 +542,8 @@ def main() -> None:
 
     # Step 2: Install packages.
     site_packages = build_env / ENV_DIR_NAME / "Lib" / "site-packages"
-    install_packages(python_exe, site_packages)
+    resolved_device = install_packages(python_exe, site_packages,
+                                        cuda_version, mirror_alias)
     print()
 
     # Step 3: Download weights.
@@ -433,6 +574,7 @@ def main() -> None:
         print("=" * 60)
         print("  Bundle ready for distribution!")
         print(f"  {zip_path}")
+        print(f"  Device: {resolved_device}")
         print()
         print("  Unzip on the target Windows workstation:")
         print("  unzip nninteractive_bundle.zip -d D:\\MimicsTools\\")
@@ -442,6 +584,7 @@ def main() -> None:
     else:
         print("=" * 60)
         print(f"  Build complete in: {build_env / ENV_DIR_NAME}")
+        print(f"  Device: {resolved_device}")
         print("  Copy this directory to annotator machines.")
         print("=" * 60)
 

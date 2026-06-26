@@ -57,39 +57,57 @@ Script -> Scripting Library -> nnInteractive
 
 | nnInteractive 提示 | Mimics 采集方式 | 转换方式 |
 | --- | --- | --- |
-| Foreground point | `mimics.indicate_coordinate()` | 世界坐标转 active image voxel index |
-| Background point | `mimics.indicate_coordinate()` | 同上，`include_interaction=false` |
-| Foreground scribble | `mimics.analyze.indicate_spline()` | 读取 `geometry_points` 并栅格化为细线 |
-| Background scribble | `mimics.analyze.indicate_spline()` | 同上，作为排除提示 |
-| Foreground box | 临时 Prompt Mask + `activate_edit_mask(..., "Rectangle", "Draw")` | 从绘制区域提取 bounding box |
-| Background box | 同上 | 作为排除 box |
-| Foreground lasso | 临时 Prompt Mask + `activate_edit_mask(..., "Lasso", "Draw")` | 把填充区域转换成闭合边界 |
-| Background lasso | 同上 | 作为排除 lasso |
+| Include/Exclude point set | 多次 `mimics.indicate_coordinate(confirm=False)` | 一次收集任意数量的正负点；最后统一触发一次预测 |
+| Include scribble | 临时 Prompt Mask + `activate_edit_mask(..., "Ellipse", "Draw")` | 把用户画出的 Ellipse 区域裁剪为 Scribble mask |
+| Exclude scribble | 同上 | 写入 Scribble negative channel |
+| Foreground box | `mimics.measure.indicate_distance_measurement()` | 两端点作为二维矩形对角点，转换为半开区间 bbox |
+| Foreground lasso | `mimics.analyze.indicate_spline()` | 要求 `Spline.closed=true`，栅格化闭合轮廓 |
 
-### 5.2 为什么不直接监听 Edit Mask 的笔迹
+Box 和 Lasso 在当前 Mimics UI 中固定为前景提示，不再额外询问 Foreground/Background。nnInteractive API 虽然存在 negative box/lasso channel，但在实际修正中排除区域可用 Exclude Points 或 Exclude Scribble 更清楚，也避免每次使用范围提示都增加一次选择。
 
-`mimics.segment.activate_edit_mask()` 可以启动 `Ellipse`、`Rectangle`、`Lasso`、`FloodFill`、`LiveWire` 等编辑工具，并返回编辑后的 Mask。
+### 5.2 各提示的几何门禁
 
-但是 Mimics 21 公开 API 没有提供以下信息：
+- Point Set 至少包含一个点，可以在同一批中交替添加 Include 和 Exclude 点；采集期间以绿色/红色临时 Point 显示位置，可删除最后一个点；
+- Box 的两个端点必须位于同一个轴对齐切片，并且在另外两个方向上形成非零矩形；
+- 当前 Mimics Lasso 入口要求显式闭合、至少包含三个不同体素点，并位于一个 axial、coronal 或 sagittal 切片；
+- Scribble 可位于一个或多个切片。多切片区域会拆成若干二维 crop，全部写入后只执行一次预测。
 
-- 每次 stroke 的轨迹；
-- Draw 与 Erase 的逐次历史；
-- Lasso 顶点列表；
-- Edit Mask 完成事件中的工具参数；
-- 删除某个历史 stroke 的接口。
+当前 nnInteractive v1 权重明确支持 `bbox2d`、不支持真正的 3D box。nnInteractive 的 Scribble/Lasso API 接收 mask 和 `interaction_bbox`；Mimics 侧把这两类用户交互定义为二维编辑语义，因此不会把斜穿三维空间的 Spline 静默近似成 Lasso。
 
-`mimics.events` 只有 `doc_opened`、`doc_closed`、`obj_deleted`、`obj_changed` 和 `timer` 等通用通知。`obj_changed` 能说明对象发生了变化，但不能恢复是哪种编辑工具、正负语义或笔迹几何。
+### 5.3 为什么 Scribble 使用 Ellipse Prompt Mask
 
-因此，直接激活用户的目标 Mask 再尝试“读取编辑动作”仍会退化为 Mask diff，而且会污染目标结果。当前实现改用短生命周期 Prompt Mask：
+Mimics 21 的 `activate_edit_mask()` 没有公开自由画笔类型，只公开 `Ellipse`、`Rectangle`、`Lasso`、`FloodFill` 和 `LiveWire`。它也不返回每次 stroke 的轨迹、Draw/Erase 历史或工具参数。
+
+因此当前最接近“涂抹”的可靠方式是：
 
 1. 脚本创建空 Prompt Mask；
-2. 在 Prompt Mask 上激活 Rectangle 或 Lasso；
-3. 用户确认后读取 prompt buffer；
-4. Rectangle 只传 bbox，Lasso 只写非空裁剪区；
+2. 以 `Ellipse + Draw` 打开 Edit Masks；
+3. 用户在需要包含或排除的位置画一个或多个区域；
+4. 脚本读取非空区域并作为 Scribble mask；
 5. 立即删除 Prompt Mask；
-6. 目标 Mask 只接收 nnInteractive 结果。
+6. 目标 Mask 只接收模型结果，不被提示绘制污染。
 
-Spline 和 point 不需要 Prompt Mask，Mimics API 能直接返回几何信息。
+Windows 实机仍需确认 Mimics 21 的一次 Ellipse 编辑会话能否连续画多个区域。如果只能画一个，功能仍然正确，用户可重复添加 Scribble；只是一次提示的覆盖范围较小。
+
+### 5.4 连续修正与原版 nnInteractive 的关系
+
+原版 nnInteractive 在一个 inference session 中维护：
+
+- 初始分割或当前 previous segmentation；
+- 按顺序累积的所有提示；
+- 每次预测写回的 target buffer。
+
+Mimics 集成的外部 bridge 每次调用都会关闭 remote session，因此不能直接保留服务器端 session。当前实现采用等价的有序重放：
+
+1. 进入工具时保存一次目标 Mask，作为本次工具会话的 initial segmentation；
+2. 每次新增提示后，新建 remote session；
+3. 注入同一份 initial segmentation；
+4. 按原顺序重放此前所有提示，每个提示事件保持原来的预测边界；
+5. 把最终 target buffer 写回 Mimics Mask。
+
+因此连续修正不是“把刚预测出的 Mask 再作为新的 initial segmentation”。后者会在每次提示时重置交互通道并累积模型误差。只有退出工具并重新启动时，当前 Mimics Mask 才成为下一次工具会话的新 initial segmentation。
+
+Point Set 是一个提示事件：多个正负点以 `run_prediction=False` 写入，最后一个点触发一次预测。多切片 Scribble 同理，所有二维 crop 写入后只触发一次预测。
 
 ## 6. 与旧 diff 方案的区别
 
@@ -121,18 +139,58 @@ Spline 和 point 不需要 Prompt Mask，Mimics API 能直接返回几何信息�
 2. 激活要处理的 image set。
 3. 在 Project Tree 选择一个目标 Mask；也可以不选，由脚本创建新 Mask。
 4. 运行 `Script -> Scripting Library -> nnInteractive`。
-5. 选择 Point、Scribble、Box 或 Lasso。
-6. 选择 Foreground 或 Background。
-7. 在 Mimics 视图中完成提示并确认。
-8. 脚本调用外部 nnInteractive，结果自动写回目标 Mask。
-9. 继续增加提示，或使用 **Undo Last Prompt** / **Reset To Start**。
-10. 选择 **Finish**，按正常 Mimics 方式保存项目。
+5. 选择 **Add Points**、**Paint Scribble**、**Draw Box** 或 **Draw Lasso**。
+6. Add Points 中可连续加入 Include/Exclude 点，绿色/红色标记会保留到 Run/Discard；必要时使用 Remove Last Point。
+7. Paint Scribble 只需选择一次 Include 或 Exclude，然后在临时 Mask 中绘制。
+8. Box 和 Lasso 默认为前景，不再显示正负选择。
+9. 脚本调用外部 nnInteractive，结果自动写回目标 Mask。
+10. 继续增加提示，或使用 **Undo Last Prompt** / **Reset To Start**。
+11. 选择 **Finish**，按正常 Mimics 方式保存项目。
 
 第一次推理需要启动模型服务，通常比后续提示慢。脚本会复用正在运行的本机服务。
 
 服务由 bridge 创建并记录所有权，不会根据一个来源不明的 PID 直接终止进程。每次提示都会刷新活动时间；默认连续 30 分钟没有推理请求后，独立 watchdog 会核对 PID、启动命令、模型路径和所有权 token，再关闭自己启动的服务并释放 GPU。nnInteractive 官方的 `idle-timeout` 只回收 client session，本集成没有把它误当作服务退出机制。
 
-`start_server.bat` 只用于人工诊断。默认自动管理模式下，诊断结束后应按 Ctrl+C 停止它再运行 Mimics；若确实要长期连接手工启动的服务，需要在 `nninteractive_config.json` 中显式设置 `auto_start_server: false`。自动模式遇到来源不明的 1527 端口服务会报错，不会接管或结束它。
+`start_server.bat` 只用于人工诊断。默认自动管理模式下，诊断结束后应按 Ctrl+C 停止它再运行 Mimics；若确实要长期连接手工启动的服务，需要在 `nninteractive_config.json` 中显式设置 `auto_start_server: false`。自动模式不会接管或结束来源不明的进程；默认端口 `1527` 已被占用时，会为本次受管服务选择另一个空闲本地端口，并把实际地址写入状态和日志。
+
+### 7.1 启动、等待与日志
+
+Mimics 侧不再直接相信“某个 `python.exe` 文件存在”。第一次使用时会先检查外部解释器版本，并确认 `numpy`、`nibabel`、`torch` 和 `nnInteractive` 都能被发现。环境变量和配置文件仍可覆盖默认位置，但指向一个错误或不完整环境时会立即给出解释器路径和缺失包，不会继续走到 `ConnectionRefusedError` 才暴露问题。
+
+设备默认值是 `auto`：
+
+- 有可用 CUDA 时使用 `cuda:0`；
+- 没有可用 CUDA 时自动回退到 CPU；
+- 显式要求 CUDA 但工作站没有可用 GPU 时，默认也回退到 CPU，并在 Mimics Log Panel 和日志中记录；
+- 只有设置 `allow_cpu_fallback: false` 时才会因为 CUDA 不可用而阻断。
+
+fold 默认值也是 `auto`。bridge 让 nnInteractive 从实际存在的 `fold_*` 目录自动发现模型；只有一个 `fold_0` 时不会再错误地强制 `fold all`。
+
+同一次 `nnInteractive` 工具运行只创建一个外部 worker 和一个远程 inference session。影像上传与 nnInteractive 预处理只执行一次；后续提示、Undo 和 Reset 使用 `reset_interactions()` 后重放提示，不再重复上传整幅影像。worker 会在标注者选择第一种提示前开始初始化，使模型加载尽量与交互操作重叠。
+
+Windows 子进程使用无控制台窗口和独立进程组启动，因此正常操作不会再弹出 bridge、server 或 watchdog 黑色终端窗口，也不会继承 Mimics 所在控制台的 Ctrl+C 广播。
+
+默认等待预算按阶段拆开：
+
+| 阶段 | 默认上限 |
+| --- | ---: |
+| 外部环境检查 | 180 秒 |
+| 模型服务首次启动 | 600 秒 |
+| 影像上传与预处理 | 1800 秒 |
+| 单次预测 | 1800 秒 |
+| 兼容的一次性 bridge 总预算 | 4200 秒 |
+
+可在 `nninteractive_config.json` 中分别调整 `environment_probe_timeout_seconds`、`server_startup_timeout_seconds`、`set_image_timeout_seconds`、`prediction_timeout_seconds` 和 `bridge_timeout_seconds`。不要只缩短总超时，否则 CPU 工作站可能在正常计算中被误判失败。
+
+诊断信息固定写到模型目录同级的 `logs/`：
+
+- `logs/nninteractive_mimics.log`：Mimics 侧启动、等待、设备选择和结果摘要；
+- `logs/nninteractive_bridge.jsonl`：bridge 的阶段、实际解释器、设备、端口和 traceback；
+- `logs/nninteractive_worker.stderr.log`：持久 worker 的标准错误；
+- `.nninteractive_server.log`：模型服务启动、权重加载和服务端异常；
+- `.nninteractive_server.json`：受管服务 PID、实际端口、设备、fold 和所有权信息。
+
+Mimics 会自动打开 Log Panel，并在推理开始、CPU 回退和完成时写入用户日志。失败弹窗会直接给出失败阶段和上述日志路径，不再只显示 `WinError 10061`。
 
 ## 8. 代码结构
 
@@ -153,7 +211,7 @@ Spline 和 point 不需要 Prompt Mask，Mimics API 能直接返回几何信息�
 在项目根目录使用 Python 3.10+：
 
 ```powershell
-python scripts\setup_nninteractive_env.py --cuda cu124 --device cuda:0
+python scripts\setup_nninteractive_env.py --cuda cu124 --device auto
 ```
 
 安装脚本可恢复“权重已经下载、但虚拟环境不完整”的中断状态：重建 Python 环境时暂存并恢复 `nninteractive_env\models\`，不重新下载已有权重。
@@ -188,7 +246,7 @@ python scripts\build_nninteractive_bundle.py
 
 ```powershell
 # 1. 安装 nnInteractive 环境（只需做一次）
-python scripts\setup_nninteractive_env.py --cuda cu124 --device cuda:0
+python scripts\setup_nninteractive_env.py --cuda cu124 --device auto
 
 # 2. 导出工作包（自动包含 nnInteractive 脚本）
 sp review export-worklist `
@@ -244,18 +302,29 @@ setx NNINTERACTIVE_MODEL_DIR "D:\nninteractive_env\models\nnInteractive_v1.0"
 2. 任意非平台项目可以直接运行。
 3. 选中已有 Mask 后结果写回正确 Mask。
 4. 未选 Mask 时可创建新结果 Mask。
-5. Foreground/Background point 均改变结果且方向正确。
-6. Spline Scribble 能形成连续提示。
-7. Rectangle 只产生一个合理 bbox。
-8. Lasso 填充区域转换为闭合边界后结果合理。
-9. 在 Rectangle/Lasso 中直接 Cancel，确认脚本返回且不采用未确认区域。
-10. 在绘制部分区域后关闭 Edit Mask，确认 Mimics 是抛出 `UserInterrupted`、正常返回空 Mask，还是保留部分区域。
-11. Undo 只撤销最后一个提示。
+5. 一个 Point Set 中可混合多个 Include/Exclude 点，并且只执行一次预测；Run、Discard 和异常退出后均无残留 Point。
+6. Point 使用 `confirm=False` 时单击即可返回，没有额外 OK。
+7. Ellipse Scribble 的正负语义正确；检查一次 Edit Masks 会话能否画多个区域。
+8. Distance Measurement 两端点正确生成二维 bbox，测量对象随后被删除。
+9. 开放 Spline 被拒绝；闭合、单切片 Spline 能生成完整 Lasso 轮廓。
+10. 在 Ellipse/Spline/Distance Measurement 中 Cancel，确认脚本返回且不采用未确认提示。
+11. Undo 只撤销最后一个提示事件；一个 Point Set 作为整体撤销。
 12. Reset 恢复进入工具时的 Mask。
 13. 切换 image set 后不会写错图像或 Mask。
-14. 工具退出后没有残留 `nnInteractive Prompt` Mask。
+14. 工具退出后没有残留 Prompt Mask、Spline 或 Distance Measurement。
 15. 第一次和后续推理耗时可接受。
 16. Mimics 保存、关闭、重新打开项目后结果仍存在。
+
+还必须覆盖本次启动与等待修复：
+
+- 临时把配置中的 `python` 指向一个没有 nnInteractive 的解释器，确认在连接服务前阻断，并显示错误解释器路径；
+- 在无 NVIDIA GPU 或禁用 GPU 的机器上保持 `device: auto`，确认日志记录 CPU 回退且能够完成小体积预测；
+- 使用只有 `fold_0` 的官方权重，确认服务命令没有 `--fold all`，能够自动加载；
+- 预先占用 `127.0.0.1:1527`，确认受管服务选择其他本地端口且提示仍可完成；
+- 强制关闭 Mimics 后重新打开，确认残留状态不会误杀无关 PID，旧服务不可复用时会安全重建；
+- 连续添加两个提示，确认第二次没有重新执行 `set_image`/整幅影像预处理；
+- 观察任务管理器，确认 bridge、server 和 watchdog 不弹出终端窗口；
+- 分别查看 Mimics Log Panel、`logs/nninteractive_mimics.log`、`logs/nninteractive_bridge.jsonl`、`logs/nninteractive_worker.stderr.log` 和 `.nninteractive_server.log`，确认失败阶段可追踪。
 
 在这些检查通过前，应把功能视为工程验证版，而不是生产标注能力。
 
@@ -263,11 +332,14 @@ setx NNINTERACTIVE_MODEL_DIR "D:\nninteractive_env\models\nnInteractive_v1.0"
 
 - Mimics 21 公开 Python API 不能注册原生 Segment 工具栏图标。
 - `activate_edit_mask()` 文档没有声明 Cancel 时抛出的异常类型。代码处理 `mimics.UserInterrupted`、正常返回空 Mask 和其他异常，并始终删除 Prompt Mask 和临时目录；但 Cancel 是否可能正常返回带部分编辑的 Mask，必须实机验证。
-- Spline Scribble 是曲线栅格化，不是 Mimics 原生自由画笔事件。
+- Mimics 21 未公开自由画笔 API；Scribble 目前由 Ellipse Draw 区域近似。
+- Box 和 Lasso 的 Mimics 入口只暴露前景语义；负向修正使用 Exclude Point/Scribble。
+- Spline Lasso 只接受轴对齐二维切片，不把任意三维曲线近似为 Lasso。
 - Mimics 21 API 明确公开 `Spline.geometry_points` 和 `Spline.points`。若运行时两者都不可读或不足两个不同体素点，脚本会显示明确错误，不再静默忽略。
 - 一个工具会话内提示可撤销；退出后只保留结果，不保留提示历史。
 - 推理期间 Mimics 会等待外部 bridge 返回。
-- 自动启动的服务使用本机 bearer token，并只复用带匹配所有权记录、模型目录和设备配置的进程；默认端口被其他服务占用时会明确停止，不会杀死来源不明的进程。
+- 自动启动的服务使用本机 bearer token，并只复用带匹配所有权记录、模型目录、设备和 fold 配置的进程；默认端口被其他服务占用时会改用空闲本地端口，不会杀死来源不明的进程。
+- Mimics Research 21 的公开 Python API 没有可更新的原生进度条，也没有说明 `timer` 事件的调度周期和脚本返回后的生命周期。为了在预测完成后立即安全写回 Mask，当前版本仍在单次预测期间同步等待。代码通过隐藏终端、提前启动 worker、复用影像预处理、扩大分阶段超时和显示 Log Panel 降低影响；真正的后台推理加自动写回必须经过 Windows 实机验证后再启用，不能仅凭未说明语义的 `timer` 回调实现。
 - 无法识别的 Mimics voxel buffer dtype 会阻断并要求补充工作站验证，不会默认猜成 `int16`。
 - 当前官方模型权重的具体许可必须以实际下载版本携带的 license 为准，不能仅根据代码仓库许可推断用途。
 
