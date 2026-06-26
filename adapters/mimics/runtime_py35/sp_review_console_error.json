@@ -1,0 +1,8 @@
+{
+  "error_type": "RuntimeError",
+  "message": "worklist_manifest.json was not found.\n\nRun a Labeling_*.py entry from the root of an exported Mimics worklist.",
+  "python_version": "3.5.2 (v3.5.2:4def2a2901a5, Jun 25 2016, 22:18:55) [MSC v.1900 64 bit (AMD64)]",
+  "schema_version": "mimics_runtime_error.v1",
+  "stage": "review_console",
+  "traceback": "Traceback (most recent call last):\n  File \"E:\\SegmentationPlatform-New\\adapters\\mimics\\runtime_py35\\sp_review_console.py\", line 879, in run_entry\n    return main(action)\n  File \"E:\\SegmentationPlatform-New\\adapters\\mimics\\runtime_py35\\sp_review_console.py\", line 777, in main\n    root, manifest = load_worklist()\n  File \"E:\\SegmentationPlatform-New\\adapters\\mimics\\runtime_py35\\sp_review_console.py\", line 66, in load_worklist\n    root = worklist_root()\n  File \"E:\\SegmentationPlatform-New\\adapters\\mimics\\runtime_py35\\sp_review_console.py\", line 60, in worklist_root\n    \"worklist_manifest.json was not found.\\n\\n\"\nRuntimeError: worklist_manifest.json was not found.\n\nRun a Labeling_*.py entry from the root of an exported Mimics worklist.\n"
+}

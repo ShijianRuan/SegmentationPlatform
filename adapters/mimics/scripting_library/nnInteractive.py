@@ -5,6 +5,7 @@ from __future__ import print_function
 
 import os
 import sys
+import importlib
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,5 +29,14 @@ if RUNTIME_DIR not in sys.path:
 import nninteractive_mimics
 
 
+def _launch():
+    # Some Mimics Scripting Library hosts execute scripts with a module name
+    # other than "__main__". Keep this entry robust across both modes.
+    importlib.reload(nninteractive_mimics)
+    nninteractive_mimics.main()
+
+
 if __name__ == "__main__":
-    sys.exit(nninteractive_mimics.main())
+    _launch()
+elif "mimics" in sys.modules:
+    _launch()

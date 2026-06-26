@@ -290,6 +290,11 @@ def install_pytorch(cuda_version: str, mirror_alias: str | None = None) -> str:
     pytorch_index = _PYTORCH_CUDA_INDEXES[cuda_version]
 
     # If the selected mirror also hosts PyTorch CUDA wheels, use that instead.
+    # NOTE: Some mirrors (e.g. Tsinghua) may not carry Windows CUDA wheels for
+    # all torch versions.  When a mirror is used, we use a layered approach:
+    # mirror as primary index (for standard deps) + PyTorch CUDA index as
+    # extra-index (for the torch CUDA wheel itself).  This avoids the "no
+    # matching distribution" error when the mirror lacks the CUDA wheel.
     if mirror_alias and mirror_alias in _PYTORCH_CUDA_MIRRORS:
         cuda_mirrors = _PYTORCH_CUDA_MIRRORS[mirror_alias]
         if cuda_version in cuda_mirrors:
@@ -298,10 +303,24 @@ def install_pytorch(cuda_version: str, mirror_alias: str | None = None) -> str:
                   f"{pytorch_index}")
 
     print(f"Installing PyTorch {PYTORCH_VERSION} ({cuda_version}) ...")
-    _pip_install(
-        [f"torch=={PYTORCH_VERSION}"],
-        index_url=pytorch_index,
-    )
+
+    # When a mirror is specified, use it as the primary index (for fast
+    # dependency downloads) and the PyTorch CUDA index as extra-index
+    # (for the torch CUDA wheel).  This avoids slow downloads of deps
+    # like sympy from the PyTorch index, and also handles mirrors that
+    # don't carry the CUDA wheel for the current platform/version.
+    mirror_url = _resolve_pypi_mirror(mirror_alias)
+    if mirror_url:
+        _pip_install(
+            [f"torch=={PYTORCH_VERSION}"],
+            index_url=mirror_url,
+            extra_index_url=pytorch_index,
+        )
+    else:
+        _pip_install(
+            [f"torch=={PYTORCH_VERSION}"],
+            index_url=pytorch_index,
+        )
 
     # Verify CUDA is actually usable.
     print("  Verifying PyTorch CUDA ...")
