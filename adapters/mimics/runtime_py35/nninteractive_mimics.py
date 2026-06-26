@@ -41,6 +41,10 @@ BUTTON_EXCLUDE_POINT = "Add Exclude Point"
 BUTTON_REMOVE_POINT = "Remove Last Point"
 BUTTON_RUN_POINTS = "Run Points"
 BUTTON_DISCARD_POINTS = "Discard Points"
+BUTTON_ADD_FOREGROUND_SCRIBBLE = "Add Foreground Scribble"
+BUTTON_ADD_BACKGROUND_SCRIBBLE = "Add Background Scribble"
+BUTTON_RUN_SCRIBBLES = "Run Scribbles"
+BUTTON_DISCARD_SCRIBBLES = "Discard Scribbles"
 BUTTON_CREATE = "Create New Result Mask"
 BUTTON_CANCEL = "Cancel"
 BUTTON_DISCARD_SESSION = "Discard AI Session"
@@ -50,7 +54,9 @@ BUTTON_START_CURRENT = "Start From Current Mask"
 PROMPT_MASK_PREFIX = "nnInteractive Prompt"
 DEFAULT_RESULT_NAME = "nnInteractive Result"
 ASYNC_JOB_METADATA = "nninteractive.async_job_path"
+_ASYNC_VISUAL_OBJECTS = {}  # job_dir -> list of Mimics objects to delete after inference
 _RUNTIME_PROBE_CACHE = {}
+_ASYNC_MONITORS = {}
 
 
 def _find_root(start_dir, sentinel_files, max_depth=6):
@@ -258,9 +264,41 @@ def _metadata_delete(obj, name):
 
 def _process_exists(pid):
     try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, TypeError, ValueError):
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+
+    if pid <= 0:
+        return False
+
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
+
+    # Windows (Mimics embedded Python): os.kill(pid, 0) may raise
+    # "<built-in function kill> returned a result with an error set".
+    # Use WinAPI instead to avoid that CPython-level SystemError.
+    try:
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong(0)
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
+                return False
+            return int(exit_code.value) == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
         return False
 
 
@@ -542,6 +580,17 @@ def _restore_base(mask, base_path, base_shape):
     _set_mask_from_u8(mask, base_path, base_shape)
 
 
+def _make_mask_visible(mask):
+    try:
+        mask.visible = True
+    except Exception:
+        pass
+    try:
+        mask.selected = True
+    except Exception:
+        pass
+
+
 def _choose_sign():
     answer = mimics.dialogs.question_box(
         message=(
@@ -603,7 +652,26 @@ def _delete_point_marker(point):
         pass
 
 
-def _capture_point_set(image):
+def _delete_mimics_object(obj):
+    """Best-effort delete of a Mimics visual object (point, mask, measurement, spline)."""
+    if obj is None:
+        return
+    # Try the most specific delete methods first, then fall back.
+    for deleter in (
+        lambda: mimics.data.points.delete(obj),
+        lambda: mimics.data.masks.delete(obj),
+        lambda: mimics.data.distance_measurements.delete(obj),
+        lambda: mimics.data.measurements.delete(obj),
+        lambda: mimics.data.splines.delete(obj),
+    ):
+        try:
+            deleter()
+            return
+        except Exception:
+            pass
+
+
+def _capture_point_set(image, _visual_objects=None):
     points = []
     try:
         while True:
@@ -630,13 +698,26 @@ def _capture_point_set(image):
                 point = _capture_point(image, True)
                 if point is not None:
                     points.append(point)
+                    if _visual_objects is not None and point.get("_marker"):
+                        _visual_objects.append(point["_marker"])
             elif answer == BUTTON_EXCLUDE_POINT:
                 point = _capture_point(image, False)
                 if point is not None:
                     points.append(point)
+                    if _visual_objects is not None and point.get("_marker"):
+                        _visual_objects.append(point["_marker"])
             elif answer == BUTTON_REMOVE_POINT and points:
-                _delete_point_marker(points.pop())
+                removed = points.pop()
+                _delete_point_marker(removed)
+                if _visual_objects is not None and removed.get("_marker"):
+                    try:
+                        _visual_objects.remove(removed["_marker"])
+                    except ValueError:
+                        pass
             elif answer == run_button and points:
+                if _visual_objects is None:
+                    for point in points:
+                        _delete_point_marker(point)
                 return {
                     "interaction_type": "point_set",
                     "points": [
@@ -649,10 +730,31 @@ def _capture_point_set(image):
                     "coordinates": "mimics",
                 }
             else:
+                # Discard: delete markers immediately since no prediction will run.
+                for point in points:
+                    _delete_point_marker(point)
+                if _visual_objects is not None:
+                    for point in points:
+                        marker = point.get("_marker")
+                        if marker and marker in _visual_objects:
+                            try:
+                                _visual_objects.remove(marker)
+                            except ValueError:
+                                pass
                 return None
-    finally:
+    except Exception:
+        # On exception, clean up markers to avoid orphaned points.
         for point in points:
             _delete_point_marker(point)
+        if _visual_objects is not None:
+            for point in points:
+                marker = point.get("_marker")
+                if marker and marker in _visual_objects:
+                    try:
+                        _visual_objects.remove(marker)
+                    except ValueError:
+                        pass
+        raise
 
 
 def _voxel_points(image, geometry):
@@ -678,7 +780,7 @@ def _single_slice_axis(points):
     return constant_axes[0] if len(constant_axes) == 1 else None
 
 
-def _capture_box(image):
+def _capture_box(image, _visual_objects=None):
     measurement = None
     try:
         measurement = mimics.measure.indicate_distance_measurement(
@@ -700,11 +802,30 @@ def _capture_box(image):
                 title="Box Not Accepted",
                 ui_blocking=True,
             )
+            # Box not accepted: delete measurement immediately.
+            try:
+                mimics.data.distance_measurements.delete(measurement)
+            except Exception:
+                try:
+                    mimics.data.measurements.delete(measurement)
+                except Exception:
+                    pass
             return None
         bbox = [
             [min(points[0][axis], points[1][axis]), max(points[0][axis], points[1][axis]) + 1]
             for axis in range(3)
         ]
+        # Success: keep measurement visible during inference.
+        if _visual_objects is not None:
+            _visual_objects.append(measurement)
+        else:
+            try:
+                mimics.data.distance_measurements.delete(measurement)
+            except Exception:
+                try:
+                    mimics.data.measurements.delete(measurement)
+                except Exception:
+                    pass
         return {
             "interaction_type": "box",
             "include_interaction": True,
@@ -712,8 +833,7 @@ def _capture_box(image):
             "coordinates": "mimics",
         }
     except mimics.UserInterrupted:
-        return None
-    finally:
+        # User cancelled: clean up immediately.
         if measurement is not None:
             try:
                 mimics.data.distance_measurements.delete(measurement)
@@ -722,9 +842,10 @@ def _capture_box(image):
                     mimics.data.measurements.delete(measurement)
                 except Exception:
                     pass
+        return None
 
 
-def _capture_lasso(image):
+def _capture_lasso(image, _visual_objects=None):
     spline = None
     try:
         spline = mimics.analyze.indicate_spline(
@@ -745,6 +866,11 @@ def _capture_lasso(image):
                 title="Lasso Not Accepted",
                 ui_blocking=True,
             )
+            # Not accepted: delete spline immediately.
+            try:
+                mimics.data.splines.delete(spline)
+            except Exception:
+                pass
             return None
         points = _voxel_points(image, _spline_geometry(spline))
         if len(set(tuple(point) for point in points)) < 3:
@@ -753,6 +879,10 @@ def _capture_lasso(image):
                 title="Lasso Not Accepted",
                 ui_blocking=True,
             )
+            try:
+                mimics.data.splines.delete(spline)
+            except Exception:
+                pass
             return None
         if _single_slice_axis(points) is None:
             mimics.dialogs.message_box(
@@ -761,7 +891,19 @@ def _capture_lasso(image):
                 title="Lasso Not Accepted",
                 ui_blocking=True,
             )
+            try:
+                mimics.data.splines.delete(spline)
+            except Exception:
+                pass
             return None
+        # Success: keep spline visible during inference.
+        if _visual_objects is not None:
+            _visual_objects.append(spline)
+        else:
+            try:
+                mimics.data.splines.delete(spline)
+            except Exception:
+                pass
         return {
             "interaction_type": "lasso",
             "include_interaction": True,
@@ -770,23 +912,57 @@ def _capture_lasso(image):
             "coordinates": "mimics",
         }
     except mimics.UserInterrupted:
-        return None
-    finally:
+        # User cancelled: clean up immediately.
         if spline is not None:
             try:
                 mimics.data.splines.delete(spline)
             except Exception:
                 pass
+        return None
 
 
-def _capture_scribble(image, include, temp_dir):
-    return _capture_mask_prompt(
-        image,
-        include,
-        "scribble",
-        "Ellipse",
-        temp_dir,
-    )
+def _capture_scribble(image, include, temp_dir, _visual_objects=None):
+    if _visual_objects is None:
+        return _capture_mask_prompt(image, include, "scribble", "Ellipse", temp_dir)
+    return _capture_mask_prompt(image, include, "scribble", "Ellipse", temp_dir, _visual_objects)
+
+
+def _capture_scribble_set(image, temp_dir, _visual_objects=None):
+    scribbles = []
+    while True:
+        foreground_count = len([item for item in scribbles if item["include_interaction"]])
+        background_count = len(scribbles) - foreground_count
+        buttons = [BUTTON_ADD_FOREGROUND_SCRIBBLE, BUTTON_ADD_BACKGROUND_SCRIBBLE]
+        if scribbles:
+            buttons.append("{0} ({1})".format(BUTTON_RUN_SCRIBBLES, len(scribbles)))
+        buttons.append(BUTTON_DISCARD_SCRIBBLES)
+        answer = mimics.dialogs.question_box(
+            message=(
+                "Add foreground and background scribbles for one prediction.\n\n"
+                "Foreground scribbles: {0}\n"
+                "Background scribbles: {1}\n\n"
+                "Run only after all scribbles for this round are added."
+            ).format(foreground_count, background_count),
+            buttons=";".join(buttons),
+            title="Scribble Set",
+            ui_blocking=True,
+        )
+        if answer == BUTTON_ADD_FOREGROUND_SCRIBBLE:
+            prompt = _capture_scribble(image, True, temp_dir, _visual_objects)
+            if prompt is not None:
+                scribbles.append(prompt)
+        elif answer == BUTTON_ADD_BACKGROUND_SCRIBBLE:
+            prompt = _capture_scribble(image, False, temp_dir, _visual_objects)
+            if prompt is not None:
+                scribbles.append(prompt)
+        elif answer.startswith(BUTTON_RUN_SCRIBBLES) and scribbles:
+            return {
+                "interaction_type": "scribble_set",
+                "scribbles": scribbles,
+                "coordinates": "mimics",
+            }
+        else:
+            return None
 
 
 def _point_coordinates(value):
@@ -815,9 +991,20 @@ def _create_prompt_mask(image, include, interaction_type):
             "Foreground" if include else "Background",
             interaction_type,
         )
-        mask.image = image
-        mask.visible = True
-        mask.color = (0.1, 1.0, 0.2) if include else (1.0, 0.2, 0.1)
+        try:
+            mask.image = image
+        except Exception:
+            mask_image = getattr(mask, "image", None)
+            if mask_image is not None and not _same_object(mask_image, image):
+                raise
+        try:
+            mask.visible = True
+        except Exception:
+            pass
+        try:
+            mask.color = (0.1, 1.0, 0.2) if include else (1.0, 0.2, 0.1)
+        except Exception:
+            pass
         return mask
     except Exception:
         try:
@@ -827,11 +1014,20 @@ def _create_prompt_mask(image, include, interaction_type):
         raise
 
 
-def _capture_mask_prompt(image, include, interaction_type, edit_type, temp_dir):
+def _capture_mask_prompt(image, include, interaction_type, edit_type, temp_dir, _visual_objects=None):
     prompt_mask = _create_prompt_mask(image, include, interaction_type)
+    result = None
     try:
         mimics.segment.activate_edit_mask(prompt_mask, edit_type, "Draw")
         if int(getattr(prompt_mask, "number_of_pixels", 0)) <= 0:
+            mimics.dialogs.message_box(
+                "No {0} pixels were captured.\n\n"
+                "Draw on the temporary prompt Mask before confirming the edit.".format(
+                    interaction_type
+                ),
+                title="nnInteractive Prompt Empty",
+                ui_blocking=True,
+            )
             return None
         view = prompt_mask.get_voxel_buffer()
         full_shape = [int(value) for value in view.shape]
@@ -859,7 +1055,7 @@ def _capture_mask_prompt(image, include, interaction_type, edit_type, temp_dir):
             )
             with open(path, "wb") as handle:
                 handle.write(crop.tobytes(order="C"))
-            return {
+            result = {
                 "interaction_type": interaction_type,
                 "include_interaction": bool(include),
                 "mask_path": path,
@@ -876,7 +1072,7 @@ def _capture_mask_prompt(image, include, interaction_type, edit_type, temp_dir):
             "prompt_{0}_{1}.u8".format(interaction_type, uuid.uuid4().hex),
         )
         exported = _export_mask(prompt_mask, path)
-        return {
+        result = {
             "interaction_type": interaction_type,
             "include_interaction": bool(include),
             "mask_path": path,
@@ -885,23 +1081,41 @@ def _capture_mask_prompt(image, include, interaction_type, edit_type, temp_dir):
             "coordinates": "mimics",
         }
     except mimics.UserInterrupted:
-        return None
-    finally:
+        # User cancelled: clean up the mask immediately.
         try:
             mimics.data.masks.delete(prompt_mask)
         except Exception:
             pass
+        return None
+    except Exception:
+        # Other error: clean up the mask immediately.
+        try:
+            mimics.data.masks.delete(prompt_mask)
+        except Exception:
+            pass
+        raise
+
+    # Success: keep the mask visible during inference, schedule deferred deletion.
+    if result is not None:
+        if _visual_objects is not None:
+            _visual_objects.append(prompt_mask)
+        else:
+            try:
+                mimics.data.masks.delete(prompt_mask)
+            except Exception:
+                pass
+    return result
 
 
-def _capture_prompt(kind, image, include, temp_dir):
+def _capture_prompt(kind, image, include, temp_dir, _visual_objects=None):
     if kind == BUTTON_POINT:
-        return _capture_point_set(image)
+        return _capture_point_set(image, _visual_objects)
     if kind == BUTTON_SCRIBBLE:
-        return _capture_scribble(image, include, temp_dir)
+        return _capture_scribble_set(image, temp_dir, _visual_objects)
     if kind == BUTTON_BOX:
-        return _capture_box(image)
+        return _capture_box(image, _visual_objects)
     if kind == BUTTON_LASSO:
-        return _capture_lasso(image)
+        return _capture_lasso(image, _visual_objects)
     raise RuntimeError("Unsupported prompt kind: {0}".format(kind))
 
 
@@ -1012,7 +1226,9 @@ def _bridge_call(config, image_export, base_export, interactions, output_path):
     )
     _mimics_log(
         logging.INFO,
-        "nnInteractive inference started. Detailed log: {0}".format(runtime_log),
+        "nnInteractive inference started on {0}. Interactions: {1}, timeout: {2}s.".format(
+            requested_device, len(interactions), timeout
+        ),
     )
     try:
         mimics.view.show_log_panel()
@@ -1238,13 +1454,21 @@ class _BridgeWorker(object):
         )
         if result.get("device_warning"):
             _mimics_log(logging.WARNING, str(result["device_warning"]))
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive session ready on {0} (server: {1}).{2}".format(
+                result.get("device", "?"),
+                result.get("server_url", "?"),
+                " First call — model was loaded." if result.get("first_call") else "",
+            ),
+        )
 
     def predict(self, interactions, output_path):
         self.ensure_ready()
         _mimics_log(
             logging.INFO,
-            "nnInteractive prediction is running. Detailed log: {0}".format(
-                self.runtime_log
+            "nnInteractive prediction running ({0} interaction(s))...".format(
+                len(interactions)
             ),
         )
         self._write(
@@ -1268,8 +1492,9 @@ class _BridgeWorker(object):
         )
         _mimics_log(
             logging.INFO,
-            "nnInteractive prediction completed in {0}s.".format(
-                result.get("elapsed_seconds", "?")
+            "nnInteractive prediction completed in {0}s on {1}.".format(
+                result.get("elapsed_seconds", "?"),
+                result.get("device", "?"),
             ),
         )
         return result
@@ -1325,6 +1550,14 @@ def _run_prediction(
             "nnInteractive did not produce a prediction: {0}".format(result.get("reason", status))
         )
     _set_mask_from_u8(target, output_path, base_export["shape"])
+    _mimics_log(
+        logging.INFO,
+        "nnInteractive result applied to Mask {0}. Foreground voxels: {1}, elapsed: {2}s.".format(
+            getattr(target, "name", ""),
+            result.get("foreground_voxels", "?"),
+            result.get("elapsed_seconds", "?"),
+        ),
+    )
     return result
 
 
@@ -1344,6 +1577,11 @@ def _load_async_job(target):
     if not state:
         _metadata_delete(target, ASYNC_JOB_METADATA)
         return None
+    if state.get("status") in ("closing", "closed", "discarded", "failed", "expired") or os.path.isfile(
+        os.path.join(job_dir, "close.json")
+    ):
+        _metadata_delete(target, ASYNC_JOB_METADATA)
+        return None
     state["_job_dir"] = job_dir
     return state
 
@@ -1357,6 +1595,10 @@ def _save_async_job(state):
 def _close_async_job(target, state, reason):
     if state:
         job_dir = state["_job_dir"]
+        # Clean up any remaining visual objects for this job.
+        if job_dir in _ASYNC_VISUAL_OBJECTS:
+            for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
+                _delete_mimics_object(obj)
         _write_json_atomic(
             os.path.join(job_dir, "close.json"),
             {
@@ -1499,6 +1741,11 @@ def _persist_interaction(job_dir, interaction):
         )
         shutil.copy2(mask_path, target_path)
         result["mask_path"] = target_path
+    if result.get("interaction_type") == "scribble_set":
+        persisted = []
+        for item in result.get("scribbles", []):
+            persisted.append(_persist_interaction(job_dir, item))
+        result["scribbles"] = persisted
     return result
 
 
@@ -1536,6 +1783,28 @@ def _async_result_path(state, sequence):
     )
 
 
+def _describe_async_worker_failure(worker, worker_status):
+    stage = worker.get("stage", worker_status or "unknown")
+    error = worker.get("error")
+    if not error and stage == "idle_timeout":
+        timeout_seconds = worker.get("idle_timeout_seconds")
+        if timeout_seconds is None:
+            error = (
+                "No result file was produced before the async worker idle timeout. "
+                "Increase async_worker_idle_timeout_seconds in nninteractive_config.json "
+                "if long-running sessions are expected."
+            )
+        else:
+            error = (
+                "No result file was produced before the async worker idle timeout "
+                "({0}s). Increase async_worker_idle_timeout_seconds in "
+                "nninteractive_config.json if long-running sessions are expected."
+            ).format(int(timeout_seconds))
+    if not error:
+        error = "No result file was produced."
+    return stage, error
+
+
 def _show_async_running(target, state):
     worker = _async_worker_status(state["_job_dir"])
     stage = worker.get("stage", worker.get("status", state.get("status", "running")))
@@ -1556,6 +1825,193 @@ def _show_async_running(target, state):
     return "waiting"
 
 
+def _check_async_result_nonblocking(image, target, state):
+    """Check async progress without prompting the user to relaunch the tool."""
+    sequence = state.get("pending_sequence")
+    if sequence is None:
+        return "ready"
+
+    result_path = _async_result_path(state, sequence)
+    if not os.path.isfile(result_path):
+        worker = _async_worker_status(state["_job_dir"])
+        worker_status = worker.get("status")
+        if worker_status in ("failed", "expired", "closed") or (
+            state.get("pid") and not _process_exists(state.get("pid"))
+        ):
+            stage, error = _describe_async_worker_failure(worker, worker_status)
+            raise RuntimeError(
+                "The nnInteractive background worker stopped before producing a result.\n\n"
+                "Stage: {0}\nError: {1}".format(
+                    stage,
+                    error,
+                )
+            )
+        return "waiting"
+
+    return _handle_async_result(image, target, state)
+
+
+def _stop_async_monitor(job_dir):
+    monitor = _ASYNC_MONITORS.pop(job_dir, None)
+    if not monitor:
+        return
+    timer = monitor.get("timer")
+    try:
+        if timer is not None and timer.isActive():
+            timer.stop()
+    except Exception:
+        pass
+    win32_timer = monitor.get("win32_timer")
+    if win32_timer:
+        user32, timer_id = win32_timer
+        try:
+            user32.KillTimer(None, timer_id)
+        except Exception:
+            pass
+
+
+def _async_monitor_tick(monitor):
+    if monitor.get("done"):
+        return
+    job_dir = monitor["state"]["_job_dir"]
+    try:
+        if time.time() > monitor["deadline"]:
+            raise RuntimeError(
+                "nnInteractive background prediction timed out after {0} seconds.\n"
+                "The result was not produced in time.".format(int(monitor["timeout_seconds"]))
+            )
+        outcome = _check_async_result_nonblocking(
+            monitor["image"],
+            monitor["target"],
+            monitor["state"],
+        )
+        if outcome != "waiting":
+            monitor["done"] = True
+            _stop_async_monitor(job_dir)
+            if outcome == "applied":
+                mimics.dialogs.message_box(
+                    "nnInteractive result has been applied automatically.",
+                    title=TITLE,
+                    ui_blocking=False,
+                )
+    except Exception as error:
+        monitor["done"] = True
+        _stop_async_monitor(job_dir)
+        mimics.dialogs.message_box(
+            "nnInteractive background prediction failed.\n\n{0}".format(error),
+            title="nnInteractive Failed",
+            ui_blocking=True,
+        )
+
+
+def _start_win32_async_result_monitor(image, target, state, config, poll_seconds, timeout_seconds):
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+    except Exception:
+        return False
+
+    job_dir = state["_job_dir"]
+    _stop_async_monitor(job_dir)
+    user32 = ctypes.windll.user32
+    timer_interval_ms = max(100, int(max(0.1, poll_seconds) * 1000))
+    TIMERPROC = ctypes.WINFUNCTYPE(
+        None,
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.c_size_t,
+        ctypes.c_uint,
+    )
+    monitor = {
+        "timer": None,
+        "image": image,
+        "target": target,
+        "state": state,
+        "config": config,
+        "done": False,
+        "deadline": time.time() + timeout_seconds,
+        "timeout_seconds": timeout_seconds,
+    }
+
+    def _timer_proc(hwnd, message, timer_id, tick_count):
+        _async_monitor_tick(monitor)
+
+    callback = TIMERPROC(_timer_proc)
+    user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, TIMERPROC]
+    user32.SetTimer.restype = ctypes.c_size_t
+    user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    timer_id = user32.SetTimer(None, 0, timer_interval_ms, callback)
+    if not timer_id:
+        return False
+    monitor["callback"] = callback
+    monitor["win32_timer"] = (user32, timer_id)
+    _ASYNC_MONITORS[job_dir] = monitor
+    return True
+
+
+def _start_async_result_monitor(image, target, state, config):
+    """Start a non-blocking Mimics-side timer that applies async results."""
+    poll_seconds = float(config.get("async_result_poll_seconds", config.get("async_poll_seconds", 0.5)))
+    timeout_seconds = float(
+        config.get(
+            "async_result_wait_timeout_seconds",
+            config.get("prediction_timeout_seconds", 1800) + 120,
+        )
+    )
+
+    try:
+        from PyQt5.QtCore import QTimer
+        from PyQt5.QtWidgets import QApplication
+    except Exception:
+        if _start_win32_async_result_monitor(image, target, state, config, poll_seconds, timeout_seconds):
+            return True
+        mimics.dialogs.message_box(
+            "Background inference started.\n\n"
+            "Mimics did not expose a usable timer API in this session, so the result "
+            "cannot be applied automatically. Run nnInteractive again later to "
+            "check the result.",
+            title="nnInteractive Running",
+            ui_blocking=False,
+        )
+        return False
+
+    qapp = QApplication.instance()
+    if qapp is None:
+        if _start_win32_async_result_monitor(image, target, state, config, poll_seconds, timeout_seconds):
+            return True
+        mimics.dialogs.message_box(
+            "Background inference started.\n\n"
+            "No active application timer was found, so the result cannot be applied "
+            "automatically. Run nnInteractive again later to check the result.",
+            title="nnInteractive Running",
+            ui_blocking=False,
+        )
+        return False
+
+    timer = QTimer()
+    job_dir = state["_job_dir"]
+    _stop_async_monitor(job_dir)
+    monitor = {
+        "timer": timer,
+        "image": image,
+        "target": target,
+        "state": state,
+        "config": config,
+        "done": False,
+        "deadline": time.time() + timeout_seconds,
+        "timeout_seconds": timeout_seconds,
+    }
+    _ASYNC_MONITORS[job_dir] = monitor
+
+    def _tick():
+        _async_monitor_tick(monitor)
+
+    timer.timeout.connect(_tick)
+    timer.start(max(100, int(max(0.1, poll_seconds) * 1000)))
+    return True
+
+
 def _handle_async_result(image, target, state):
     sequence = state.get("pending_sequence")
     if sequence is None:
@@ -1567,14 +2023,15 @@ def _handle_async_result(image, target, state):
         if worker_status in ("failed", "expired", "closed") or (
             state.get("pid") and not _process_exists(state.get("pid"))
         ):
+            stage, error = _describe_async_worker_failure(worker, worker_status)
             answer = mimics.dialogs.question_box(
                 message=(
                     "The nnInteractive background worker stopped before producing a result.\n\n"
                     "Stage: {0}\nError: {1}\n\n"
                     "Start a new AI session from the current Mask?"
                 ).format(
-                    worker.get("stage", worker_status or "unknown"),
-                    worker.get("error", "No result file was produced."),
+                    stage,
+                    error,
                 ),
                 buttons=BUTTON_START_CURRENT + ";" + BUTTON_CANCEL,
                 title="nnInteractive Worker Stopped",
@@ -1587,7 +2044,28 @@ def _handle_async_result(image, target, state):
         return _show_async_running(target, state)
 
     result = _read_json(result_path, {}) or {}
-    if result.get("status") == "error":
+    if not isinstance(result, dict):
+        result = {}
+    status = result.get("status")
+
+    if not status:
+        worker = _async_worker_status(state["_job_dir"])
+        worker_status = worker.get("status")
+        if worker_status in ("failed", "expired", "closed"):
+            raise RuntimeError(
+                "The nnInteractive worker did not return a valid result payload.\n\n"
+                "Worker status: {0}\n"
+                "Result file: {1}\n"
+                "Error: {2}".format(
+                    worker_status,
+                    result_path,
+                    worker.get("error", "missing status field in result json"),
+                )
+            )
+        # Result file may still be in-flight from external I/O / antivirus interference.
+        return "waiting"
+
+    if status == "error":
         answer = mimics.dialogs.question_box(
             message=(
                 "The background prediction failed.\n\n"
@@ -1611,12 +2089,25 @@ def _handle_async_result(image, target, state):
         if answer == BUTTON_DISCARD_SESSION:
             _close_async_job(target, state, "prediction_failed_discarded")
             return "restart"
-        return "waiting"
+        state["pending_sequence"] = None
+        state["status"] = "failed"
+        state["updated_at_epoch"] = time.time()
+        _save_async_job(state)
+        return "ready"
 
-    if result.get("status") != "refined":
+    if status == "skipped":
+        state["pending_sequence"] = None
+        state["status"] = "ready"
+        state["updated_at_epoch"] = time.time()
+        _save_async_job(state)
+        return "ready"
+
+    if status != "refined":
         raise RuntimeError(
-            "nnInteractive returned an unexpected result status: {0}".format(
-                result.get("status")
+            "nnInteractive returned an unexpected result status: {0}\n"
+            "Result file: {1}".format(
+                status,
+                result_path,
             )
         )
     if _object_id(image) != state.get("image_guid") or _object_id(target) != state.get(
@@ -1652,6 +2143,12 @@ def _handle_async_result(image, target, state):
             )
         )
     _set_mask_from_u8(target, output_path, state["shape"])
+    _make_mask_visible(target)
+    # Clean up visual objects that were kept visible during inference.
+    job_dir = state.get("_job_dir")
+    if job_dir and job_dir in _ASYNC_VISUAL_OBJECTS:
+        for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
+            _delete_mimics_object(obj)
     state["pending_sequence"] = None
     state["applied_sequence"] = int(sequence)
     state["expected_target_sha256"] = _sha256_file(output_path)
@@ -1660,10 +2157,20 @@ def _handle_async_result(image, target, state):
     _save_async_job(state)
     _mimics_log(
         logging.INFO,
-        "nnInteractive result applied to Mask {0}.".format(
-            getattr(target, "name", "")
+        "nnInteractive result applied to Mask {0}. Foreground voxels: {1}, elapsed: {2}s, device: {3}.".format(
+            getattr(target, "name", ""),
+            result.get("foreground_voxels", "?"),
+            result.get("elapsed_seconds", "?"),
+            result.get("device", "?"),
         ),
     )
+    if int(result.get("foreground_voxels", -1)) == 0:
+        _mimics_log(
+            logging.WARNING,
+            "nnInteractive returned an empty mask (0 foreground voxels). "
+            "Try moving the foreground point closer to the structure center and "
+            "use background points farther away.",
+        )
     return "applied"
 
 
@@ -1683,7 +2190,7 @@ def _async_prompt_menu(target, state):
             "Target Mask: {0}\n"
             "Prompts in this AI session: {1}\n\n"
             "Submitting a prompt starts background inference and immediately "
-            "returns control to Mimics. Run nnInteractive again to apply the result."
+            "returns control to Mimics. The result is applied automatically when ready."
         ).format(getattr(target, "name", ""), count),
         buttons=";".join(buttons),
         title=TITLE,
@@ -1713,6 +2220,8 @@ def _run_async(image, target, config):
             state = None
 
     temp_dir = tempfile.mkdtemp(prefix="mimics_nninteractive_prompt_")
+    pending_visual_objects = []
+    visual_objects_registered = False
     try:
         action = _async_prompt_menu(target, state)
         if action == BUTTON_FINISH or not action:
@@ -1724,9 +2233,18 @@ def _run_async(image, target, config):
             if interactions:
                 interactions.pop()
             state["interactions"] = interactions
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive undo. Remaining prompts: {0}.".format(len(interactions)),
+            )
+            # Clean up visual objects from previous prompts on undo.
+            job_dir = state.get("_job_dir")
+            if job_dir and job_dir in _ASYNC_VISUAL_OBJECTS:
+                for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
+                    _delete_mimics_object(obj)
             if interactions:
                 _enqueue_async_prediction(state, target)
-                _show_async_running(target, state)
+                _start_async_result_monitor(image, target, state, config)
             else:
                 _restore_base(target, state["base_path"], state["shape"])
                 state["expected_target_sha256"] = state["base_sha256"]
@@ -1738,37 +2256,49 @@ def _run_async(image, target, config):
             state["interactions"] = []
             state["pending_sequence"] = None
             state["status"] = "ready"
+            _mimics_log(logging.INFO, "nnInteractive session reset to initial mask.")
             _restore_base(target, state["base_path"], state["shape"])
             state["expected_target_sha256"] = state["base_sha256"]
+            # Clean up visual objects from previous prompts.
+            job_dir = state.get("_job_dir")
+            if job_dir and job_dir in _ASYNC_VISUAL_OBJECTS:
+                for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
+                    _delete_mimics_object(obj)
             _save_async_job(state)
             return 0
 
         include = None
-        if action == BUTTON_SCRIBBLE:
-            include = _choose_sign()
-            if include is None:
-                return 0
-        prompt = _capture_prompt(action, image, include, temp_dir)
+        visual_objects = []
+        prompt = _capture_prompt(action, image, include, temp_dir, visual_objects)
+        pending_visual_objects = visual_objects
         if prompt is None:
+            mimics.dialogs.message_box(
+                "No prompt was submitted for {0}.\n\n"
+                "The AI prediction was not started.".format(action),
+                title="nnInteractive Prompt Empty",
+                ui_blocking=False,
+            )
             return 0
         if state is None:
             state = _start_async_job(config, image, target)
         prompt = _persist_interaction(state["_job_dir"], prompt)
+        # Store visual objects for deferred deletion after async result is applied.
+        if visual_objects:
+            _ASYNC_VISUAL_OBJECTS.setdefault(state["_job_dir"], []).extend(visual_objects)
+            visual_objects_registered = True
         state.setdefault("interactions", []).append(prompt)
         sequence = _enqueue_async_prediction(state, target)
-        mimics.dialogs.message_box(
-            (
-                "Background inference started.\n\n"
-                "Prompt: {0}\n"
-                "Job sequence: {1}\n\n"
-                "You can continue using Mimics. Run nnInteractive again to "
-                "check and apply the result."
-            ).format(action, sequence),
-            title="nnInteractive Running",
-            ui_blocking=False,
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive background inference started. Prompt: {0}, sequence: {1}. "
+            "Result will be applied automatically when ready.".format(action, sequence),
         )
+        _start_async_result_monitor(image, target, state, config)
         return 0
     finally:
+        if pending_visual_objects and not visual_objects_registered:
+            for obj in pending_visual_objects:
+                _delete_mimics_object(obj)
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -1798,6 +2328,7 @@ def _prompt_menu(target, interaction_count):
 def _run_sync(image, target, config):
     temp_dir = tempfile.mkdtemp(prefix="mimics_nninteractive_")
     worker = None
+    visual_objects = []
     try:
         image_export = _export_image(image, os.path.join(temp_dir, "image.raw"))
         base_export = _export_mask(target, os.path.join(temp_dir, "target_at_start.u8"))
@@ -1809,6 +2340,13 @@ def _run_sync(image, target, config):
             )
 
         interactions = []
+        visual_objects[:] = []  # Mimics objects kept visible during inference
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive session started. Target Mask: {0}, image shape: {1}.".format(
+                getattr(target, "name", ""), image_export["shape"]
+            ),
+        )
         if bool(config.get("reuse_session", True)):
             worker = _BridgeWorker(config, image_export, base_export)
             try:
@@ -1825,12 +2363,19 @@ def _run_sync(image, target, config):
                 return 0
             if action == BUTTON_RESET:
                 interactions = []
+                _mimics_log(logging.INFO, "nnInteractive session reset to initial mask.")
                 _restore_base(target, base_export["path"], base_export["shape"])
                 continue
             if action == BUTTON_UNDO:
                 if not interactions:
                     continue
                 interactions.pop()
+                _mimics_log(
+                    logging.INFO,
+                    "nnInteractive undo last prompt. Remaining: {0}. Re-running prediction...".format(
+                        len(interactions)
+                    ),
+                )
                 if interactions:
                     try:
                         _run_prediction(
@@ -1850,14 +2395,16 @@ def _run_sync(image, target, config):
                 continue
 
             include = None
-            if action == BUTTON_SCRIBBLE:
-                include = _choose_sign()
-                if include is None:
-                    continue
-            prompt = _capture_prompt(action, image, include, temp_dir)
+            prompt = _capture_prompt(action, image, include, temp_dir, visual_objects)
             if prompt is None:
                 continue
             interactions.append(prompt)
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive prompt #{0}: {1}. Running prediction...".format(
+                    len(interactions), action
+                ),
+            )
             try:
                 _run_prediction(
                     config,
@@ -1871,7 +2418,15 @@ def _run_sync(image, target, config):
             except Exception:
                 interactions.pop()
                 raise
+            finally:
+                # Delete visual objects after prediction completes (or fails).
+                for obj in visual_objects:
+                    _delete_mimics_object(obj)
+                visual_objects[:] = []
     finally:
+        # Clean up any remaining visual objects on session exit.
+        for obj in visual_objects:
+            _delete_mimics_object(obj)
         if worker is not None:
             worker.close()
         shutil.rmtree(temp_dir, ignore_errors=True)

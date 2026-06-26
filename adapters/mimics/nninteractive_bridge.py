@@ -113,7 +113,21 @@ def _hidden_process_kwargs(*, detached: bool = False) -> dict[str, Any]:
 
 
 def _server_address(server_url: str) -> tuple[str, int]:
-    parsed = urlparse(server_url)
+    normalized = str(server_url or "").strip()
+    # Accept common malformed forms from config/env, e.g. "http:///127.0.0.1:1527".
+    if normalized.startswith("http:///"):
+        normalized = "http://" + normalized[len("http:///"):]
+    if normalized and "://" not in normalized:
+        normalized = "http://" + normalized
+
+    parsed = urlparse(normalized)
+    if parsed.scheme == "http" and not parsed.hostname and parsed.path:
+        # Recover URLs where host:port was parsed as path due to extra slash.
+        candidate = parsed.path.lstrip("/")
+        reparsed = urlparse("http://" + candidate)
+        if reparsed.hostname:
+            parsed = reparsed
+
     if parsed.scheme != "http" or not parsed.hostname:
         raise RuntimeError(f"Unsupported nnInteractive server URL: {server_url}")
     return parsed.hostname, int(parsed.port or 80)
@@ -128,17 +142,20 @@ def _port_open(host: str, port: int) -> bool:
 
 
 def _available_server_url(preferred_url: str) -> str:
-    host, port = _server_address(preferred_url)
+    normalized = str(preferred_url or "").strip()
+    if normalized.startswith("http:///"):
+        normalized = "http://" + normalized[len("http:///"):]
+    if normalized and "://" not in normalized:
+        normalized = "http://" + normalized
+    host, port = _server_address(normalized)
     if not _port_open(host, port):
-        return preferred_url
-    if host not in ("127.0.0.1", "localhost"):
-        raise RuntimeError(
-            f"Configured nnInteractive server port is occupied: {preferred_url}"
-        )
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as handle:
-        handle.bind(("127.0.0.1", 0))
-        fallback_port = int(handle.getsockname()[1])
-    return f"http://127.0.0.1:{fallback_port}"
+        return normalized
+    raise RuntimeError(
+        f"Configured nnInteractive server port is occupied: {normalized}. "
+        "Refusing to start another model server on a random port because that "
+        "can exhaust system memory. Close the existing nnInteractive session or "
+        "wait for the owned server cleanup to finish."
+    )
 
 
 def _resolve_device(requested: str, allow_cpu_fallback: bool = True) -> tuple[str, str | None]:
@@ -332,6 +349,65 @@ def _terminate_owned_server(state: dict[str, Any]) -> bool:
     return True
 
 
+def _terminate_model_servers(model_dir: str) -> int:
+    """Best-effort cleanup of old nnInteractive servers for this model.
+
+    Loading several CPU model servers at once can exhaust RAM and make Mimics,
+    VS Code, and the server all fail in unrelated-looking ways. Only processes
+    whose command line explicitly names nnInteractive.inference.server.main and
+    this model directory are terminated.
+    """
+    if os.name != "nt":
+        return 0
+    model_path = str(Path(model_dir).resolve()).lower()
+    try:
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            (
+                "Get-CimInstance Win32_Process | "
+                "Where-Object { $_.CommandLine -like '*nnInteractive.inference.server.main*' } | "
+                "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+            ),
+        ]
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+            check=False,
+            **_hidden_process_kwargs(),
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return 0
+        records = json.loads(result.stdout)
+        if isinstance(records, dict):
+            records = [records]
+        stopped = 0
+        for record in records or []:
+            try:
+                pid = int(record.get("ProcessId"))
+            except (TypeError, ValueError):
+                continue
+            command_line = str(record.get("CommandLine") or "")
+            if pid == os.getpid() or model_path not in command_line.lower():
+                continue
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=15,
+                check=False,
+                **_hidden_process_kwargs(),
+            )
+            stopped += 1
+        return stopped
+    except Exception:
+        return 0
+
+
 def _touch_server_activity(state_path: Path, ownership_token: str) -> None:
     state = _load_server_state(state_path)
     if not state or state.get("ownership_token") != ownership_token:
@@ -414,6 +490,7 @@ def _start_server(
         "--liveness-timeout-seconds", "120",
         "--max-sessions", "1",
         "--api-key", ownership_token,
+        "--no-torch-compile",
     ]
     if fold is not None:
         cmd.extend(["--fold", fold])
@@ -509,6 +586,7 @@ def _ensure_server(
     except FileNotFoundError:
         pass
 
+    _terminate_model_servers(model_dir)
     server_url = _available_server_url(preferred_server_url)
     proc, state = _start_server(
         model_dir,
@@ -948,13 +1026,63 @@ def _apply_point_set(
                     bool(item.get("include_interaction", True)),
                 )
             )
-    for index, (point, include) in enumerate(points):
+
+    if not points:
+        return False
+
+    # Keep one final prediction call, but avoid using a background point as the
+    # trigger center when foreground points are available.
+    include_points = [entry for entry in points if entry[1]]
+    exclude_points = [entry for entry in points if not entry[1]]
+    submission_points = points
+    if include_points and exclude_points:
+        submission_points = exclude_points + include_points
+
+    for index, (point, include) in enumerate(submission_points):
         session.add_point_interaction(
             point,
             include_interaction=include,
-            run_prediction=index == len(points) - 1,
+            run_prediction=index == len(submission_points) - 1,
         )
     return bool(points)
+
+
+def _apply_scribble_set(
+    session: Any,
+    interaction: dict[str, Any],
+    *,
+    mimics_shape: list[int],
+    platform_shape: list[int],
+    buffer_mapping: dict[str, Any],
+) -> bool:
+    scribbles = interaction.get("scribbles") or []
+    accepted = 0
+    prepared: list[tuple[np.ndarray, bool]] = []
+    coordinates = interaction.get("coordinates", "mimics")
+    for item in scribbles:
+        item_value = dict(item)
+        item_value.setdefault("coordinates", item.get("coordinates", coordinates))
+        mask = _interaction_mask(
+            item_value,
+            mimics_shape=mimics_shape,
+            platform_shape=platform_shape,
+            buffer_mapping=buffer_mapping,
+        )
+        if np.any(mask):
+            prepared.append((mask, bool(item.get("include_interaction", True))))
+
+    for mask_index, (mask, include) in enumerate(prepared):
+        crops = _iter_2d_interaction_crops(mask)
+        for crop_index, (crop, bbox) in enumerate(crops):
+            is_last = mask_index == len(prepared) - 1 and crop_index == len(crops) - 1
+            session.add_scribble_interaction(
+                crop,
+                include_interaction=include,
+                run_prediction=is_last,
+                interaction_bbox=bbox,
+            )
+            accepted += 1
+    return accepted > 0
 
 
 # ---------------------------------------------------------------------------
@@ -1105,36 +1233,48 @@ class _BridgeSessionContext:
                 "reason": "no_interactions",
             }
 
-        self.session.reset_interactions()
-        self._apply_initial_segmentation()
-        applied = 0
-        for interaction in interactions:
-            interaction_type = str(interaction.get("interaction_type", "scribble"))
-            if interaction_type == "point_set":
-                accepted = _apply_point_set(
-                    self.session,
-                    interaction,
-                    mimics_shape=self.mimics_shape,
-                    platform_shape=self.platform_shape,
-                    buffer_mapping=self.buffer_mapping,
-                )
-            else:
-                interaction_platform = _interaction_mask(
-                    interaction,
-                    mimics_shape=self.mimics_shape,
-                    platform_shape=self.platform_shape,
-                    buffer_mapping=self.buffer_mapping,
-                )
-                if not np.any(interaction_platform):
-                    continue
-                accepted = _apply_interaction(
-                    self.session,
-                    interaction_platform,
-                    interaction_type,
-                    bool(interaction.get("include_interaction", True)),
-                )
-            if accepted:
-                applied += 1
+        def _apply_all_interactions() -> int:
+            self.session.reset_interactions()
+            self._apply_initial_segmentation()
+            applied_count = 0
+            for interaction in interactions:
+                interaction_type = str(interaction.get("interaction_type", "scribble"))
+                if interaction_type == "point_set":
+                    accepted = _apply_point_set(
+                        self.session,
+                        interaction,
+                        mimics_shape=self.mimics_shape,
+                        platform_shape=self.platform_shape,
+                        buffer_mapping=self.buffer_mapping,
+                    )
+                elif interaction_type == "scribble_set":
+                    accepted = _apply_scribble_set(
+                        self.session,
+                        interaction,
+                        mimics_shape=self.mimics_shape,
+                        platform_shape=self.platform_shape,
+                        buffer_mapping=self.buffer_mapping,
+                    )
+                else:
+                    interaction_platform = _interaction_mask(
+                        interaction,
+                        mimics_shape=self.mimics_shape,
+                        platform_shape=self.platform_shape,
+                        buffer_mapping=self.buffer_mapping,
+                    )
+                    if not np.any(interaction_platform):
+                        continue
+                    accepted = _apply_interaction(
+                        self.session,
+                        interaction_platform,
+                        interaction_type,
+                        bool(interaction.get("include_interaction", True)),
+                    )
+                if accepted:
+                    applied_count += 1
+            return applied_count
+
+        applied = _apply_all_interactions()
         if applied == 0:
             return {
                 "status": "skipped",
@@ -1144,10 +1284,22 @@ class _BridgeSessionContext:
             }
 
         result_platform = np.asarray(self.target, dtype=np.uint8)
+        warmup_retry = False
+        if self.first_call and not np.any(result_platform):
+            # On a fresh server, the very first interaction can occasionally return
+            # an empty mask despite valid prompts; retry once in the same session.
+            print(
+                "nninteractive_bridge: first-call empty prediction detected; retrying once.",
+                file=sys.stderr,
+            )
+            applied = _apply_all_interactions()
+            result_platform = np.asarray(self.target, dtype=np.uint8)
+            warmup_retry = True
+
         if not np.any(result_platform):
             print(
-                "nninteractive_bridge: target buffer is empty after interactions; "
-                "set_target_buffer in-place fill may not be supported by this nnInteractive version",
+                "nninteractive_bridge: prediction output is empty (foreground_voxels=0) "
+                "after applying {0} interaction(s).".format(applied),
                 file=sys.stderr,
             )
         result_mimics = platform_to_mimics(result_platform, self.buffer_mapping)
@@ -1173,6 +1325,7 @@ class _BridgeSessionContext:
             "model_license": getattr(self.session, "license", None),
             "result_shape": list(result_mimics.shape),
             "foreground_voxels": int(np.count_nonzero(result_mimics)),
+            "warmup_retry": warmup_retry,
         }
         _append_bridge_log(
             self.log_path,
@@ -1180,6 +1333,7 @@ class _BridgeSessionContext:
             elapsed_seconds=result["elapsed_seconds"],
             interaction_count=len(interactions),
             foreground_voxels=result["foreground_voxels"],
+            warmup_retry=warmup_retry,
         )
         return result
 

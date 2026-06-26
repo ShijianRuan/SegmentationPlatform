@@ -81,7 +81,7 @@ class NnInteractiveBridgeTests(unittest.TestCase):
             self.assertIsNone(BRIDGE._resolve_fold(str(model), "auto"))
             self.assertEqual("0", BRIDGE._resolve_fold(str(model), "all"))
 
-    def test_occupied_default_port_uses_a_free_local_port(self) -> None:
+    def test_occupied_default_port_is_rejected(self) -> None:
         class FakeSocket:
             def __enter__(self) -> "FakeSocket":
                 return self
@@ -99,9 +99,8 @@ class NnInteractiveBridgeTests(unittest.TestCase):
             patch.object(BRIDGE, "_port_open", return_value=True),
             patch.object(BRIDGE.socket, "socket", return_value=FakeSocket()),
         ):
-            result = BRIDGE._available_server_url("http://127.0.0.1:1527")
-
-        self.assertEqual("http://127.0.0.1:24567", result)
+            with self.assertRaisesRegex(RuntimeError, "port is occupied"):
+                BRIDGE._available_server_url("http://127.0.0.1:1527")
 
     def test_missing_spline_geometry_is_an_explicit_error(self) -> None:
         module = load_mimics_runtime_module(types.SimpleNamespace())
@@ -525,8 +524,8 @@ class NnInteractiveBridgeTests(unittest.TestCase):
             self.assertEqual(1, int(output[2, 2, 0]))
             self.assertEqual(
                 [
-                    ((2, 2, 0), True, False),
-                    ((0, 0, 0), False, True),
+                    ((0, 0, 0), False, False),
+                    ((2, 2, 0), True, True),
                 ],
                 session.point_calls,
             )

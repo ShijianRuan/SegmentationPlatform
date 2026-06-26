@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 .venv/
+venv/
+env/
+nninteractive_env/
 *.egg-info/
 config/mimics_workstation.local.yaml
 config/mimics_workstation.verified.yaml
@@ -10,7 +13,24 @@ outputs/
 hatch-pet-runs/
 pipelines/nnunet/gpu*.sh
 pipelines/nnunet/SmallTools.ipynb
-nninteractive_env/
 nninteractive_config.json
 nninteractive_bundle.zip
 build/
+
+# Temporary / runtime artifacts
+%temp%/
+tmp_*/
+tests/scan.json
+tests/pkg_probe/
+tests/registry/
+tests/requests/
+*.error.json
+nninteractive_bridge.jsonl
+
+# Claude Code
+.claude/
+
+# Experimental / unfinished refine scripts
+adapters/mimics/runtime_py35/nninteractive_refine_standalone.py
+adapters/mimics/runtime_py35/sp_nninteractive_refine.py
+adapters/mimics/scripting_library/nninteractive_refine.py

@@ -1027,7 +1027,7 @@ class AsyncModeStateMachineTests(unittest.TestCase):
             name="Target", selected=True, image=image)
 
         self.fake.dialogs.set_responses(question_box=[
-            "Paint Scribble", "Foreground", "Finish",
+            "Paint Scribble", "Add Foreground Scribble", "Run Scribbles (1)",
         ])
         self.runtime.run()
 
