@@ -141,7 +141,7 @@ Point Set 是一个提示事件：多个正负点以 `run_prediction=False` 写�
 4. 运行 `Script -> Scripting Library -> nnInteractive`。
 5. 选择 **Add Points**、**Paint Scribble**、**Draw Box** 或 **Draw Lasso**。
 6. Add Points 中可连续加入 Include/Exclude 点，绿色/红色标记会保留到 Run/Discard；必要时使用 Remove Last Point。
-7. Paint Scribble 只需选择一次 Include 或 Exclude，然后在临时 Mask 中绘制。
+7. Paint Scribble 可在同一轮中加入 Foreground/Background Scribble，最后一次性 Run Scribbles。
 8. Box 和 Lasso 默认为前景，不再显示正负选择。
 9. 脚本调用外部 nnInteractive，结果自动写回目标 Mask。
 10. 继续增加提示，或使用 **Undo Last Prompt** / **Reset To Start**。
@@ -149,9 +149,9 @@ Point Set 是一个提示事件：多个正负点以 `run_prediction=False` 写�
 
 第一次推理需要启动模型服务，通常比后续提示慢。脚本会复用正在运行的本机服务。
 
-服务由 bridge 创建并记录所有权，不会根据一个来源不明的 PID 直接终止进程。每次提示都会刷新活动时间；默认连续 30 分钟没有推理请求后，独立 watchdog 会核对 PID、启动命令、模型路径和所有权 token，再关闭自己启动的服务并释放 GPU。nnInteractive 官方的 `idle-timeout` 只回收 client session，本集成没有把它误当作服务退出机制。
+服务由 bridge 创建并记录所有权，不会根据一个来源不明的 PID 直接终止进程。每次提示都会刷新活动时间；默认 image worker 连续 30 分钟没有新命令后退出，模型 server 连续 1 小时没有推理请求后由独立 watchdog 核对 PID、启动命令、模型路径和所有权 token，再关闭自己启动的服务并释放 GPU。nnInteractive 官方的 `idle-timeout` 只回收 client session；本集成同步设置该值，避免 server session 早于受管服务被回收。
 
-`start_server.bat` 只用于人工诊断。默认自动管理模式下，诊断结束后应按 Ctrl+C 停止它再运行 Mimics；若确实要长期连接手工启动的服务，需要在 `nninteractive_config.json` 中显式设置 `auto_start_server: false`。自动模式不会接管或结束来源不明的进程；默认端口 `1527` 已被占用时，会为本次受管服务选择另一个空闲本地端口，并把实际地址写入状态和日志。
+`start_server.bat` 只用于人工诊断。默认自动管理模式下，诊断结束后应按 Ctrl+C 停止它再运行 Mimics；若确实要长期连接手工启动的服务，需要在 `nninteractive_config.json` 中显式设置 `auto_start_server: false`。自动模式不会接管或结束来源不明的进程；默认端口 `1527` 已被占用时会阻断并提示关闭旧服务，不再随机选择新端口，以免多个模型服务同时占用内存。
 
 ### 7.1 启动、等待与日志
 
@@ -166,9 +166,21 @@ Mimics 侧不再直接相信“某个 `python.exe` 文件存在”。第一次�
 
 fold 默认值也是 `auto`。bridge 让 nnInteractive 从实际存在的 `fold_*` 目录自动发现模型；只有一个 `fold_0` 时不会再错误地强制 `fold all`。
 
-同一次 `nnInteractive` 工具运行只创建一个外部 worker 和一个远程 inference session。影像上传与 nnInteractive 预处理只执行一次；后续提示、Undo 和 Reset 使用 `reset_interactions()` 后重放提示，不再重复上传整幅影像。worker 会在标注者选择第一种提示前开始初始化，使模型加载尽量与交互操作重叠。
+同一 Mimics 会话中，同一 image 会复用一个外部 worker 和一个远程 inference session。影像上传与 nnInteractive 预处理只对该 image 执行一次；切换同一 image 下的不同目标 Mask 时，只导出当前 target 的 base mask 并在预测命令中传入，不重复导出整幅影像或重新 `set_image()`。worker 会在标注者选择第一种提示后、实际采集提示前开始初始化，使模型加载和影像预处理尽量与交互操作重叠。
 
 Windows 子进程使用无控制台窗口和独立进程组启动，因此正常操作不会再弹出 bridge、server 或 watchdog 黑色终端窗口，也不会继承 Mimics 所在控制台的 Ctrl+C 广播。
+
+### 7.2 后端生命周期
+
+后端分三层管理：
+
+- Target job：绑定一个目标 Mask，保存该目标的 base mask、提示、pending sequence 和结果状态。标注者选择 **Finish** 或丢弃会结束这个 target job，但不会关闭同一 image 的共享 worker。
+- Image worker：绑定一个 Mimics image，持有外部 Python worker、远程 nnInteractive session 和已经 `set_image()` 的影像预处理结果。正常关闭 Mimics/Python 解释器时，脚本通过退出钩子写入 `close.json` 请求 worker 退出；如果 Mimics 崩溃或被强制结束，worker 会在默认 30 分钟空闲后自行退出。
+- Model server：绑定模型目录、设备和 fold，负责加载权重并服务一个远程 session。它不会因为单个 target job 结束而退出；正常空闲默认 1 小时后由 watchdog 关闭。这样短暂切换病例或器官不需要重新加载模型，但关闭 Mimics 后也不会长时间占用 GPU。
+
+如需在低显存工作站上更激进释放资源，可以把 `server_idle_timeout_seconds` 和 `async_worker_idle_timeout_seconds` 调小；如果一台工作站连续标注同一大病例，可以适当调大 `async_worker_idle_timeout_seconds`。
+
+### 7.3 等待预算与日志
 
 默认等待预算按阶段拆开：
 
@@ -180,7 +192,7 @@ Windows 子进程使用无控制台窗口和独立进程组启动，因此正常
 | 单次预测 | 1800 秒 |
 | 兼容的一次性 bridge 总预算 | 4200 秒 |
 
-可在 `nninteractive_config.json` 中分别调整 `environment_probe_timeout_seconds`、`server_startup_timeout_seconds`、`set_image_timeout_seconds`、`prediction_timeout_seconds` 和 `bridge_timeout_seconds`。不要只缩短总超时，否则 CPU 工作站可能在正常计算中被误判失败。
+可在 `nninteractive_config.json` 中分别调整 `environment_probe_timeout_seconds`、`server_startup_timeout_seconds`、`set_image_timeout_seconds`、`prediction_timeout_seconds`、`bridge_timeout_seconds`、`server_idle_timeout_seconds` 和 `async_worker_idle_timeout_seconds`。默认 `server_idle_timeout_seconds` 为 3600 秒，`async_worker_idle_timeout_seconds` 为 1800 秒。不要只缩短总超时，否则 CPU 工作站可能在正常计算中被误判失败。
 
 诊断信息固定写到模型目录同级的 `logs/`：
 
@@ -320,9 +332,9 @@ setx NNINTERACTIVE_MODEL_DIR "D:\nninteractive_env\models\nnInteractive_v1.0"
 - 临时把配置中的 `python` 指向一个没有 nnInteractive 的解释器，确认在连接服务前阻断，并显示错误解释器路径；
 - 在无 NVIDIA GPU 或禁用 GPU 的机器上保持 `device: auto`，确认日志记录 CPU 回退且能够完成小体积预测；
 - 使用只有 `fold_0` 的官方权重，确认服务命令没有 `--fold all`，能够自动加载；
-- 预先占用 `127.0.0.1:1527`，确认受管服务选择其他本地端口且提示仍可完成；
+- 预先占用 `127.0.0.1:1527`，确认受管服务阻断并提示关闭旧服务，不会再启动第二个模型服务；
 - 强制关闭 Mimics 后重新打开，确认残留状态不会误杀无关 PID，旧服务不可复用时会安全重建；
-- 连续添加两个提示，确认第二次没有重新执行 `set_image`/整幅影像预处理；
+- 连续添加两个提示，并在同一 image 下切换两个 target Mask，确认后续提示或 target 不会重新执行 `set_image`/整幅影像预处理；
 - 观察任务管理器，确认 bridge、server 和 watchdog 不弹出终端窗口；
 - 分别查看 Mimics Log Panel、`logs/nninteractive_mimics.log`、`logs/nninteractive_bridge.jsonl`、`logs/nninteractive_worker.stderr.log` 和 `.nninteractive_server.log`，确认失败阶段可追踪。
 
@@ -337,9 +349,9 @@ setx NNINTERACTIVE_MODEL_DIR "D:\nninteractive_env\models\nnInteractive_v1.0"
 - Spline Lasso 只接受轴对齐二维切片，不把任意三维曲线近似为 Lasso。
 - Mimics 21 API 明确公开 `Spline.geometry_points` 和 `Spline.points`。若运行时两者都不可读或不足两个不同体素点，脚本会显示明确错误，不再静默忽略。
 - 一个工具会话内提示可撤销；退出后只保留结果，不保留提示历史。
-- 推理期间 Mimics 会等待外部 bridge 返回。
-- 自动启动的服务使用本机 bearer token，并只复用带匹配所有权记录、模型目录、设备和 fold 配置的进程；默认端口被其他服务占用时会改用空闲本地端口，不会杀死来源不明的进程。
-- Mimics Research 21 的公开 Python API 没有可更新的原生进度条，也没有说明 `timer` 事件的调度周期和脚本返回后的生命周期。为了在预测完成后立即安全写回 Mask，当前版本仍在单次预测期间同步等待。代码通过隐藏终端、提前启动 worker、复用影像预处理、扩大分阶段超时和显示 Log Panel 降低影响；真正的后台推理加自动写回必须经过 Windows 实机验证后再启用，不能仅凭未说明语义的 `timer` 回调实现。
+- 推理在外部 worker 中后台执行。Mimics 侧通过 Qt timer 或 Win32 timer 轮询结果并自动写回；如果当前 Mimics 运行时不暴露可用 timer，会退化为“再次运行 nnInteractive 检查结果”。
+- 自动启动的服务使用本机 bearer token，并只复用带匹配所有权记录、模型目录、设备和 fold 配置的进程；默认端口被其他服务占用时会阻断，不会杀死来源不明的进程，也不会再随机开第二个模型服务。
+- Mimics Research 21 的公开 Python API 没有可更新的原生进度条。当前做法是后台 worker + 自动写回 + Log Panel 记录阶段；Windows 实机仍需验证 Qt timer 或 Win32 timer 在 Mimics 21 中的生命周期和回调稳定性。
 - 无法识别的 Mimics voxel buffer dtype 会阻断并要求补充工作站验证，不会默认猜成 `int16`。
 - 当前官方模型权重的具体许可必须以实际下载版本携带的 license 为准，不能仅根据代码仓库许可推断用途。
 

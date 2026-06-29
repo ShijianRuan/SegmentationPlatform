@@ -1339,6 +1339,148 @@ class EndToEndBridgeSimulationTests(unittest.TestCase):
         self.assertTrue(prompts[0]["include_interaction"])
         self.assertFalse(prompts[1]["include_interaction"])
 
+    # -- _apply_scribble_set --------------------------------------------------
+
+    def test_apply_scribble_set_foreground_and_background(self):
+        """_apply_scribble_set applies multiple scribbles in one interaction."""
+        shape = list(self.real_image.shape)
+        request = _make_bridge_request(
+            image=self.real_image,
+            interactions=[{
+                "interaction_type": "scribble_set",
+                "coordinates": "mimics",
+                "scribbles": [
+                    {
+                        "interaction_type": "scribble",
+                        "include_interaction": True,
+                        "mask_path": self._create_dummy_scribble(
+                            np.ones((2, 2, 1), dtype=np.uint8), "fg"),
+                        "mask_shape": [2, 2, 1],
+                        "interaction_bbox": [[30, 32], [30, 32], [10, 11]],
+                        "coordinates": "mimics",
+                    },
+                    {
+                        "interaction_type": "scribble",
+                        "include_interaction": False,
+                        "mask_path": self._create_dummy_scribble(
+                            np.ones((2, 2, 1), dtype=np.uint8), "bg"),
+                        "mask_shape": [2, 2, 1],
+                        "interaction_bbox": [[33, 35], [33, 35], [10, 11]],
+                        "coordinates": "mimics",
+                    },
+                ],
+            }],
+            output_dir=self.temp_dir,
+            model_dir=self.model_dir,
+            image_shape=shape,
+        )
+
+        with patch.object(BRIDGE, "_connect_remote", side_effect=self._connect_fake):
+            result = BRIDGE.run_bridge(request)
+
+        self.assertEqual("refined", result["status"])
+        output = np.fromfile(request["output_path"], dtype=np.uint8).reshape(shape)
+        self.assertTrue(np.all(output[30:32, 30:32, 10:11] > 0),
+                        "Foreground scribble region should be filled")
+        # Background scribble region should be excluded.
+        self.assertTrue(np.all(output[33:35, 33:35, 10:11] == 0),
+                        "Background scribble region should be empty")
+
+    def _create_dummy_scribble(self, data: np.ndarray, name: str) -> str:
+        """Helper: write a scribble crop to a temp file, return path."""
+        path = os.path.join(self.temp_dir, f"scribble_{name}.u8")
+        data.tofile(path)
+        return path
+
+    # -- warmup_retry ---------------------------------------------------------
+
+    def test_warmup_retry_on_first_call_empty_prediction(self):
+        """Bridge retries once when first_call=True and prediction is empty.
+
+        first_call=True arises from _ensure_server indicating the server was just
+        started. Uses a session that returns empty on first predict but succeeds
+        on retry."""
+        shape = list(self.real_image.shape)
+
+        class _WarmupSession(FakeNnInteractiveSession):
+            """Session that returns empty on first call, succeeds on retry."""
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self._predict_count = 0
+
+            def _apply_all(self):
+                import time
+                self._predict_count += 1
+                if self._predict_count == 1:
+                    # First call: produce empty result.
+                    if self._target is not None:
+                        self._target.fill(0)
+                    if self._initial_seg is not None:
+                        np.copyto(self._target, self._initial_seg)
+                    return
+                # Retry: normal behavior.
+                super()._apply_all()
+
+        def _connect_warmup(server_url="", api_key=None, **kw):
+            return _WarmupSession(server_url=server_url, api_key=api_key)
+
+        request = _make_bridge_request(
+            image=self.real_image,
+            interactions=[{
+                "interaction_type": "point_set",
+                "coordinates": "mimics",
+                "points": [{"point": [32, 32, 11], "include_interaction": True}],
+            }],
+            output_dir=self.temp_dir,
+            model_dir=self.model_dir,
+            image_shape=shape,
+        )
+        # Enable auto_start_server and mock _ensure_server to return first_call=True.
+        request["auto_start_server"] = True
+        request["server_url"] = "http://127.0.0.1:1527"
+
+        with patch.object(BRIDGE, "_connect_remote", side_effect=_connect_warmup), \
+             patch.object(BRIDGE, "_ensure_server",
+                          return_value=(True, "http://127.0.0.1:1527", None)):
+            result = BRIDGE.run_bridge(request)
+
+        self.assertEqual("refined", result["status"])
+        self.assertTrue(result.get("warmup_retry"),
+                        "First-call empty prediction should trigger warmup_retry")
+        output = np.fromfile(request["output_path"], dtype=np.uint8).reshape(shape)
+        self.assertTrue(np.any(output),
+                        "Result should have foreground after warmup retry")
+
+    # -- _server_address normalization ----------------------------------------
+
+    def test_server_address_normalization_triple_slash(self):
+        """'http:///127.0.0.1:1527' normalizes to ('127.0.0.1', 1527)."""
+        host, port = BRIDGE._server_address("http:///127.0.0.1:1527")
+        self.assertEqual("127.0.0.1", host)
+        self.assertEqual(1527, port)
+
+    def test_server_address_no_scheme(self):
+        """'127.0.0.1:1527' (no scheme) normalizes to ('127.0.0.1', 1527)."""
+        host, port = BRIDGE._server_address("127.0.0.1:1527")
+        self.assertEqual("127.0.0.1", host)
+        self.assertEqual(1527, port)
+
+    def test_server_address_host_port_in_path(self):
+        """URL where host:port lands in path due to extra slashes."""
+        host, port = BRIDGE._server_address("http:///localhost:8080")
+        self.assertEqual("localhost", host)
+        self.assertEqual(8080, port)
+
+    def test_server_address_rejects_https(self):
+        """_server_address rejects non-http schemes."""
+        with self.assertRaisesRegex(RuntimeError, "Unsupported"):
+            BRIDGE._server_address("https://127.0.0.1:1527")
+
+    def test_server_address_rejects_empty(self):
+        """_server_address rejects empty/None URLs."""
+        with self.assertRaisesRegex(RuntimeError, "Unsupported"):
+            BRIDGE._server_address("")
+
 
 # ---------------------------------------------------------------------------
 #  Complete Mimics user workflow simulation

@@ -486,7 +486,7 @@ def _start_server(
         "--host", host,
         "--port", str(port),
         "--device", device,
-        "--idle-timeout-seconds", "1800",  # Reap an inactive client session after 30 min.
+        "--idle-timeout-seconds", str(int(service_idle_timeout_seconds)),
         "--liveness-timeout-seconds", "120",
         "--max-sessions", "1",
         "--api-key", ownership_token,
@@ -1184,16 +1184,10 @@ class _BridgeSessionContext:
                 except Exception:
                     pass
             raise
-        self.initial_platform: np.ndarray | None = None
-        initial_seg_path = input_data.get("initial_seg_path")
-        if initial_seg_path:
-            initial_shape = input_data.get("initial_seg_shape") or self.mimics_shape
-            initial_mimics = load_interaction_u8(initial_seg_path, initial_shape)
-            if np.any(initial_mimics):
-                self.initial_platform = mimics_to_platform(
-                    initial_mimics,
-                    self.buffer_mapping,
-                ).astype(np.uint8)
+        self.initial_platform = self._load_initial_platform(
+            input_data.get("initial_seg_path"),
+            input_data.get("initial_seg_shape"),
+        )
         _append_bridge_log(
             self.log_path,
             "session_ready",
@@ -1203,12 +1197,25 @@ class _BridgeSessionContext:
             image_shape=self.platform_shape,
         )
 
-    def _apply_initial_segmentation(self) -> None:
-        if self.initial_platform is None:
+    def _load_initial_platform(
+        self,
+        initial_seg_path: str | None,
+        initial_seg_shape: list[int] | None,
+    ) -> np.ndarray | None:
+        if not initial_seg_path:
+            return None
+        initial_shape = initial_seg_shape or self.mimics_shape
+        initial_mimics = load_interaction_u8(initial_seg_path, initial_shape)
+        if not np.any(initial_mimics):
+            return None
+        return mimics_to_platform(initial_mimics, self.buffer_mapping).astype(np.uint8)
+
+    def _apply_initial_segmentation(self, initial_platform: np.ndarray | None) -> None:
+        if initial_platform is None:
             return
         try:
             self.session.add_initial_seg_interaction(
-                self.initial_platform,
+                initial_platform,
                 run_prediction=False,
             )
         except TypeError:
@@ -1223,6 +1230,10 @@ class _BridgeSessionContext:
         self,
         interactions: list[dict[str, Any]],
         output_path: str,
+        *,
+        initial_seg_path: str | None = None,
+        initial_seg_shape: list[int] | None = None,
+        use_context_initial_seg: bool = True,
     ) -> dict[str, Any]:
         started = time.time()
         if not interactions:
@@ -1232,10 +1243,14 @@ class _BridgeSessionContext:
                 "elapsed_seconds": 0.0,
                 "reason": "no_interactions",
             }
+        if initial_seg_path is not None or not use_context_initial_seg:
+            initial_platform = self._load_initial_platform(initial_seg_path, initial_seg_shape)
+        else:
+            initial_platform = self.initial_platform
 
         def _apply_all_interactions() -> int:
             self.session.reset_interactions()
-            self._apply_initial_segmentation()
+            self._apply_initial_segmentation(initial_platform)
             applied_count = 0
             for interaction in interactions:
                 interaction_type = str(interaction.get("interaction_type", "scribble"))
@@ -1455,6 +1470,9 @@ def _worker_main() -> int:
                 result = context.predict(
                     request.get("interactions") or [],
                     str(request["output_path"]),
+                    initial_seg_path=request.get("initial_seg_path"),
+                    initial_seg_shape=request.get("initial_seg_shape"),
+                    use_context_initial_seg="initial_seg_path" not in request,
                 )
             elif action == "close":
                 if context is not None:
@@ -1550,6 +1568,9 @@ def _async_worker_main(job_dir_value: str) -> int:
                     result = context.predict(
                         command.get("interactions") or [],
                         output_path,
+                        initial_seg_path=command.get("initial_seg_path"),
+                        initial_seg_shape=command.get("initial_seg_shape"),
+                        use_context_initial_seg=False,
                     )
                     result["sequence"] = sequence
                     result["command_id"] = command.get("command_id")

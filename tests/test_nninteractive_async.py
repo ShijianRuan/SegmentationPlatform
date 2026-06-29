@@ -425,10 +425,16 @@ def _load_runtime_module(fake_mimics: object) -> object:
 #  Async worker simulator (writes files that _handle_async_result reads)
 # ---------------------------------------------------------------------------
 
+def _worker_dir_from_state(state: dict) -> str:
+    """Mirror of runtime._async_state_worker_dir."""
+    return state.get("_worker_dir") or state.get("worker_dir") or state["_job_dir"]
+
+
 def _simulate_worker_completed(state: dict, output_path: str, shape: list[int],
                                 foreground_voxels: int = 100) -> None:
     """Simulate worker finishing successfully: write result + worker_status."""
     job_dir = state["_job_dir"]
+    worker_dir = _worker_dir_from_state(state)
     sequence = state.get("pending_sequence")
     if sequence is None:
         return
@@ -462,10 +468,9 @@ def _simulate_worker_completed(state: dict, output_path: str, shape: list[int],
     with open(result_file, "w") as f:
         json.dump(result_json, f)
 
-    # Write worker_status.
-    worker_status = {"status": "ready", "stage": "idle"}
-    with open(os.path.join(job_dir, "worker_status.json"), "w") as f:
-        json.dump(worker_status, f)
+    # Write worker_status to the correct worker directory.
+    with open(os.path.join(worker_dir, "worker_status.json"), "w") as f:
+        json.dump({"status": "ready", "stage": "idle"}, f)
 
     # Update state.
     state["status"] = "ready"
@@ -473,14 +478,16 @@ def _simulate_worker_completed(state: dict, output_path: str, shape: list[int],
 
 def _simulate_worker_running(state: dict, stage: str = "predicting") -> None:
     """Simulate worker still running."""
-    with open(os.path.join(state["_job_dir"], "worker_status.json"), "w") as f:
+    worker_dir = _worker_dir_from_state(state)
+    with open(os.path.join(worker_dir, "worker_status.json"), "w") as f:
         json.dump({"status": "running", "stage": stage}, f)
 
 
 def _simulate_worker_failed(state: dict, error: str = "Simulated failure",
                              stage: str = "prediction") -> None:
     """Simulate worker crash/failure."""
-    with open(os.path.join(state["_job_dir"], "worker_status.json"), "w") as f:
+    worker_dir = _worker_dir_from_state(state)
+    with open(os.path.join(worker_dir, "worker_status.json"), "w") as f:
         json.dump({"status": "failed", "stage": stage, "error": error}, f)
     state["status"] = "failed"
 
@@ -675,6 +682,65 @@ class AsyncModeStateMachineTests(unittest.TestCase):
         # Mask should now have foreground voxels.
         self.assertGreater(mask.number_of_pixels, 0,
                            "Mask should have foreground after result applied")
+
+    def test_same_image_targets_reuse_async_worker(self):
+        """Different target Masks on the same image should share one worker."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask1 = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Liver", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+        state1 = self.runtime._load_async_job(mask1)
+
+        mask1.selected = False
+        mask2 = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Spleen", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)",
+        ])
+        self.fake.set_indicate_coordinate([(36, 36, 11)])
+        self.runtime.run()
+        state2 = self.runtime._load_async_job(mask2)
+
+        self.assertIsNotNone(state1)
+        self.assertIsNotNone(state2)
+        self.assertNotEqual(state1["_job_dir"], state2["_job_dir"])
+        self.assertEqual(state1["_worker_dir"], state2["_worker_dir"])
+        self.assertEqual(1, len(self._worker_pids))
+
+        command_path = os.path.join(
+            state2["_worker_dir"],
+            "commands",
+            "command_{0:06d}.json".format(int(state2["pending_sequence"])),
+        )
+        command = json.loads(open(command_path).read())
+        self.assertEqual(state2["target_guid"], command["target_guid"])
+        self.assertEqual(state2["base_path"], command["initial_seg_path"])
+
+    def test_mimics_exit_requests_shared_worker_close(self):
+        """Normal Mimics/Python shutdown should ask shared workers to stop."""
+        worker_dir = os.path.join(self.temp_dir, "image_worker")
+        os.makedirs(worker_dir, exist_ok=True)
+        self.runtime._ASYNC_IMAGE_WORKERS["image-guid"] = {
+            "worker_dir": worker_dir,
+            "pid": 12345,
+        }
+
+        self.runtime._close_all_async_image_workers()
+
+        close_path = os.path.join(worker_dir, "close.json")
+        self.assertTrue(os.path.isfile(close_path))
+        close_request = json.loads(open(close_path).read())
+        self.assertEqual("mimics_python_exit", close_request["reason"])
+        self.assertEqual({}, self.runtime._ASYNC_IMAGE_WORKERS)
 
     def test_multiple_prompts_then_apply(self):
         """Submit two prompts in sequence, worker completes → both applied."""
@@ -1338,6 +1404,450 @@ class AsyncModeStateMachineTests(unittest.TestCase):
 
         status = self.runtime._async_worker_status(job_dir)
         self.assertEqual({}, status)
+
+    # -- Scribble set UI (multi-scribble batch) -------------------------------
+
+    def test_scribble_set_ui_add_and_run(self):
+        """Add foreground + background scribbles, then Run returns scribble_set."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        temp_dir = os.path.join(self.temp_dir, "scribble_set_test")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        # _capture_scribble_set → _capture_scribble →
+        #   _create_prompt_mask → activate_edit_mask (fills region)
+        #   then the mask gets read, cropped, returned as a scribble interaction.
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Foreground Scribble",    # _capture_scribble_set first iter
+            "Add Background Scribble",    # _capture_scribble_set second iter
+            "Run Scribbles (2)",          # _capture_scribble_set third iter → return
+        ])
+
+        result = self.runtime._capture_scribble_set(image, temp_dir)
+        self.assertIsNotNone(result)
+        self.assertEqual("scribble_set", result["interaction_type"])
+        self.assertEqual(2, len(result["scribbles"]))
+        self.assertTrue(result["scribbles"][0]["include_interaction"],
+                        "First scribble should be foreground")
+        self.assertFalse(result["scribbles"][1]["include_interaction"],
+                         "Second scribble should be background")
+
+        # No prompt masks should linger after capture (visual_objects=None path).
+        prompt_masks = [
+            m for m in self.fake.data.masks
+            if str(getattr(m, "name", "")).startswith(
+                self.runtime.PROMPT_MASK_PREFIX)
+        ]
+        self.assertEqual(0, len(prompt_masks),
+                         "Prompt masks should be cleaned up")
+
+    def test_scribble_set_discard_returns_none(self):
+        """Discard in scribble_set UI returns None."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        temp_dir = os.path.join(self.temp_dir, "scribble_set_discard")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Foreground Scribble",
+            "Discard Scribbles",
+        ])
+
+        result = self.runtime._capture_scribble_set(image, temp_dir)
+        self.assertIsNone(result)
+
+    # -- async result: skipped status -----------------------------------------
+
+    def test_async_result_skipped_status(self):
+        """_handle_async_result returns 'ready' and clears pending_sequence for
+        'skipped' status (no interactions submitted)."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Target", selected=True, image=image)
+
+        # Start a job.
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)", "Finish",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+
+        state = self.runtime._load_async_job(mask)
+        seq = state.get("pending_sequence")
+
+        # Write a "skipped" result JSON.
+        result_file = os.path.join(
+            state["_job_dir"], "results",
+            "result_{0:06d}.json".format(int(seq) if seq else 1))
+        os.makedirs(os.path.dirname(result_file), exist_ok=True)
+        with open(result_file, "w") as f:
+            json.dump({
+                "status": "skipped",
+                "reason": "no_interactions",
+            }, f)
+
+        outcome = self.runtime._handle_async_result(image, mask, state)
+        self.assertEqual("ready", outcome)
+        self.assertIsNone(state.get("pending_sequence"))
+
+    # -- async result: error status -------------------------------------------
+
+    def test_async_result_error_status_retry(self):
+        """Error status → Retry requeues prediction."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Target", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)", "Finish",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+
+        state = self.runtime._load_async_job(mask)
+        seq = state.get("pending_sequence")
+        result_file = os.path.join(
+            state["_job_dir"], "results",
+            "result_{0:06d}.json".format(int(seq) if seq else 1))
+        os.makedirs(os.path.dirname(result_file), exist_ok=True)
+        with open(result_file, "w") as f:
+            json.dump({
+                "status": "error",
+                "error": "Model inference failed",
+                "stage": "prediction",
+            }, f)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Retry Prediction",
+        ])
+        outcome = self.runtime._handle_async_result(image, mask, state)
+        # After Retry → pending_sequence is cleared, then _enqueue_async_prediction
+        # sets a new sequence, _show_async_running shows "Keep Running" (next response).
+        # _handle_async_result returns "waiting" after retry+enqueue.
+        self.assertEqual("waiting", outcome)
+
+    def test_async_result_error_status_discard(self):
+        """Error status → Discard closes job."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Target", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)", "Finish",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+
+        state = self.runtime._load_async_job(mask)
+        seq = state.get("pending_sequence")
+        result_file = os.path.join(
+            state["_job_dir"], "results",
+            "result_{0:06d}.json".format(int(seq) if seq else 1))
+        os.makedirs(os.path.dirname(result_file), exist_ok=True)
+        with open(result_file, "w") as f:
+            json.dump({
+                "status": "error",
+                "error": "OOM",
+                "stage": "prediction",
+            }, f)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Discard AI Session",
+        ])
+        outcome = self.runtime._handle_async_result(image, mask, state)
+        self.assertEqual("restart", outcome)
+        self.assertIsNone(
+            self.runtime._metadata_get(
+                mask, self.runtime.ASYNC_JOB_METADATA, None))
+
+    # -- _check_async_result_nonblocking --------------------------------------
+
+    def test_check_async_result_nonblocking_waiting(self):
+        """No result file + worker still running → 'waiting'."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Target", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)", "Finish",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+
+        state = self.runtime._load_async_job(mask)
+        _simulate_worker_running(state, stage="predicting")
+
+        outcome = self.runtime._check_async_result_nonblocking(
+            image, mask, state)
+        self.assertEqual("waiting", outcome)
+
+    def test_check_async_result_nonblocking_applied(self):
+        """Result file present → 'applied'."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Target", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)", "Finish",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+
+        state = self.runtime._load_async_job(mask)
+        output_path = os.path.join(
+            state["_job_dir"], "results", "prediction.u8")
+        _simulate_worker_completed(state, output_path, self.shape)
+
+        outcome = self.runtime._check_async_result_nonblocking(
+            image, mask, state)
+        self.assertEqual("applied", outcome)
+
+    def test_check_async_result_nonblocking_worker_dead(self):
+        """Worker dead + no result → RuntimeError."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Target", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)", "Finish",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+
+        state = self.runtime._load_async_job(mask)
+        # Write worker_status with 'failed'.
+        _simulate_worker_failed(state, error="Worker crashed",
+                                stage="prediction")
+
+        with self.assertRaisesRegex(RuntimeError, "background worker"):
+            self.runtime._check_async_result_nonblocking(
+                image, mask, state)
+
+    # -- _load_async_job terminal state filtering -----------------------------
+
+    def test_load_async_job_filters_closing_status(self):
+        """Status 'closing' → metadata cleared, returns None."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Target", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)", "Finish",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+
+        state = self.runtime._load_async_job(mask)
+        self.assertIsNotNone(state)
+
+        # Manually force status to 'closing' and save.
+        state["status"] = "closing"
+        self.runtime._save_async_job(state)
+
+        reloaded = self.runtime._load_async_job(mask)
+        self.assertIsNone(reloaded,
+                          "Closing status should be filtered out")
+
+    def test_load_async_job_filters_expired_status(self):
+        """Status 'expired' → metadata cleared, returns None."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Target", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)", "Finish",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+
+        state = self.runtime._load_async_job(mask)
+        state["status"] = "expired"
+        self.runtime._save_async_job(state)
+
+        reloaded = self.runtime._load_async_job(mask)
+        self.assertIsNone(reloaded)
+
+    def test_load_async_job_filters_close_json(self):
+        """close.json present in job_dir → metadata cleared, returns None."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Target", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)", "Finish",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+
+        state = self.runtime._load_async_job(mask)
+        # Create a close.json.
+        with open(os.path.join(state["_job_dir"], "close.json"), "w") as f:
+            json.dump({"reason": "test"}, f)
+
+        reloaded = self.runtime._load_async_job(mask)
+        self.assertIsNone(reloaded)
+
+    # -- _describe_async_worker_failure ---------------------------------------
+
+    def test_describe_async_worker_failure_idle_timeout(self):
+        """idle_timeout stage with no error: produces descriptive message with
+        timeout seconds."""
+        stage, error = self.runtime._describe_async_worker_failure(
+            {"stage": "idle_timeout", "idle_timeout_seconds": 1800},
+            "expired",
+        )
+        self.assertEqual("idle_timeout", stage)
+        self.assertIn("1800", error)
+        self.assertIn("idle timeout", error.lower())
+
+    def test_describe_async_worker_failure_idle_timeout_unknown_seconds(self):
+        """idle_timeout stage without explicit seconds: still produces message."""
+        stage, error = self.runtime._describe_async_worker_failure(
+            {"stage": "idle_timeout"},
+            "expired",
+        )
+        self.assertEqual("idle_timeout", stage)
+        self.assertIn("idle timeout", error.lower())
+
+    def test_describe_async_worker_failure_with_explicit_error(self):
+        """Worker with an explicit error field: uses it as-is."""
+        stage, error = self.runtime._describe_async_worker_failure(
+            {"error": "CUDA out of memory", "stage": "prediction"},
+            "failed",
+        )
+        self.assertEqual("prediction", stage)
+        self.assertEqual("CUDA out of memory", error)
+
+    def test_describe_async_worker_failure_unknown(self):
+        """Unknown status with no stage/error: generic description."""
+        stage, error = self.runtime._describe_async_worker_failure(
+            {}, "unknown_status_xyz",
+        )
+        self.assertEqual("unknown_status_xyz", stage)
+        self.assertEqual("No result file was produced.", error)
+
+    # -- Non-dict result JSON ------------------------------------------------
+
+    def test_handle_result_non_dict_result(self):
+        """_handle_async_result handles non-dict result JSON gracefully.
+
+        Non-dict is silently coerced to {}, then status is missing → checks worker.
+        If worker is failed, raises RuntimeError; if worker is running, returns
+        'waiting' (file may be in-flight from I/O / antivirus)."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Target", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)", "Finish",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+
+        state = self.runtime._load_async_job(mask)
+        seq = state.get("pending_sequence")
+        result_file = os.path.join(
+            state["_job_dir"], "results",
+            "result_{0:06d}.json".format(int(seq) if seq else 1))
+        os.makedirs(os.path.dirname(result_file), exist_ok=True)
+        with open(result_file, "w") as f:
+            # Write a list instead of a dict — simulates corrupted result file.
+            json.dump(["not", "a", "dict"], f)
+
+        # Non-dict → coerced to {} → status is None → checks worker.
+        # Worker is running (simulated by _process_exists mock) → 'waiting'.
+        outcome = self.runtime._handle_async_result(image, mask, state)
+        self.assertEqual("waiting", outcome,
+                         "Non-dict result + running worker should return 'waiting'")
+
+        # If worker is failed: non-dict → coerced → status missing → worker
+        # failed → RuntimeError.
+        _simulate_worker_failed(state, error="Worker crashed", stage="prediction")
+        with self.assertRaisesRegex(RuntimeError, "valid result"):
+            self.runtime._handle_async_result(image, mask, state)
+
+    # -- _async_monitor_tick basic --------------------------------------------
+
+    def test_async_monitor_tick_timeout_raises(self):
+        """_async_monitor_tick raises when deadline is past."""
+        self.fake.add_image(self.image_data.copy(), name="CT_001")
+        monitor = {
+            "done": False,
+            "state": {"_job_dir": "/nonexistent"},
+            "deadline": 0,  # Well in the past.
+            "timeout_seconds": 1,
+        }
+        # The tick function catches exceptions internally and sets done+message_box.
+        self.runtime._async_monitor_tick(monitor)
+        self.assertTrue(monitor["done"],
+                        "Monitor should be marked done after timeout")
+        # Verify the dialog was called (error path → message_box).
+        error_calls = [
+            c for c in self.fake.dialogs._call_log
+            if c["method"] == "message_box"
+            and "failed" in str(c.get("message", "")).lower()
+        ]
+        self.assertGreaterEqual(len(error_calls), 1,
+                                "Error dialog should be shown on timeout")
+
+    # -- Async monitor lifecycle ----------------------------------------------
+
+    def test_start_async_result_monitor_registers_and_stop_cleans_up(self):
+        """_start_async_result_monitor registers the monitor; _stop_async_monitor
+        removes it."""
+        image = self.fake.add_image(self.image_data.copy(), name="CT_001")
+        self.fake.set_active_image(image)
+        mask = self.fake.add_mask(
+            np.zeros(self.shape, dtype=np.uint8),
+            name="Target", selected=True, image=image)
+
+        self.fake.dialogs.set_responses(question_box=[
+            "Add Points", "Add Include Point", "Run Points (1)", "Finish",
+        ])
+        self.fake.set_indicate_coordinate([(32, 32, 11)])
+        self.runtime.run()
+
+        state = self.runtime._load_async_job(mask)
+        self.assertIsNotNone(state)
+
+        # Stop any existing monitor for this job_dir (clean start).
+        self.runtime._stop_async_monitor(state["_job_dir"])
+
+        # Since PyQt5 likely isn't available in test, _start_async_result_monitor
+        # will try QTimer, fail, then fall back to Win32 (also fail on macOS),
+        # and show a non-blocking message_box about the fallback.
+        started = self.runtime._start_async_result_monitor(
+            image, mask, state, self.config)
+        # On macOS without PyQt5, this returns False (fallback path).
+        # The important thing is it doesn't crash and the monitor gets
+        # cleaned up properly.
+        monitor = self.runtime._ASYNC_MONITORS.get(state["_job_dir"])
+        if started:
+            self.assertIsNotNone(monitor)
+        # _stop_async_monitor should be safe to call either way.
+        self.runtime._stop_async_monitor(state["_job_dir"])
+        self.assertIsNone(
+            self.runtime._ASYNC_MONITORS.get(state["_job_dir"]))
 
 
 if __name__ == "__main__":

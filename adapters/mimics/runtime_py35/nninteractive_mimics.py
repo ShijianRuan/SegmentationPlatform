@@ -11,6 +11,7 @@ native APIs and inference runs in an external Python 3.10+ environment.
 
 from __future__ import print_function
 
+import atexit
 import hashlib
 import json
 import logging
@@ -57,6 +58,7 @@ ASYNC_JOB_METADATA = "nninteractive.async_job_path"
 _ASYNC_VISUAL_OBJECTS = {}  # job_dir -> list of Mimics objects to delete after inference
 _RUNTIME_PROBE_CACHE = {}
 _ASYNC_MONITORS = {}
+_ASYNC_IMAGE_WORKERS = {}  # image guid -> shared worker state
 
 
 def _find_root(start_dir, sentinel_files, max_depth=6):
@@ -1171,7 +1173,7 @@ def _bridge_parameters(config, image_export, base_export):
         "server_idle_timeout_seconds": int(
             os.environ.get(
                 "NNINTERACTIVE_SERVER_IDLE_TIMEOUT",
-                config.get("server_idle_timeout_seconds", 1800),
+                config.get("server_idle_timeout_seconds", 3600),
             )
         ),
     }
@@ -1569,6 +1571,24 @@ def _async_worker_status(job_dir):
     return _read_json(os.path.join(job_dir, "worker_status.json"), {}) or {}
 
 
+def _async_state_worker_dir(state):
+    return state.get("_worker_dir") or state.get("worker_dir") or state["_job_dir"]
+
+
+def _next_async_sequence(worker_dir):
+    commands_dir = os.path.join(worker_dir, "commands")
+    highest = 0
+    if os.path.isdir(commands_dir):
+        for name in os.listdir(commands_dir):
+            if not name.startswith("command_") or not name.endswith(".json"):
+                continue
+            try:
+                highest = max(highest, int(name[len("command_"):-len(".json")]))
+            except ValueError:
+                pass
+    return highest + 1
+
+
 def _load_async_job(target):
     job_dir = _metadata_get(target, ASYNC_JOB_METADATA, "")
     if not job_dir:
@@ -1583,6 +1603,7 @@ def _load_async_job(target):
         _metadata_delete(target, ASYNC_JOB_METADATA)
         return None
     state["_job_dir"] = job_dir
+    state["_worker_dir"] = state.get("worker_dir", job_dir)
     return state
 
 
@@ -1595,17 +1616,19 @@ def _save_async_job(state):
 def _close_async_job(target, state, reason):
     if state:
         job_dir = state["_job_dir"]
+        worker_dir = _async_state_worker_dir(state)
         # Clean up any remaining visual objects for this job.
         if job_dir in _ASYNC_VISUAL_OBJECTS:
             for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir):
                 _delete_mimics_object(obj)
-        _write_json_atomic(
-            os.path.join(job_dir, "close.json"),
-            {
-                "reason": reason,
-                "requested_at_epoch": time.time(),
-            },
-        )
+        if worker_dir == job_dir:
+            _write_json_atomic(
+                os.path.join(worker_dir, "close.json"),
+                {
+                    "reason": reason,
+                    "requested_at_epoch": time.time(),
+                },
+            )
         state["status"] = "closing"
         state["closed_reason"] = reason
         state["updated_at_epoch"] = time.time()
@@ -1636,12 +1659,131 @@ def _cleanup_async_jobs(root, retention_days):
             shutil.rmtree(job_dir, ignore_errors=True)
 
 
+def _start_async_worker(python_exe, bridge_script, worker_dir):
+    worker_log_path = os.path.join(worker_dir, "async_worker.log")
+    worker_log = open(worker_log_path, "ab")
+    try:
+        process = subprocess.Popen(
+            [python_exe, bridge_script, "--async-worker", worker_dir],
+            stdin=subprocess.DEVNULL,
+            stdout=worker_log,
+            stderr=subprocess.STDOUT,
+            **_hidden_process_kwargs()
+        )
+    finally:
+        worker_log.close()
+    return process, worker_log_path
+
+
+def _shared_image_worker_alive(worker):
+    if not worker:
+        return False
+    worker_dir = worker.get("worker_dir")
+    pid = worker.get("pid")
+    if not worker_dir or not os.path.isdir(worker_dir) or not _process_exists(pid):
+        return False
+    status = _async_worker_status(worker_dir).get("status")
+    return status not in ("closing", "closed", "failed", "expired")
+
+
+def _request_async_worker_close(worker, reason):
+    worker_dir = worker.get("worker_dir") if worker else None
+    if not worker_dir or not os.path.isdir(worker_dir):
+        return
+    try:
+        _write_json_atomic(
+            os.path.join(worker_dir, "close.json"),
+            {
+                "reason": reason,
+                "requested_at_epoch": time.time(),
+            },
+        )
+    except Exception:
+        pass
+
+
+def _close_all_async_image_workers():
+    for worker in list(_ASYNC_IMAGE_WORKERS.values()):
+        _request_async_worker_close(worker, "mimics_python_exit")
+    _ASYNC_IMAGE_WORKERS.clear()
+
+
+atexit.register(_close_all_async_image_workers)
+
+
+def _get_or_start_image_worker(config, image, jobs_root):
+    python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
+    image_key = _object_id(image)
+    cached = _ASYNC_IMAGE_WORKERS.get(image_key)
+    if _shared_image_worker_alive(cached):
+        return cached
+
+    worker_id = "image_worker_" + time.strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:10]
+    worker_dir = os.path.join(jobs_root, worker_id)
+    inputs_dir = os.path.join(worker_dir, "inputs")
+    for path in (
+        inputs_dir,
+        os.path.join(worker_dir, "commands"),
+        os.path.join(worker_dir, "results"),
+        os.path.join(worker_dir, "prompts"),
+    ):
+        os.makedirs(path)
+
+    image_export = _export_image(image, os.path.join(inputs_dir, "image.raw"))
+    empty_base_export = {
+        "path": "",
+        "shape": image_export["shape"],
+        "pixel_count": 0,
+        "byte_count": 0,
+        "sha256": "",
+    }
+    parameters = _bridge_parameters(config, image_export, empty_base_export)
+    initialize = dict(parameters["request"])
+    initialize["async_worker_idle_timeout_seconds"] = int(
+        config.get("async_worker_idle_timeout_seconds", 1800)
+    )
+    initialize["async_poll_seconds"] = float(config.get("async_poll_seconds", 0.25))
+    initialize["initial_seg_path"] = None
+    _write_json_atomic(os.path.join(worker_dir, "initialize.json"), initialize)
+    process, worker_log_path = _start_async_worker(python_exe, bridge_script, worker_dir)
+    worker = {
+        "worker_dir": worker_dir,
+        "pid": process.pid,
+        "worker_log": worker_log_path,
+        "image_guid": image_key,
+        "image_name": str(getattr(image, "name", "")),
+        "shape": image_export["shape"],
+        "python": python_exe,
+        "python_version": probe.get("version"),
+        "folds": folds,
+        "runtime_log": parameters["runtime_log"],
+        "created_at_epoch": time.time(),
+    }
+    _write_json_atomic(os.path.join(worker_dir, "image_worker.json"), worker)
+    _ASYNC_IMAGE_WORKERS[image_key] = worker
+    _append_runtime_log(
+        parameters["runtime_log"],
+        "async_image_worker_started",
+        {
+            "worker_dir": worker_dir,
+            "pid": process.pid,
+            "image_guid": image_key,
+            "image_name": worker["image_name"],
+        },
+    )
+    return worker
+
+
 def _start_async_job(config, image, target):
     python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
     jobs_root = os.path.join(os.path.dirname(model_dir), "async_jobs")
     if not os.path.isdir(jobs_root):
         os.makedirs(jobs_root)
     _cleanup_async_jobs(jobs_root, config.get("async_job_retention_days", 7))
+
+    shared_worker = None
+    if bool(config.get("async_reuse_image_worker", True)):
+        shared_worker = _get_or_start_image_worker(config, image, jobs_root)
 
     job_id = "job_" + time.strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:10]
     job_dir = os.path.join(jobs_root, job_id)
@@ -1654,7 +1796,15 @@ def _start_async_job(config, image, target):
     ):
         os.makedirs(path)
 
-    image_export = _export_image(image, os.path.join(inputs_dir, "image.raw"))
+    if shared_worker is None:
+        image_export = _export_image(image, os.path.join(inputs_dir, "image.raw"))
+    else:
+        image_export = {
+            "path": "",
+            "shape": shared_worker["shape"],
+            "dtype": "",
+            "sha256": "",
+        }
     base_export = _export_mask(target, os.path.join(inputs_dir, "target_at_start.u8"))
     if image_export["shape"] != base_export["shape"]:
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -1665,19 +1815,31 @@ def _start_async_job(config, image, target):
             )
         )
 
-    parameters = _bridge_parameters(config, image_export, base_export)
-    initialize = dict(parameters["request"])
-    initialize["async_worker_idle_timeout_seconds"] = int(
-        config.get("async_worker_idle_timeout_seconds", 1800)
-    )
-    initialize["async_poll_seconds"] = float(config.get("async_poll_seconds", 0.5))
-    _write_json_atomic(os.path.join(job_dir, "initialize.json"), initialize)
+    if shared_worker is None:
+        parameters = _bridge_parameters(config, image_export, base_export)
+        initialize = dict(parameters["request"])
+        initialize["async_worker_idle_timeout_seconds"] = int(
+            config.get("async_worker_idle_timeout_seconds", 1800)
+        )
+        initialize["async_poll_seconds"] = float(config.get("async_poll_seconds", 0.25))
+        _write_json_atomic(os.path.join(job_dir, "initialize.json"), initialize)
+        process, worker_log_path = _start_async_worker(python_exe, bridge_script, job_dir)
+        worker_dir = job_dir
+        worker_pid = process.pid
+        runtime_log = parameters["runtime_log"]
+    else:
+        worker_dir = shared_worker["worker_dir"]
+        worker_pid = shared_worker["pid"]
+        worker_log_path = shared_worker["worker_log"]
+        runtime_log = shared_worker["runtime_log"]
 
     state = {
         "_job_dir": job_dir,
+        "_worker_dir": worker_dir,
         "schema_version": "nninteractive_async_job.v1",
         "job_id": job_id,
         "status": "initializing",
+        "worker_dir": worker_dir,
         "image_guid": _object_id(image),
         "image_name": str(getattr(image, "name", "")),
         "target_guid": _object_id(target),
@@ -1695,35 +1857,25 @@ def _start_async_job(config, image, target):
         "python": python_exe,
         "python_version": probe.get("version"),
         "folds": folds,
-        "runtime_log": parameters["runtime_log"],
+        "runtime_log": runtime_log,
     }
     _save_async_job(state)
 
-    worker_log_path = os.path.join(job_dir, "async_worker.log")
-    worker_log = open(worker_log_path, "ab")
-    try:
-        process = subprocess.Popen(
-            [python_exe, bridge_script, "--async-worker", job_dir],
-            stdin=subprocess.DEVNULL,
-            stdout=worker_log,
-            stderr=subprocess.STDOUT,
-            **_hidden_process_kwargs()
-        )
-    finally:
-        worker_log.close()
-    state["pid"] = process.pid
+    state["pid"] = worker_pid
     state["worker_log"] = worker_log_path
     state["updated_at_epoch"] = time.time()
     _save_async_job(state)
     _metadata_set(target, ASYNC_JOB_METADATA, job_dir)
     _append_runtime_log(
-        parameters["runtime_log"],
+        runtime_log,
         "async_job_started",
         {
             "job_id": job_id,
             "job_dir": job_dir,
-            "pid": process.pid,
+            "worker_dir": worker_dir,
+            "pid": worker_pid,
             "target_guid": state["target_guid"],
+            "shared_image_worker": shared_worker is not None,
         },
     )
     return state
@@ -1750,7 +1902,8 @@ def _persist_interaction(job_dir, interaction):
 
 
 def _enqueue_async_prediction(state, target):
-    sequence = int(state.get("next_sequence", 1))
+    worker_dir = _async_state_worker_dir(state)
+    sequence = _next_async_sequence(worker_dir)
     expected_hash = _mask_sha256(target)
     command = {
         "schema_version": "nninteractive_async_command.v1",
@@ -1759,6 +1912,11 @@ def _enqueue_async_prediction(state, target):
         "created_at_epoch": time.time(),
         "expected_target_sha256": expected_hash,
         "interactions": state.get("interactions", []),
+        "initial_seg_path": state["base_path"] if state.get("base_path") else None,
+        "initial_seg_shape": state.get("shape"),
+        "target_guid": state.get("target_guid"),
+        "target_name": state.get("target_name"),
+        "job_dir": state.get("_job_dir"),
     }
     state["pending_sequence"] = sequence
     state["next_sequence"] = sequence + 1
@@ -1767,7 +1925,7 @@ def _enqueue_async_prediction(state, target):
     state["updated_at_epoch"] = time.time()
     _save_async_job(state)
     command_path = os.path.join(
-        state["_job_dir"],
+        worker_dir,
         "commands",
         "command_{0:06d}.json".format(sequence),
     )
@@ -1776,11 +1934,19 @@ def _enqueue_async_prediction(state, target):
 
 
 def _async_result_path(state, sequence):
-    return os.path.join(
+    primary = os.path.join(
+        _async_state_worker_dir(state),
+        "results",
+        "result_{0:06d}.json".format(int(sequence)),
+    )
+    legacy = os.path.join(
         state["_job_dir"],
         "results",
         "result_{0:06d}.json".format(int(sequence)),
     )
+    if primary != legacy and os.path.isfile(legacy) and not os.path.isfile(primary):
+        return legacy
+    return primary
 
 
 def _describe_async_worker_failure(worker, worker_status):
@@ -1806,7 +1972,7 @@ def _describe_async_worker_failure(worker, worker_status):
 
 
 def _show_async_running(target, state):
-    worker = _async_worker_status(state["_job_dir"])
+    worker = _async_worker_status(_async_state_worker_dir(state))
     stage = worker.get("stage", worker.get("status", state.get("status", "running")))
     answer = mimics.dialogs.question_box(
         message=(
@@ -1833,7 +1999,7 @@ def _check_async_result_nonblocking(image, target, state):
 
     result_path = _async_result_path(state, sequence)
     if not os.path.isfile(result_path):
-        worker = _async_worker_status(state["_job_dir"])
+        worker = _async_worker_status(_async_state_worker_dir(state))
         worker_status = worker.get("status")
         if worker_status in ("failed", "expired", "closed") or (
             state.get("pid") and not _process_exists(state.get("pid"))
@@ -2018,7 +2184,7 @@ def _handle_async_result(image, target, state):
         return "ready"
     result_path = _async_result_path(state, sequence)
     if not os.path.isfile(result_path):
-        worker = _async_worker_status(state["_job_dir"])
+        worker = _async_worker_status(_async_state_worker_dir(state))
         worker_status = worker.get("status")
         if worker_status in ("failed", "expired", "closed") or (
             state.get("pid") and not _process_exists(state.get("pid"))
@@ -2049,7 +2215,7 @@ def _handle_async_result(image, target, state):
     status = result.get("status")
 
     if not status:
-        worker = _async_worker_status(state["_job_dir"])
+        worker = _async_worker_status(_async_state_worker_dir(state))
         worker_status = worker.get("status")
         if worker_status in ("failed", "expired", "closed"):
             raise RuntimeError(
@@ -2266,6 +2432,13 @@ def _run_async(image, target, config):
                     _delete_mimics_object(obj)
             _save_async_job(state)
             return 0
+
+        if state is None and bool(config.get("async_start_worker_before_prompt", True)):
+            _mimics_log(
+                logging.INFO,
+                "nnInteractive is preparing the AI session before prompt capture.",
+            )
+            state = _start_async_job(config, image, target)
 
         include = None
         visual_objects = []

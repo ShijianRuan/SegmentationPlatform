@@ -5,3 +5,4 @@
 | 文档 | 用途 |
 | --- | --- |
 | [nnInteractive for Mimics 21](nninteractive_mimics.md) | 在任意 Mimics 项目中使用 nnInteractive 交互分割 |
+| [DINOv3 Few-Shot Segmenter for Mimics 21](dinov3_fewshot_mimics.md) | 在 Mimics 中独立使用 DINOv3 少样本训练和推理辅助标注 |

@@ -37,6 +37,7 @@ def _launch():
     active_async_state = (
         getattr(nninteractive_mimics, "_ASYNC_MONITORS", None)
         or getattr(nninteractive_mimics, "_ASYNC_VISUAL_OBJECTS", None)
+        or getattr(nninteractive_mimics, "_ASYNC_IMAGE_WORKERS", None)
     )
     if not active_async_state:
         importlib.reload(nninteractive_mimics)
