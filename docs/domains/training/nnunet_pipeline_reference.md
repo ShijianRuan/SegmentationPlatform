@@ -1,646 +1,476 @@
-# 医学图像分割训练管线 — 架构与流程设计文档
+# 现有 nnUNet 训练与推理管线
 
-> 状态说明：这是现有 nnUNet 训练管线的代码级说明，适合作为 `nnUNet Adapter` 的参考材料。平台总体设计以 `docs/architecture/platform_blueprint.md` 为准；本文不定义平台级标签治理、Dataset Snapshot 或 Mimics 流程。
+> 日期：2026-06-13
+> 状态：当前代码的实现说明，不是平台总体设计
+> 适用读者：准备维护 `pipelines/nnunet/`，或实现 nnUNet 工具适配器的开发者
 
-> 本文档基于 `docs/domains/training` 中的训练说明和 `pipelines/nnunet/` 下的现有代码，说明当前 nnUNet 训练与推理管线的模块职责、数据流转和关键实现细节。
+## 1. 先理解这份文档的边界
 
----
+当前代码已经能够完成：
 
-## 1. 系统总览
+1. 把逐器官标注转换为 nnUNet 数据格式。
+2. 运行 nnUNet 规划和预处理。
+3. 训练模型。
+4. 对单个模型或多个模型运行推理。
+5. 计算基础 Dice 并生成报告。
 
-### 1.1 设计目标
+它适合作为平台的 nnUNet 训练核心，但还不是完整的平台训练入口。下面四个问题必须由平台工具适配器补齐：
 
-本训练管线基于 [nnUNetv2](https://github.com/MIC-DKFZ/nnUNet) 框架，构建了一套**端到端的医学图像分割解决方案**，覆盖从标注数据转换、预处理、训练、推理到评估的完整生命周期。核心设计理念：
+| 当前限制 | 实际风险 | 平台接入要求 |
+| --- | --- | --- |
+| 缺少 `meta.csv` 时随机划分病例 | 随机种子未固定，也不保证同一患者的不同检查留在同一侧 | 正式训练只使用训练数据快照中固定的患者级划分 |
+| 缺少某个器官 mask 时跳过该文件 | 输出中相应区域仍是背景 0，会把“没有标注”误当成“器官不存在” | 导出前检查目标器官是否完整；不完整病例默认排除 |
+| `dataset.json` 的名称、描述和许可存在硬编码 | 生成文件不能反映真实数据来源 | 由工具适配器根据训练数据快照生成真实元数据 |
+| Surface Dice 依赖导入被注释 | 运行可能失败或产生空指标 | 修复并测试前，只把 Dice 当作可用的基础指标 |
 
-- **配置驱动**：通过 TOML 配置文件管理所有参数，避免硬编码，支持多模型、多模态灵活组合
-- **模块化架构**：5 个 Action 模块各司其职，通过 Framework 编排调度
-- **多 GPU 并行**：自动生成 GPU 分配脚本，支持多模型跨 GPU 并行训练
-- **工程化推理路径**：预插值、显存记录、跨平台适配（Windows/Linux）
+正式评估还要检查患者泄漏和参考标签来源，并创建独立评估记录。本文只描述当前代码怎样运行。
 
-### 1.2 整体架构图
+## 2. 管线由哪些文件组成
 
-```mermaid
-graph TB
-    subgraph 配置层
-        CFG[TOML 配置文件<br/>Config_*.toml]
-        MM[模型映射文件<br/>ModelMap.toml]
-    end
+### 2.1 主流程
 
-    subgraph 编排层
-        FW[AutoSegmentationFramework.py<br/>工作流编排器]
-    end
+| 文件 | 作用 |
+| --- | --- |
+| `AutoSegmentationFramework.py` | 读取配置，按顺序调用数据转换、预处理、训练、预测和评估 |
+| `Action1_ConvertLabeledToTrainData.py` | 把现有标注目录转换为 nnUNet 数据集 |
+| `Action2_PlanAndPreprocess.py` | 调用 nnUNet 数据指纹、实验规划和预处理 |
+| `Action3_Train.py` | 设置设备和线程，调用 nnUNet 训练 |
+| `Action4_Predict.py` | 提供单模型、多模型和预重采样推理 |
+| `Action5_Evaluation.py` | 计算 Dice、尝试计算 Surface Dice，并生成评估报告 |
 
-    subgraph 执行层
-        A1[Action1<br/>数据转换]
-        A2[Action2<br/>预处理规划]
-        A3[Action3<br/>模型训练]
-        A4[Action4<br/>推理预测]
-        A5[Action5<br/>评估分析]
-    end
+### 2.2 辅助工具
 
-    subgraph 工具层
-        RSM[ResampleImageAndMask.py<br/>重采样工具]
-        SEV[SetEnvionmentVariables.py<br/>环境变量管理]
-        IC[ImageConvertor.py<br/>图像格式转换]
-        MO[MaskOperation.py<br/>Mask标签操作]
-        D2M[DicomToMhd.py<br/>DICOM转换]
-    end
+| 文件 | 作用 |
+| --- | --- |
+| `ResampleImageAndMask.py` | 重采样图像和 mask |
+| `SetEnvionmentVariables.py` | 设置 nnUNet 目录和运行环境变量 |
+| `ImageConvertor.py` | 图像格式转换、裁剪和 spacing 修正 |
+| `MaskOperation.py` | 标签重映射、合并和形态学处理 |
+| `DicomToMhd.py` | 把 DICOM 序列转换为 MHD 或 NIfTI |
 
-    CFG --> FW
-    MM --> FW
-    FW --> A1
-    FW --> A2
-    FW --> A3
-    FW --> A4
-    FW --> A5
+### 2.3 配置文件
 
-    A1 --> RSM
-    A1 --> IC
-    A4 --> RSM
-    A4 --> MO
-    A2 --> SEV
-    A3 --> SEV
+| 文件 | 作用 |
+| --- | --- |
+| `Config_*.toml` | 定义路径、模态、任务、GPU、预处理、训练、推理和评估参数 |
+| `ModelMap.toml` | 定义每个局部模型负责哪些器官，以及训练时使用的整数标签 |
 
-    style FW fill:#4CAF50,color:white
-    style CFG fill:#2196F3,color:white
-    style MM fill:#2196F3,color:white
-```
-
-### 1.3 文件清单与职责
-
-| 文件 | 职责 | 核心功能 |
-|------|------|----------|
-| `AutoSegmentationFramework.py` | 工作流编排器 | 配置解析、流程调度、多GPU脚本生成 |
-| `Action1_ConvertLabeledToTrainData.py` | 数据转换 | 标注数据→nnUNet格式、重采样、方位重定向、标签合并 |
-| `Action2_PlanAndPreprocess.py` | 预处理规划 | 指纹提取、实验规划、参数覆盖、数据预处理 |
-| `Action3_Train.py` | 模型训练 | GPU设置、nnUNet训练调度 |
-| `Action4_Predict.py` | 推理预测 | 多种推理模式、预插值加速、显存监控、跨平台适配 |
-| `Action5_Evaluation.py` | 评估分析 | Dice/Surface Dice计算、多模型聚合、报告生成 |
-| `ResampleImageAndMask.py` | 重采样工具 | 图像/Mask重采样、GPU加速插值 |
-| `SetEnvionmentVariables.py` | 环境管理 | Shell配置文件读写、环境变量设置 |
-| `ImageConvertor.py` | 图像转换 | VOI裁剪、格式转换、Spacing修正 |
-| `MaskOperation.py` | Mask操作 | 标签重映射、形态学操作 |
-| `DicomToMhd.py` | DICOM转换 | DICOM序列→MHD/NIfTI格式转换 |
-| `Config_*.toml` | 配置文件 | 训练参数、路径、GPU分配等全部配置 |
-| `ModelMap.toml` | 模型映射 | 各模型分割类别与标签值定义 |
-
----
-
-## 2. 配置体系
-
-### 2.1 配置文件结构
-
-系统采用 **TOML 格式** 的配置文件，每个训练任务对应一个独立的 `.toml` 文件，实现配置与代码解耦。
-
-```toml
-[COMMON]           # 通用设置：模态（CT/MR）
-[PATHS]            # 路径设置：标注数据、训练数据、nnUNet环境
-[MODEL]            # 模型设置：数据集名称、分割列表、模型映射
-[GPU]              # GPU设置：GPU编号分配
-[PREPROCESS]       # 预处理设置：分辨率、Patch大小、Batch大小、方位
-[TRAIN]            # 训练设置：Epoch、Fold、Trainer、Plans
-[PREDICT]          # 预测设置：TTA、统计开关
-[EVALUATION]       # 评估设置：目录、聚合开关
-```
-
-### 2.2 配置加载流程
+## 3. 总体执行顺序
 
 ```mermaid
 flowchart LR
-    A[Config_*.toml] --> B[ReadConfigFile]
-    C[ModelMap.toml] --> B
-    B --> D[解析路径<br/>构建nnUNet目录]
-    B --> E[解析模型映射<br/>展开segment_list]
-    B --> F[写出配置快照<br/>带时间戳JSON]
-    D --> G[运行时Config对象]
-    E --> G
-    F --> G
+    accTitle: 现有 nnUNet 管线执行顺序
+    accDescr: 配置和任务标签表交给主编排脚本，依次完成数据转换、预处理、训练、预测和评估。
+
+    config["配置文件与 ModelMap"]
+    framework["主编排脚本"]
+    convert["1. 数据转换"]
+    preprocess["2. 规划与预处理"]
+    train["3. 训练"]
+    predict["4. 推理"]
+    evaluate["5. 基础评估"]
+
+    config --> framework
+    framework --> convert
+    convert --> preprocess
+    preprocess --> train
+    train --> predict
+    predict --> evaluate
 ```
 
-**关键逻辑**：
+每个步骤都可以单独调用。四种预定义工作流只是组合了不同步骤，见第 9 章。
 
-1. **模型映射展开**：从 `ModelMap.toml` 中根据 `segment_list_name` 查找对应的分割类别列表，支持**扁平格式**（`{organ: label}`）和**分组格式**（`{group: {label, organs}}`）
-2. **路径自动构建**：根据 `labeled_path` + `labeled_dataset` 生成数据集路径，自动创建 nnUNet 所需的三级目录（`nnUNet_raw`、`nnUNet_preprocessed`、`nnUNet_results`）
-3. **配置快照**：每次运行时将完整配置以 JSON 形式保存到训练输出目录，带时间戳，便于回溯
+## 4. 配置怎样工作
 
-### 2.3 ModelMap 设计
+### 4.1 配置分区
 
-`ModelMap.toml` 是整个系统的**分割类别字典**，定义了每个子模型负责的器官及其标签值：
+每个训练任务使用一个 TOML 配置文件。主要分区如下：
 
 ```toml
-# 扁平格式 — 每个器官独立标签
+[COMMON]       # CT 或 MR 等通用设置
+[PATHS]        # 标注数据、训练数据和 nnUNet 目录
+[MODEL]        # 数据集名称、任务名称和 ModelMap
+[GPU]          # GPU 分配
+[PREPROCESS]   # spacing、patch size、batch size 和方向
+[TRAIN]        # epoch、fold、trainer 和 plans
+[PREDICT]      # 推理与统计开关
+[EVALUATION]   # 评估目录和聚合开关
+```
+
+### 4.2 配置加载步骤
+
+主编排脚本加载配置时：
+
+1. 读取 `Config_*.toml`。
+2. 读取 `ModelMap.toml`。
+3. 根据 `segment_list_name` 找到当前任务负责的器官和标签值。
+4. 根据基础路径和数据集名称构建 nnUNet 目录。
+5. 保存一份带时间戳的 JSON 配置快照。
+6. 生成运行时配置对象。
+
+配置快照能帮助追溯一次运行使用了哪些参数，但它不能替代平台的训练数据快照。后者还要固定病例、标签版本和患者划分。
+
+### 4.3 `ModelMap.toml` 的两种写法
+
+细粒度任务中，每个器官使用独立标签：
+
+```toml
 [CT1_Head]
 brain = 1
 skull = 2
+```
 
-# 分组格式 — 多个器官共享同一标签（粗分割）
+粗分割任务中，多个器官可以合并为一个区域：
+
+```toml
 [CT_All_Coarse]
-head  = { label = 1, organs = ["brain", "skull"] }
-chest = { label = 2, organs = ["heart", "aorta", ...] }
+head = { label = 1, organs = ["brain", "skull"] }
+chest = { label = 2, organs = ["heart", "aorta"] }
 ```
 
-**设计要点**：
-- 每个子模型的标签值**独立从 1 开始**编号（nnUNet 要求）
-- `CT_Combine` / `MR_Combine` 定义了拼接为完整 Mask 时的统一标签值（避免冲突）
-- 支持同一器官在不同模型中使用不同标签值
+每个局部模型内部的前景标签从 1 开始，0 表示背景。不同模型可以重复使用相同整数。`CT_Combine` 和 `MR_Combine` 用于合并多个模型的输出，不用于单个模型训练。
 
----
+## 5. 第一步：转换标注数据
 
-## 3. 五阶段流水线详解
+### 5.1 输入
 
-### 3.1 Action1：数据转换（ConvertLabeledToTrainData）
+当前转换脚本期望每个病例包含：
 
-**职责**：将标注数据从原始目录结构转换为 nnUNet 标准训练格式。
-
-```mermaid
-flowchart TB
-    subgraph 输入
-        DS[标注数据集<br/>labeled_path/dataset/]
-    end
-
-    subgraph 数据划分
-        META{meta.csv<br/>是否存在?}
-        META -->|是| S1[按CSV划分<br/>train/val/test]
-        META -->|否| S2[自动扫描<br/>80/10/10随机划分]
-    end
-
-    subgraph 格式转换
-        S3[读取原始图像<br/>+ 各器官Mask]
-        S4{需要重采样?}
-        S5[Resample到target_spacing]
-        S6{需要重定向?}
-        S7[Reorient到目标方位]
-        S8[合并多器官Mask<br/>为单文件多标签]
-    end
-
-    subgraph 输出
-        O1[imagesTr/<br/>xxx_0000.nii.gz]
-        O2[labelsTr/<br/>xxx.nii.gz]
-        O3[imagesTs/<br/>xxx_0000.nii.gz]
-        O4[labelsTs/<br/>xxx.nii.gz]
-        O5[dataset.json]
-        O6[splits_final.json]
-    end
-
-    DS --> META
-    S1 --> S3
-    S2 --> S3
-    S3 --> S4
-    S4 -->|是| S5
-    S4 -->|否| S6
-    S5 --> S6
-    S6 -->|是| S7
-    S6 -->|否| S8
-    S7 --> S8
-    S8 --> O1
-    S8 --> O2
-    S8 --> O3
-    S8 --> O4
-    S8 --> O5
-    S8 --> O6
+```text
+patient/
+  ct.nii.gz
+  segmentations/
+    liver.nii.gz
+    gallbladder.nii.gz
 ```
 
-**核心功能详解**：
+配置决定：
 
-#### 3.1.1 数据集划分
-- 优先读取 `meta.csv`（含 `split` 列），支持精确控制训练/验证/测试集
-- 若无 `meta.csv`，自动扫描子文件夹并按 80%/10%/10% 随机划分
-- 若验证集为空，自动从训练集末尾取 10% 补充
+- 原始标注目录。
+- 当前任务需要哪些器官。
+- 是否重采样。
+- 是否调整图像方向。
+- 训练、验证和测试划分。
 
-#### 3.1.2 重采样（Resample）
-- 使用 `scipy.ndimage.zoom` 进行体素重采样
-- 图像使用**三线性插值**（order=1），Mask 使用**最近邻插值**（order=0）
-- 重采样后自动构建新的 affine 矩阵，保持空间信息一致
+### 5.2 处理顺序
 
-#### 3.1.3 方位重定向（Reorient）
-- 支持 MHD/ITK-SNAP 约定的三位方位码（如 `RAI`、`LPS`）
-- **仅通过轴置换和翻转**实现，不做插值，**原始体素值完全不变**
-- 内部处理了 MHD 约定与 nibabel 约定的差异（每个字母取反）
-- 通过 SVD 正交化 affine 矩阵，避免方向余弦不正交导致的读取错误
+1. 读取病例划分。
+2. 加载图像和逐器官 mask。
+3. 按需重采样。
+4. 按需调整方向。
+5. 按 `ModelMap.toml` 合并为一份多标签 mask。
+6. 写入 nnUNet 目录。
+7. 生成 `dataset.json` 和 `splits_final.json`。
 
-#### 3.1.4 多器官标签合并
-- 将每个器官的独立 Mask 文件合并为单个多标签 Mask
-- 后写入的器官覆盖先写入的（按 `class_map` 顺序）
-- 支持**并行加载**（`resample_and_combine_labels_fast`），使用 `ThreadPoolExecutor` 加速
+### 5.3 数据划分
 
-#### 3.1.5 元数据生成
-- `dataset.json`：包含模态、标签映射、文件格式等 nnUNet 必需信息
-- `splits_final.json`：训练/验证集划分，确保可复现
+脚本优先读取带 `split` 列的 `meta.csv`。
 
----
+如果没有 `meta.csv`，当前代码会：
 
-### 3.2 Action2：预处理规划（PlanAndPreprocess）
+- 自动扫描病例。
+- 按 80% / 10% / 10% 随机划分。
+- 验证集为空时，从训练集末尾取 10%。
 
-**职责**：执行 nnUNet 的数据指纹提取、实验规划和预处理，并支持手动覆盖关键参数。
+这个回退只适合临时实验。正式平台运行禁止依赖它，因为它没有固定随机种子，也不保证患者级分组。
 
-```mermaid
-flowchart TB
-    A[数据集ID] --> B[步骤1: 指纹提取<br/>extract_fingerprints]
-    B --> C[步骤2: 实验规划<br/>plan_experiments]
-    C --> D{需要覆盖参数?}
-    D -->|是| E[步骤2.5: 参数覆盖<br/>_override_plans]
-    D -->|否| F[步骤3: 数据预处理<br/>preprocess]
-    E --> F
+### 5.4 重采样
 
-    subgraph 参数覆盖详情
-        E1[覆盖patch_size<br/>→ 重算网络拓扑]
-        E2[覆盖batch_size<br/>→ 直接替换]
-        E3[重算pool/conv kernel]
-        E4[重估VRAM→batch_size]
-        E1 --> E3
-        E3 --> E4
-        E2 --> E4
-    end
+当前实现使用 `scipy.ndimage.zoom`：
+
+- 图像采用一阶线性插值。
+- mask 采用最近邻插值。
+- 重采样后重建 affine。
+
+平台工具适配器仍要在导出前后检查实际空间信息，不能仅因脚本完成就假设结果正确。
+
+### 5.5 调整图像方向
+
+当前实现支持类似 `RAI` 和 `LPS` 的三字母方向代码。
+
+处理方式主要是轴置换和翻转，不对体素值插值。代码还会对 affine 的方向矩阵做正交化，以减少部分软件因方向余弦误差而拒绝读取的问题。
+
+MHD/ITK-SNAP 与 nibabel 对方向字母的解释不同。当前代码通过每个字母取反处理二者转换，例如 MHD 约定的 `RAI` 对应 nibabel 约定的 `LPS`。
+
+### 5.6 合并逐器官 mask
+
+转换脚本按当前任务标签表，把多个二值 mask 写入一份整数 mask。
+
+- 后写入的器官会覆盖先写入器官的重叠体素。
+- 并行加载版本使用 `ThreadPoolExecutor` 加速。
+- 粗分割配置可以把多个器官写成同一个区域标签。
+
+平台接入时要记录重叠体素，并在任务配置中明确覆盖顺序。
+
+### 5.7 输出
+
+```text
+nnUNet_raw/DatasetXXX_Name/
+  imagesTr/
+  labelsTr/
+  imagesTs/
+  labelsTs/
+  dataset.json
+  splits_final.json
 ```
 
-**核心功能详解**：
+已知问题：
 
-#### 3.2.1 三步预处理流程
-1. **指纹提取**（`extract_fingerprints`）：扫描数据集，统计图像尺寸、间距分布、强度范围等特征
-2. **实验规划**（`plan_experiments`）：根据指纹自动规划 target_spacing、patch_size、网络拓扑等
-3. **数据预处理**（`preprocess`）：按规划对训练数据进行重采样、归一化等操作
+- 缺失器官 mask 会被跳过，不能由当前脚本自行判断是否应当作背景。
+- `dataset.json` 的名称、描述和许可必须由平台工具适配器覆盖。
 
-#### 3.2.2 参数覆盖机制
-这是本管线的重要扩展，允许用户在 nnUNet 自动规划的基础上手动调整关键参数：
+## 6. 第二步：规划和预处理
 
-| 参数 | 覆盖方式 | 影响 |
-|------|----------|------|
-| `target_spacing` | 传入 `plan_experiments` 的 `overwrite_target_spacing` | 影响重采样目标分辨率 |
-| `patch_size` | 修改 `plans.json` 中的 `patch_size` + 重算网络拓扑 | 影响感受野和显存占用 |
-| `batch_size` | 直接覆盖 `plans.json` 中的 `batch_size` | 影响训练速度和显存占用 |
+`Action2_PlanAndPreprocess.py` 依次调用 nnUNet 的三个步骤：
 
-**patch_size 覆盖的自动调整**：
-- 自动向上取整为 $2^{n}$ 的整数倍（满足池化约束）
-- 使用 `get_pool_and_conv_props` 重新计算池化核大小、卷积核大小、网络层数
-- 自动估算 VRAM 占用并重算 batch_size
-- 用户指定的 batch_size 优先级最高，覆盖自动估算值
+1. **提取数据指纹**：统计图像大小、间距和强度范围。
+2. **规划实验**：计算目标间距、patch size、网络结构等。
+3. **预处理数据**：根据规划完成重采样和归一化。
 
----
+### 6.1 手工覆盖参数
 
-### 3.3 Action3：模型训练（Train）
+当前管线允许在 nnUNet 自动规划后覆盖：
 
-**职责**：封装 nnUNet 训练流程，管理 GPU 设备和多线程参数。
+| 参数 | 当前处理 | 主要影响 |
+| --- | --- | --- |
+| `target_spacing` | 传给实验规划 | 重采样分辨率 |
+| `patch_size` | 修改 plans 并重算网络拓扑 | 感受野和显存 |
+| `batch_size` | 直接覆盖 plans | 训练速度和显存 |
 
-```mermaid
-flowchart LR
-    A[配置参数] --> B[设置GPU<br/>CUDA_VISIBLE_DEVICES]
-    B --> C[设置多线程参数<br/>OMP/MKL/OPENBLAS]
-    C --> D[设备选择<br/>cuda/cpu]
-    D --> E[调用nnUNet<br/>run_training]
-    E --> F[训练完成]
+覆盖 `patch_size` 时，代码会：
+
+- 调整尺寸以满足池化约束。
+- 重新计算池化核和卷积核。
+- 重新估算显存和 batch size。
+- 最后以用户明确指定的 batch size 为准。
+
+这些参数的实际值必须进入模型记录。仅保存原始配置不足以证明最终训练使用了什么。
+
+## 7. 第三步：训练
+
+`Action3_Train.py` 负责设置设备和线程，然后调用 nnUNet 的 `run_training`。
+
+主要参数：
+
+| 参数 | 含义 | 当前常见值 |
+| --- | --- | --- |
+| `dataset_id` | nnUNet 数据集编号或名称 | 必填 |
+| `configuration` | nnUNet 配置 | `3d_fullres` |
+| `fold` | 交叉验证折 | `0` |
+| `trainer` | trainer 类名 | `nnUNetTrainerNoMirroring` |
+| `plans` | plans 标识 | `nnUNetPlans` |
+| `num_gpus` | 单次训练使用的 GPU 数量 | `1` |
+| `gpu_id` | 指定 GPU | 配置决定 |
+
+工程处理：
+
+- nnUNet 模块在函数内延迟导入，减少子进程重复加载。
+- CPU 模式按核心数设置线程。
+- GPU 模式把部分 CPU 线程数限制为 1，避免不必要调度开销。
+
+## 8. 第四步：推理
+
+当前代码提供四种推理入口：
+
+| 入口 | 适用场景 | 分辨率处理 |
+| --- | --- | --- |
+| `stage_predict` | 训练后的标准验证 | 由 nnUNet 内部处理 |
+| `easy_predict` | 单模型快速调用 | 由 nnUNet 内部处理 |
+| `easy_predict_with_preresample` | 离线批量推理或部署验证 | 外部先缩放，预测后恢复 |
+| `multimodel_predict_and_merge` | 多模型全身推理 | 多个模型共享一次图像缩放 |
+
+### 8.1 预重采样推理
+
+该路径先把图像缩放到训练分辨率，再调用 nnUNet，最后把预测 mask 恢复到原始分辨率。
+
+设计目的：
+
+- 避免 nnUNet 对每个病例重复执行较慢的内部重采样。
+- 允许外部代码控制图像和 mask 插值。
+- 降低多模型重复缩放的成本。
+
+原文档记录的秒级耗时来自特定运行环境，不应视为平台承诺。不同图像大小、CPU、GPU 和存储环境都需要重新测试。
+
+mask 恢复当前支持：
+
+- GPU 线性插值后取类别。
+- 最近邻插值。
+- CPU one-hot 线性插值后取最大类别。
+
+分割标签最终仍要使用离散整数，选择插值方式时必须验证边界和小结构是否受损。
+
+### 8.2 多模型共享分辨率
+
+传统方式让每个模型分别完成：
+
+```text
+缩放图像 -> 推理 -> 恢复 mask
 ```
 
-**关键参数**：
+共享分辨率方式改为：
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `dataset_id` | 数据集ID或名称 | 必填 |
-| `configuration` | 训练配置 | `3d_fullres` |
-| `fold` | 交叉验证折数 | `0` |
-| `trainer` | Trainer类名 | `nnUNetTrainerNoMirroring` |
-| `plans` | Plans标识符 | `nnUNetPlans` |
-| `num_gpus` | GPU数量（>1启用DDP） | `1` |
-| `gpu_id` | 指定GPU编号 | 自动检测 |
-
-**设计要点**：
-- 延迟导入 nnUNet 模块，避免 worker 进程重复加载 DLL
-- CPU 模式下自动设置多线程数 = CPU 核心数
-- GPU 模式下设置线程数 = 1（避免 GPU 调度开销）
-
----
-
-### 3.4 Action4：推理预测（Predict）
-
-**职责**：提供多种推理模式，支持离线批量推理和后续部署验证。
-
-```mermaid
-flowchart TB
-    subgraph 推理模式选择
-        M1[stage_predict<br/>标准推理]
-        M2[easy_predict<br/>简化推理]
-        M3[easy_predict_with_preresample<br/>预插值加速推理]
-        M4[multimodel_predict_and_merge<br/>多模型共享分辨率推理]
-    end
-
-    subgraph 标准推理流程
-        S1[参数标准化] --> S2[路径解析]
-        S2 --> S3[构建Predictor<br/>加载模型]
-        S3 --> S4[逐病例推理]
-        S4 --> S5[格式转换输出]
-    end
-
-    subgraph 预插值加速流程
-        P1[读取target_spacing] --> P2[判断是否需要插值]
-        P2 -->|是| P3[预插值→推理→后插值]
-        P2 -->|否| P4[直接推理]
-    end
-
-    subgraph 多模型共享分辨率
-        Q1[图像预插值1次] --> Q2[逐模型推理]
-        Q2 --> Q3[低分辨率拼接]
-        Q3 --> Q4[后插值1次]
-    end
+```text
+图像只缩放一次
+-> 多个模型依次推理
+-> 在低分辨率下合并
+-> 合并结果只恢复一次
 ```
 
-**四种推理模式对比**：
+这种方式适合同一批模型使用相同目标分辨率的情况。模型分辨率不同或合并规则复杂时，应使用独立推理路径。
 
-| 模式 | 适用场景 | 分辨率处理 | 速度 | 内存 |
-|------|----------|-----------|------|------|
-| `stage_predict` | 训练后验证 | nnUNet内部处理 | 标准 | 标准 |
-| `easy_predict` | 单模型快速推理 | nnUNet内部处理 | 标准 | 标准 |
-| `easy_predict_with_preresample` | 离线批量推理/部署验证 | 外部预插值+后插值 | 通常更快，需按数据实测 | 较低 |
-| `multimodel_predict_and_merge` | 多模型全量推理 | 共享1次插值 | **最优** | 逐模型释放 |
+### 8.3 Windows 和 Linux
 
-#### 3.4.1 预插值加速原理
+| 环境 | 当前策略 | 原因 |
+| --- | --- | --- |
+| Linux | 可使用 nnUNet 文件级多进程推理 | `fork` 创建子进程成本相对较低 |
+| Windows | 倾向单进程数组推理 | `spawn` 会重新导入 PyTorch 和 nnUNet，启动成本较高 |
 
-nnUNet 内部使用 `skimage` 的 order=3 插值，速度极慢（单例约 90s）。预插值方案：
+### 8.4 显存和内存记录
 
-1. **预插值**：将输入图像快速下采样到模型训练分辨率（`scipy.zoom` order=1，约 1s）
-2. **推理**：nnUNet 检测到输入已是目标分辨率，跳过内部重采样
-3. **后插值**：将预测 Mask 上采样回原始分辨率
+显存监控使用 `pynvml` 和 `psutil`：
 
-支持三种 Mask 上采样模式：
-- `torch_gpu`：PyTorch GPU 三线性插值（**推荐**，< 1s，光滑边界）
-- `nearest`：最近邻插值（极快，但边界有锯齿）
-- `smooth`：CPU One-Hot + 线性插值 + ArgMax（光滑但较慢）
+- 后台定时采样。
+- 记录峰值、低谷和变化。
+- 非 NVIDIA 环境降级为零值记录。
 
-#### 3.4.2 多模型共享分辨率推理
+推理结束后，代码尝试：
 
-模拟 C++ 生产部署流程，优化多模型推理性能：
+- 清理 nnUNet 高斯权重缓存。
+- 清理部分 `lru_cache`。
+- 把网络权重移回 CPU。
+- 删除 fold 参数副本。
+- 运行垃圾回收和 `torch.cuda.empty_cache()`。
 
-```
-传统方式（workflow3）：
-  图像 → [插值→模型1→回插] → [插值→模型2→回插] → ... → 原始分辨率拼接
-  N个模型 = N次图像插值 + N次Mask回插
+这些措施属于当前工程实现，不代表已经彻底证明不存在内存泄漏。
 
-优化方式（workflow4）：
-  图像 → 插值1次 → [模型1→模型2→...] → 低分辨率拼接 → 回插1次
-  N个模型 = 1次图像插值 + 1次Mask回插
-```
+## 9. 第五步：基础评估
 
-#### 3.4.3 跨平台适配
+`Action5_Evaluation.py` 比较参考 mask 和预测 mask，并输出：
 
-| 平台 | 推理策略 | 原因 |
-|------|----------|------|
-| Linux | `predict_from_files` 多进程 | fork 模式开销小，可并行预处理/后处理 |
-| Windows | `predict_single_npy_array` 单线程 | spawn 模式创建子进程需重新导入 torch/nnunet，每例多 10-15s |
+- 每病例、每器官详细 CSV。
+- 每器官汇总 CSV。
+- 结构化 JSON。
+- 人可读文本报告。
 
-#### 3.4.4 显存监控
+当前状态分类：
 
-`GPUMemoryMonitor` 基于 `pynvml` + `psutil` 实现进程级显存监控：
-- 后台线程以可配置间隔（默认 0.1s）采样显存
-- 记录峰值（peak）、低谷（valley）、波动（diff）
-- 非 NVIDIA 环境自动降级为全零记录
+| 状态 | 含义 | Dice |
+| --- | --- | --- |
+| `success` | 参考标签和预测都包含该器官 | 正常计算 |
+| `FN_only` | 参考标签有该器官，预测完全缺失 | 0 |
+| `not_present` | 参考标签中没有该器官 | 不计算 |
 
-#### 3.4.5 内存管理
+评估代码还支持按模型和病例聚合结果。
 
-针对 nnUNet 的内存泄漏问题，实现了完善的清理机制：
-- 清理 `compute_gaussian` 模块级 GPU 缓存
-- 清理 `ConfigurationManager` / `PlansManager` 的 `@lru_cache`（打破循环引用）
-- 网络权重从 GPU 移到 CPU 后删除
-- 释放 `list_of_parameters`（每个 fold 的完整权重副本）
-- 强制 GC + `torch.cuda.empty_cache()`
+Surface Dice 所需依赖当前未启用。修复并测试前：
 
----
+- 不把 Surface Dice 作为正式验收指标。
+- 不把空值解释为真实零分。
+- 不用当前 Action5 输出替代平台正式评估记录。
 
-### 3.5 Action5：评估分析（Evaluation）
+## 10. 四种预定义工作流
 
-**职责**：计算分割质量指标，生成多格式评估报告。
+| 工作流 | 执行内容 | 适用场景 |
+| --- | --- | --- |
+| Workflow 1 | 单配置完成转换、预处理，并生成训练与预测脚本 | 一组共享配置的任务 |
+| Workflow 2 | 多配置分别转换和预处理，再按 GPU 分配任务 | 多组配置批量训练 |
+| Workflow 3 | 各模型独立推理和恢复分辨率，最后合并 | 模型使用不同分辨率 |
+| Workflow 4 | 图像缩放一次，多模型依次推理，在低分辨率合并后恢复一次 | 多模型共享分辨率 |
 
-```mermaid
-flowchart TB
-    subgraph 输入
-        GT[金标准Mask<br/>labelsTs/]
-        PRED[预测Mask<br/>labelsTs_predicted/]
-        CMAP[类别映射<br/>class_map]
-    end
+### 10.1 多 GPU 分配
 
-    subgraph 指标计算
-        CALC[逐病例逐ROI计算]
-        DICE[Dice Score<br/>2|A∩B|/(|A|+|B|)]
-        SD[Surface Dice@3mm<br/>表面距离容忍度]
-    end
+配置中的 `gpu_id` 可以是：
 
-    subgraph 结果输出
-        CSV1[详细结果CSV<br/>每病例每ROI一行]
-        CSV2[汇总统计CSV<br/>每ROI均值/标准差/中位数]
-        JSON[完整结构化JSON]
-        TXT[可读文本报告]
-    end
+- 单个编号：所有任务在同一 GPU 上依次运行。
+- 与训练数据集列表等长的编号列表：每个任务分配到对应 GPU。
 
-    GT --> CALC
-    PRED --> CALC
-    CMAP --> CALC
-    CALC --> DICE
-    CALC --> SD
-    DICE --> CSV1
-    SD --> CSV1
-    CSV1 --> CSV2
-    CSV1 --> JSON
-    CSV2 --> TXT
-```
+不同 GPU 上的任务可以并行，同一 GPU 上的任务顺序执行，避免显存冲突。
 
-**评估状态分类**：
+当前编排器会生成 shell 脚本。Windows 环境不能直接执行这些 shell 脚本，需要改用手工命令或后续跨平台启动器。
 
-| 状态 | 含义 | Dice | Surface Dice |
-|------|------|------|-------------|
-| `success` | 金标准有该ROI，预测也检测到 | 正常计算 | 正常计算 |
-| `FN_only` | 金标准有该ROI，预测完全缺失 | 0.0 | 0.0 |
-| `not_present` | 金标准中不存在该ROI | None | None |
+## 11. 数据目录
 
-**多模型聚合**：
-- `aggregate_model_evaluations`：合并多个模型的评估结果
-- `aggregate_by_subject`：按病例汇总每个模型的表现
-- 支持加权平均 Dice（以 `pred_voxels + gt_voxels` 为权重）
-
----
-
-## 4. 工作流编排
-
-### 4.1 四种工作流
-
-`AutoSegmentationFramework.py` 提供了四种预定义工作流：
-
-```mermaid
-flowchart TB
-    subgraph Workflow1[Workflow1: 单配置训练]
-        W1A[ReadConfig] --> W1B[SetEnv]
-        W1B --> W1C[ConvertData]
-        W1C --> W1D[Preprocess]
-        W1D --> W1E[生成GPU脚本<br/>训练+预测]
-    end
-
-    subgraph Workflow2[Workflow2: 多配置批量训练]
-        W2A[读取多个Config] --> W2B[SetEnv]
-        W2B --> W2C[ConvertData]
-        W2C --> W2D[Preprocess]
-        W2D --> W2E[多GPU并行<br/>训练+预测]
-    end
-
-    subgraph Workflow3[Workflow3: 独立推理+拼接]
-        W3A[逐模型推理<br/>各模型独立插值] --> W3B[combine_multimask_to_one<br/>原始分辨率拼接]
-    end
-
-    subgraph Workflow4[Workflow4: 共享分辨率推理]
-        W4A[图像插值1次] --> W4B[多模型依次推理]
-        W4B --> W4C[低分辨率拼接]
-        W4C --> W4D[回插1次]
-    end
+```text
+train_path/
+  train_project/
+    nnUNet_raw/
+      Dataset101_CT1_Head/
+        imagesTr/
+        labelsTr/
+        imagesTs/
+        labelsTs/
+        labelsTs_predicted/
+        evaluation/
+        dataset.json
+        splits_final.json
+    nnUNet_preprocessed/
+      Dataset101_CT1_Head/
+        nnUNetPlans.json
+        ...
+    nnUNet_results/
+      Dataset101_CT1_Head/
+        nnUNetTrainerNoMirroring__nnUNetPlans__3d_fullres/
+          fold_0/
+            checkpoint_final.pth
+            checkpoint_best.pth
+          plans.json
+          dataset.json
 ```
 
-| 工作流 | 用途 | 特点 |
-|--------|------|------|
-| Workflow1 | 单配置训练 | 适用于参数相同的多个模型一起训练 |
-| Workflow2 | 多配置批量训练 | 不同配置的模型分配到不同GPU并行训练 |
-| Workflow3 | 独立推理+拼接 | 各模型可使用不同分辨率，灵活但较慢 |
-| Workflow4 | 共享分辨率推理 | 模拟C++部署流程，性能最优 |
+平台接入后，这些目录都是由训练数据快照生成的实际导出物。可复现依据仍然是快照和模型记录，不是手工留下的目录。
 
-### 4.2 多GPU调度策略
+## 12. 其他关键实现细节
 
-```mermaid
-flowchart TB
-    A[解析所有Config的gpu_id] --> B{GPU数量>1?}
-    B -->|是| C[按GPU分组任务]
-    B -->|否| D[单GPU顺序执行]
-    C --> E[为每个GPU生成.sh脚本]
-    E --> F[不同GPU并行执行<br/>同一GPU串行执行]
-```
+### 12.1 NIfTI 头信息修复
 
-**GPU分配规则**：
-- `gpu_id = 0`：所有数据集在同一 GPU 上顺序训练/预测
-- `gpu_id = [0, 1, 0, 1]`：列表长度须与 `train_dataset` 一致，每个元素指定对应数据集的 GPU
-- 不同 GPU 上的任务**并行执行**，同一 GPU 上的多个任务**串行执行**（避免显存冲突）
+部分 NIfTI 文件的 qform 和 sform 不一致。当前代码在数据转换和推理输出时使用 nibabel 重写头信息，使二者保持一致。
 
-生成的 `.sh` 脚本示例：
-```bash
-#!/bin/bash
-# gpu0.sh —— 自动生成的 GPU 0 训练和预测脚本
-set -e
+这项修复不能替代平台空间检查。重写成功只说明文件头格式可读，不能证明标签与图像的医学坐标正确。
 
-# ── 训练 ──
-CUDA_VISIBLE_DEVICES=0 nnUNetv2_train 101 3d_fullres 0 -tr nnUNetTrainerNoMirroring -p nnUNetPlans
+### 12.2 Affine 正交化
 
-# ── 预测 ──
-cd /path/to/nnUNet_raw/Dataset101_xxx
-CUDA_VISIBLE_DEVICES=0 nnUNetv2_predict -i imagesTs -o labelsTs_predicted ...
-```
+当前代码对 affine 的 3×3 方向部分执行：
 
----
+1. 根据列范数提取 spacing。
+2. 归一化得到方向矩阵。
+3. 通过奇异值分解寻找最近的正交矩阵。
+4. 乘回 spacing，重建旋转和缩放部分。
 
-## 5. 数据流转全景
+目的在于减少浮点误差造成的方向余弦非正交问题。它不应用于掩盖真实错位。
 
-```mermaid
-flowchart LR
-    subgraph 标注数据
-        L1[原始DICOM] -->|DicomToMhd| L2[MHD/NIfTI]
-        L2 --> L3[标注目录<br/>patient/ct.nii.gz<br/>patient/segmentations/organ.nii.gz]
-    end
+### 12.3 延迟导入
 
-    subgraph Action1输出
-        L3 -->|Convert| A1O[nnUNet_raw/DatasetXXX/<br/>imagesTr/xxx_0000.nii.gz<br/>labelsTr/xxx.nii.gz<br/>imagesTs/xxx_0000.nii.gz<br/>labelsTs/xxx.nii.gz<br/>dataset.json<br/>splits_final.json]
-    end
+nnUNet 和部分重量级库在函数内部导入，主要为了降低多进程子进程的重复加载成本，尤其是 Windows `spawn` 模式。
 
-    subgraph Action2输出
-        A1O -->|Plan&Preprocess| A2O[nnUNet_preprocessed/DatasetXXX/<br/>nnUNetPlans.json<br/>预处理后的.npy数据]
-    end
+## 13. 当前直接调用示例
 
-    subgraph Action3输出
-        A2O -->|Train| A3O[nnUNet_results/DatasetXXX/<br/>Trainer__Plans__Config/<br/>fold_0/checkpoint_final.pth<br/>fold_0/checkpoint_best.pth<br/>plans.json<br/>dataset.json]
-    end
+下面示例描述现有代码入口，不是未来平台最终用户接口。
 
-    subgraph Action4输出
-        A3O -->|Predict| A4O[labelsTs_predicted/<br/>xxx.nii.gz]
-    end
-
-    subgraph Action5输出
-        A4O -->|Evaluate| A5O[evaluation/<br/>detailed.csv<br/>summary.csv<br/>full.json<br/>report.txt]
-    end
-```
-
----
-
-## 6. 关键技术细节
-
-### 6.1 方位约定处理
-
-本管线需要处理两种方位约定的差异：
-
-| 约定 | 来源 | 字母含义 | 示例 |
-|------|------|----------|------|
-| MHD/ITK-SNAP | SimpleITK/MHD文件 | 低索引端方向 | RAI = x从R→L |
-| nibabel | NIfTI文件 | 正方向（递增方向） | LPS = x从L→P→S |
-
-转换规则：**每个字母取反**（R↔L, A↔P, S↔I），因此 MHD 的 `RAI` 等价于 nibabel 的 `LPS`。
-
-### 6.2 Affine 正交化
-
-nibabel 的 affine → quaternion → affine 往返转换可能引入微小误差，导致 SimpleITK/ITK-SNAP 因方向余弦不正交而拒绝读取。解决方案：
-
-1. 从 3×3 子矩阵提取 spacing（列范数）
-2. 归一化得到方向余弦矩阵
-3. 通过 SVD 寻找最近正交矩阵
-4. 乘回 spacing 重建旋转/缩放部分
-
-### 6.3 分组格式 Class Map
-
-支持两种 class_map 格式，适配不同分割粒度：
-
-**扁平格式**（细粒度分割）：
-```python
-{"brain": 1, "skull": 2, "heart": 3}
-```
-
-**分组格式**（粗分割/区域定位）：
-```python
-{
-    "head":  {"label": 1, "organs": ["brain", "skull"]},
-    "chest": {"label": 2, "organs": ["heart", "aorta"]}
-}
-```
-
-分组格式在 `dataset.json` 中仅保留每个 label 值对应的第一个器官名称，避免 nnUNet planner 误认为有 100+ 个输出通道。
-
-### 6.4 NIfTI Header 修复
-
-部分 NIfTI 文件的 qform/sform 不一致，导致读取错误。管线在两个环节进行修复：
-- **数据转换时**：使用 nibabel 重写 header，同步 qform/sform
-- **推理输出时**：对预测结果同样进行 header 修复
-
-### 6.5 延迟导入策略
-
-所有 nnUNet 相关的 import 均采用**延迟导入**（在函数内部 import），原因：
-- 避免 multiprocessing worker 进程重新执行脚本时触发重量级 DLL 加载
-- Windows 的 spawn 模式下，每个子进程都会重新执行脚本，延迟导入可节省 10-15s/进程
-
----
-
-## 7. 典型使用场景
-
-### 7.1 场景一：从零开始训练新模型
+### 13.1 单配置训练
 
 ```python
-# 1. 准备配置文件（复制 Config_Template.toml 并修改）
-# 2. 准备 ModelMap.toml（定义分割类别）
-# 3. 运行完整训练流程
 from AutoSegmentationFramework import workflow1_nnUnet_train_and_predict
-workflow1_nnUnet_train_and_predict()
 
-# 4. 训练完成后评估
-from AutoSegmentationFramework import ReadConfigFile, evaluation
-config = ReadConfigFile("Config_CT_v500.toml")
-evaluation(config)
+workflow1_nnUnet_train_and_predict()
 ```
 
-### 7.2 场景二：多配置多GPU并行训练
+运行前需要准备：
+
+- `Config_*.toml`
+- `ModelMap.toml`
+- 当前脚本期望的标注目录
+
+### 13.2 多配置批量训练
 
 ```python
 from AutoSegmentationFramework import workflow2_nnUnet_train_and_predict_batch
+
 workflow2_nnUnet_train_and_predict_batch()
-# 自动生成 gpu0.sh, gpu1.sh 等脚本
-# 在不同终端分别运行
 ```
 
-### 7.3 场景三：离线批量推理
+该入口会生成按 GPU 分组的脚本。
+
+### 13.3 单模型离线推理
 
 ```python
 from Action4_Predict import easy_predict_with_preresample
@@ -649,99 +479,68 @@ easy_predict_with_preresample(
     model_folder="/path/to/model",
     input_path="/path/to/images",
     output_path="/path/to/output",
-    enable_stats=True,  # 记录耗时和显存
+    enable_stats=True,
 )
 ```
 
-### 7.4 场景四：多模型全量分割
+### 13.4 多模型共享分辨率推理
 
 ```python
 from AutoSegmentationFramework import workflow4_shared_spacing_predict_and_merge
+
 workflow4_shared_spacing_predict_and_merge()
-# 图像仅插值1次 → 多模型依次推理 → 低分辨率拼接 → 回插1次
 ```
 
----
+## 14. 依赖和运行环境
 
-## 8. 目录结构约定
+核心依赖：
 
+| 包 | 用途 |
+| --- | --- |
+| `nnunetv2` | 训练、预处理和预测 |
+| `torch` | 深度学习和 GPU 计算 |
+| `numpy`、`scipy` | 数组和重采样 |
+| `nibabel`、`SimpleITK` | NIfTI、MHD 和医学图像读写 |
+| `pandas` | 评估结果处理 |
+| `tomllib` 或 `tomli` | TOML 配置解析 |
+| `tqdm`、`p_tqdm` | 进度显示和部分并行处理 |
+
+可选依赖：
+
+| 包 | 使用条件 |
+| --- | --- |
+| `pynvml` | 记录 NVIDIA GPU 显存 |
+| `psutil` | 记录进程资源 |
+| `pydicom` | 使用 DICOM 转换工具 |
+
+仓库当前没有锁定一套完整、经过验证的依赖版本。准备正式复现时，应建立独立环境文件并记录 Python、CUDA、PyTorch、nnUNet 和医学图像库版本。
+
+## 15. nnUNet 工具适配器应怎样复用本管线
+
+适配器不应重写现有五个步骤。它要在管线前后补齐平台契约：
+
+```text
+训练数据快照
+-> 检查患者划分、标签来源和缺失标签
+-> 生成真实的 nnUNet 数据目录与 dataset.json
+-> 调用现有 Action2、Action3、Action4
+-> 保存实际配置、代码版本和权重
+-> 创建模型记录
+-> 在独立评估流程中创建评估记录
 ```
-train_path/
-├── train_project/                          # 训练项目目录
-│   ├── nnUNet_raw/                         # 原始训练数据
-│   │   ├── Dataset101_CT1_Head/
-│   │   │   ├── imagesTr/                   # 训练图像 (_0000.nii.gz)
-│   │   │   ├── labelsTr/                   # 训练标签 (.nii.gz)
-│   │   │   ├── imagesTs/                   # 测试图像
-│   │   │   ├── labelsTs/                   # 测试标签（金标准）
-│   │   │   ├── labelsTs_predicted/         # 预测结果
-│   │   │   ├── evaluation/                 # 评估结果
-│   │   │   ├── dataset.json
-│   │   │   └── splits_final.json
-│   │   ├── Dataset102_CT2_Chest/
-│   │   └── ...
-│   ├── nnUNet_preprocessed/                # 预处理数据
-│   │   ├── Dataset101_CT1_Head/
-│   │   │   ├── nnUNetPlans.json
-│   │   │   └── ...
-│   │   └── ...
-│   └── nnUNet_results/                     # 训练结果
-│       ├── Dataset101_CT1_Head/
-│       │   └── nnUNetTrainerNoMirroring__nnUNetPlans__3d_fullres/
-│       │       ├── fold_0/
-│       │       │   ├── checkpoint_final.pth
-│       │       │   └── checkpoint_best.pth
-│       │       ├── plans.json
-│       │       └── dataset.json
-│       └── ...
-└── config_Dataset101_CT1_Head_20240101_120000.json  # 配置快照
-```
 
----
+优先复用：
 
-## 9. 依赖与兼容性
+- 配置加载。
+- nnUNet 规划和预处理。
+- 训练封装。
+- 单模型和多模型推理。
+- Dice 报告的基础计算。
 
-### 9.1 核心依赖
+必须替换或加固：
 
-| 包 | 用途 | 版本要求 |
-|----|------|----------|
-| nnunetv2 | 分割框架核心 | ≥ 2.x |
-| nibabel | NIfTI读写 | - |
-| SimpleITK | 医学图像IO | - |
-| numpy | 数值计算 | - |
-| scipy | 重采样插值 | - |
-| torch | 深度学习框架 | GPU版 |
-| pandas | 评估数据处理 | - |
-| tqdm | 进度条 | - |
-| p_tqdm | 并行进度条 | - |
-| tomllib/tomli | TOML配置解析 | Python ≥ 3.11 内置 |
-
-### 9.2 可选依赖
-
-| 包 | 用途 | 安装条件 |
-|----|------|----------|
-| pynvml | 显存监控 | 需要 NVIDIA GPU |
-| psutil | 进程内存监控 | 统计功能启用时 |
-| pydicom | DICOM读取 | 使用 DicomToMhd 时 |
-
-### 9.3 平台兼容性
-
-| 特性 | Linux | Windows |
-|------|-------|---------|
-| 多进程推理 | ✅ fork模式 | ❌ 改用单线程 |
-| GPU训练 | ✅ | ✅ |
-| Shell脚本生成 | ✅ | ❌ 需手动执行 |
-| 显存监控 | ✅ pynvml | ✅ pynvml |
-
----
-
-## 10. 总结
-
-本训练管线围绕 nnUNetv2 构建了一套配置驱动、模块化的医学图像训练与推理流程，适合作为平台的 `nnUNet Adapter` 参考。核心能力包括：
-
-1. **灵活的配置体系**：TOML 配置 + ModelMap 映射，支持多模型、多模态、多粒度分割
-2. **完善的预处理控制**：支持手动覆盖 spacing/patch_size/batch_size，自动重算网络拓扑
-3. **离线批量推理支持**：预插值、多模型共享分辨率、跨平台适配；速度收益需要按数据实测
-4. **全面的评估体系**：Dice + Surface Dice、多模型聚合、多格式报告
-5. **多GPU并行训练**：自动生成调度脚本，不同GPU并行、同GPU串行
-6. **健壮的工程实践**：延迟导入、内存管理、Header修复、Affine正交化
+- 随机数据划分回退。
+- 缺失 mask 自动变背景。
+- `dataset.json` 硬编码。
+- Surface Dice 依赖。
+- 正式评估前的患者和标签来源泄漏检查。

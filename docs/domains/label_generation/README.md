@@ -1,131 +1,125 @@
-# 标签生成域文档入口
+# 候选标签生成域
 
-> 日期：2026-06-07  
-> 状态：标签生成域导航；平台总体设计以 `docs/architecture/platform_blueprint.md` 为准。
+> 日期：2026-06-13
+> 状态：当前候选标签生成域入口。平台总体设计以[平台蓝图](../../architecture/platform_blueprint.md)为准。
 
-## 1. 为什么不用 `pseudo_labeling`
+## 1. 这个域负责什么
 
-这个域如果叫 `pseudo_labeling`，会让人以为它只是在做一件事：生成伪标签。
+`label_generation` 负责用模型、外部算法或规则脚本生成候选标签，并把结果安全地送回平台。
 
-但现有设计里，它实际负责的是更完整的一段链路：
+它包括：
 
-- 用内部模型或公开算法生成候选标签
-- 做 label mapping、空间校验和质量筛选
-- 决定候选结果进入 `draft_label`、`accepted_pseudo_label` 还是 `rejected_label`
-- 把结果回流到标注域或训练域
+- 调用平台模型或外部算法。
+- 把外部标签名称映射为平台统一器官名称。
+- 检查图像和标签是否对齐。
+- 检查空标签、异常体积和其他质量问题。
+- 记录每个候选标签来自哪个模型、算法版本和参数。
+- 把结果送人工复查、保留为候选或拒绝。
+- 记录批量运行中的逐病例成功、失败和重试。
 
-所以这里最终命名为 `label_generation`。这个名字既保留“生成”这个起点，也容纳后续的治理和回流。
+它不负责：
 
-## 2. 关键文档
+- 人工修正标签。
+- 把算法输出直接登记为人工确认标签。
+- 决定候选标签在所有训练任务中都可使用。
 
-| 文档 | 当前用途 |
-| --- | --- |
-| `docs/domains/label_generation/cads_reference.md` | CADS 对大规模候选标签建设和全身分割数据组织的启发 |
-| `docs/domains/label_generation/cads_fact_check.md` | CADS 相关事实核查记录 |
-| `docs/architecture/platform_blueprint.md` | 定义候选标签状态、训练准入和回流关系 |
-
-## 3. 和其他域的边界
-
-- 和 `labeling` 的边界：`label_generation` 产出候选标签和准入判断，`labeling` 负责人工修订和导回。
-- 和 `training` 的边界：训练域消费已经被允许进入任务快照的标签，但不负责定义候选标签的抽检和接受策略。
-- 和平台治理的边界：数据许可、产品用途、对外发布限制需要被记录，但不由 `label_generation` 域裁决。
-
-## 4. 标准流程
+## 2. 标准流程
 
 ```mermaid
-flowchart TB
-    accTitle: Label Generation Flow
-    accDescr: Label generation turns internal models or external algorithms into candidate labels, checks them, and routes them to review, accepted pseudo labels, or rejection.
+flowchart LR
+    accTitle: 候选标签生成流程
+    accDescr: 图像经过模型或外部算法生成候选标签，平台检查来源、名称和空间后，把结果送人工复查、保留为候选或拒绝。
 
-    subgraph Inputs["输入"]
-        image["Image Artifact"]
-        model["Model Record"]
-        ext["公开算法 / 既有算法"]
-    end
+    image["图像"]
+    source["模型或外部算法"]
+    run["批量运行"]
+    candidate["候选标签"]
+    check["空间与内容检查"]
+    review["送人工复查"]
+    keep["保留候选及证据"]
+    reject["拒绝并记录原因"]
 
-    subgraph Adapter["生成 Adapter"]
-        internal["内部模型批量推理"]
-        external["外部算法适配"]
-    end
-
-    subgraph Candidate["候选标签登记"]
-        candidate["candidate_label"]
-        provenance["provenance<br/>来源、版本、参数"]
-        mapping["label mapping<br/>统一器官名称"]
-    end
-
-    subgraph Gates["QC + Routing"]
-        geometry["空间/几何 QC"]
-        content["标签内容 QC"]
-        policy["routing policy<br/>任务准入策略"]
-    end
-
-    subgraph Outputs["输出"]
-        draft["draft_label<br/>送 labeling review"]
-        accepted["accepted_pseudo_label<br/>可进入 training Snapshot"]
-        rejected["rejected_label<br/>仅记录报告"]
-    end
-
-    image --> internal
-    model --> internal
-    image --> external
-    ext --> external
-    internal --> candidate
-    external --> candidate
-    candidate --> provenance
-    candidate --> mapping
-    mapping --> geometry
-    geometry --> content
-    content --> policy
-    policy --> draft
-    policy --> accepted
-    policy --> rejected
+    image --> run
+    source --> run
+    run --> candidate
+    candidate --> check
+    check --> review
+    check --> keep
+    check --> reject
 ```
 
-输出分三类：
+生成结果有三个出口：
 
-| 输出 | 去哪里 | 说明 |
-| --- | --- | --- |
-| `draft_label` | `labeling` | 给人工修正，不直接训练 |
-| `accepted_pseudo_label` | `training` | 按任务策略进入 Dataset Snapshot |
-| `rejected_label` | 只记录报告 | 不进入训练，也不送人工，除非人工重新拉起 |
+| 结果 | 下一步 |
+| --- | --- |
+| 需要人工判断 | 转成标注草稿，进入人工标注与复查域 |
+| 质量证据完整 | 继续保持候选标签，供创建训练数据快照时判断是否采用 |
+| 明确不可用 | 登记为拒绝标签，并保存原因 |
 
-## 5. QC 分层
+质量检查通过不会改变标签来源。TotalSegmentator 或内部模型输出仍然是候选标签。
 
-| 层面 | 检查什么 | 默认处理 |
-| --- | --- | --- |
-| 空间/几何 QC | 文件可读、shape 一致、affine/spacing/origin/direction 可解释 | shape 不一致拒绝；几何头不一致但 shape 一致时可修复 |
-| 标签内容 QC | 空标签、越界、目标器官是否出现、异常体积 | 记录问题，按任务策略决定是否进入人工或拒绝 |
-| 准入策略 QC | 状态、来源、任务规则是否允许进入训练 | 只影响是否进入 Dataset Snapshot |
+## 3. 一次批量运行必须记录什么
 
-QC 只负责给出证据和路由建议，不负责把标签状态改成更“好看”。例如 TotalSegmentator 输出即使通过 QC，来源仍然应记录为模型/公开算法输出。
+每次离线批量推理都要创建候选标签生成批次，至少保存：
 
-## 6. 当前实现落点
+- 批次标识和格式版本。
+- 使用的模型记录或外部算法说明。
+- 输入图像列表。
+- 工具适配器、参数、代码或镜像版本。
+- 标签名称映射。
+- 用于识别重复运行的幂等键。
+- 每个病例的成功、失败或跳过状态。
+- 成功病例产生的标签记录。
+- 失败报告和重试次数。
 
-当前仓库已经建立 `adapters/label_generation/` 作为标签生成工具的适配器落点。后续凡是下面这些实现，都应优先归到这一域：
+运行规则：
 
-- 公开算法适配
-- 批量推理生成候选标签
-- 伪标签质量报告
-- `candidate_label -> draft_label / accepted_pseudo_label` 的规则脚本
-- 不同伪标签生成策略或 routing policy 的替换
-  
-可以先从这些文件开始：
+1. 已成功结果不能因重跑被覆盖。
+2. 同一运行条件下，已成功病例默认跳过。
+3. 失败病例可以单独重试。
+4. 一个病例失败不影响其他成功病例登记。
+5. 批次记录生成事实，不保存训练准入结论。
+
+字段示例见[核心数据与操作模型](../../architecture/platform_data_model.md)。
+
+## 4. 内部模型和外部算法怎样区分
+
+- 平台训练出的模型使用模型记录说明来源。
+- TotalSegmentator、CADS、规则脚本或外部命令行工具使用一份外部算法说明。
+
+外部算法说明至少包含名称、版本、调用方式、参数记录要求、标签名称映射和使用限制。平台不允许没有来源信息的候选标签进入资产登记册。
+
+正式候选标签批次只能使用状态为 `candidate_generation_allowed` 的平台模型。刚训练完成但尚未检查的模型只允许开发调试；被隔离的模型必须阻止运行。
+
+## 5. 和其他域怎样协作
+
+- 需要人工修正的候选标签进入人工标注与复查域。
+- 人工提交后的新标签回到资产登记册。
+- 训练域在创建训练数据快照时决定本次是否采用候选标签。
+- 本域可以提供“建议送审”或“质量证据完整”，但不创建全局训练许可状态。
+
+## 6. 工具或算法怎样接入
+
+一个新的模型、算法或伪标签策略要接入本域，必须：
+
+1. 接收平台图像记录。
+2. 有明确的模型记录或外部算法说明。
+3. 把输出先登记为候选标签。
+4. 保存版本、参数、器官名称映射和质量报告。
+5. 批量运行支持逐病例失败和重试。
+
+## 7. 当前实现位置
+
+| 位置 | 当前用途 |
+| --- | --- |
+| `adapters/label_generation/` | 候选标签生成工具适配器的实现根目录，目前只有边界说明 |
+| [CADS 参考](cads_reference.md) | 说明大规模全身标签建设对本平台的启发和不能照搬的部分 |
+| [平台数据模型](../../architecture/platform_data_model.md) | 候选标签生成批次、外部算法说明和标签记录字段 |
+
+后续可按真实工具建立子目录，例如：
 
 ```text
 adapters/label_generation/
-  README.md
-  totalsegmentator/
   internal_model/
+  totalsegmentator/
 ```
-
-这样以后你想找“伪标签到底在哪里实现”，不会再被迫在标注和训练之间来回猜。
-
-## 7. 接入标准
-
-label_generation 可以接入已有算法，也可以替换伪标签生成策略，但必须满足四个标准：
-
-1. 输入来自 Image Artifact 或 Model Record。
-2. 输出先登记为 `candidate_label`，不能直接伪装成 `verified_label`。
-3. 必须提供来源、参数、版本、label mapping 和 QC 报告。
-4. 最终去向由 routing policy 决定，而不是由算法自己决定。

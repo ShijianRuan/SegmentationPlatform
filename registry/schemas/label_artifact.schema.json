@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://segmentation-platform/registry/schemas/label_artifact.schema.json",
+  "title": "标签记录 Label Artifact",
+  "description": "一份多标签文件或一组逐器官 mask。每个器官标签的状态、来源和生成血统都按 segment 记录。字段说明见 platform_data_model.md §5。",
+  "type": "object",
+  "required": ["schema_version", "label_id", "case_id", "image_id", "path", "format", "hash", "hash_scope", "pixel_type", "geometry_ref", "geometry", "artifact_lifecycle", "segments"],
+  "properties": {
+    "schema_version": {"const": "label_artifact.v1"},
+    "label_id": {"type": "string"},
+    "case_id": {"type": "string"},
+    "image_id": {"type": "string"},
+    "path": {"type": "string"},
+    "format": {
+      "type": "string",
+      "enum": ["multilabel_nifti", "multilabel_metaimage", "multilabel_raw", "per_organ_masks"]
+    },
+    "hash": {"$ref": "_defs.schema.json#/$defs/sha256_hash"},
+    "hash_scope": {"type": "string", "enum": ["file", "bundle_manifest"]},
+    "companion_paths": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "pixel_type": {"type": "string", "minLength": 1},
+    "geometry_ref": {"type": "string", "description": "指向 image_id，声明本标签与该图像共享空间。对齐仍需在阻断检查中实际验证。"},
+    "geometry": {
+      "type": "object",
+      "description": "标签文件自身实测的空间信息（必填）。允许完整物理空间、部分空间或仅索引空间，但不能填入未经说明的假值。",
+      "required": ["shape", "geometry_status", "geometry_evidence", "alignment_checked", "alignment_basis"],
+      "properties": {
+        "shape": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 3, "maxItems": 3},
+        "spacing": {"type": "array", "items": {"type": "number", "exclusiveMinimum": 0}, "minItems": 3, "maxItems": 3},
+        "origin": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+        "direction": {"type": "array", "items": {"type": "number"}, "minItems": 9, "maxItems": 9},
+        "geometry_status": {"type": "string", "enum": ["complete", "partial", "index_only"]},
+        "geometry_evidence": {
+          "type": "object",
+          "required": ["shape", "spacing", "origin", "direction", "assumptions"],
+          "properties": {
+            "shape": {"$ref": "#/$defs/geometry_source"},
+            "spacing": {"$ref": "#/$defs/geometry_source"},
+            "origin": {"$ref": "#/$defs/geometry_source"},
+            "direction": {"$ref": "#/$defs/geometry_source"},
+            "assumptions": {"type": "array", "items": {"type": "string"}}
+          },
+          "additionalProperties": false
+        },
+        "alignment_checked": {"type": "boolean"},
+        "alignment_basis": {"type": "string", "enum": ["physical_space", "index_space", "none"]}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"geometry_status": {"const": "complete"}},
+            "required": ["geometry_status"]
+          },
+          "then": {"required": ["spacing", "origin", "direction"]}
+        }
+      ],
+      "additionalProperties": true
+    },
+    "artifact_lifecycle": {"$ref": "_defs.schema.json#/$defs/artifact_file_lifecycle"},
+    "usage_constraints": {"$ref": "_defs.schema.json#/$defs/usage_constraints"},
+    "parent_label_id": {"type": ["string", "null"], "description": "文件级修订指针：本文件从哪一份文件版本改来。与 segment 级 lineage 是两件事。"},
+    "segments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "_defs.schema.json#/$defs/segment"}
+    }
+  },
+  "$defs": {
+    "geometry_source": {
+      "type": "string",
+      "enum": ["header", "dicom", "sidecar", "inferred", "assumed", "unknown"]
+    }
+  },
+  "additionalProperties": false
+}

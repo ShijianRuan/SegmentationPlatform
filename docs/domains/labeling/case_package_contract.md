@@ -1,196 +1,386 @@
-# Case Package 契约草案 v0.2
+# 病例包（Case Package）交换契约 v0.5
 
-> 日期：2026-06-11
-> 状态：草案；用于标注工具和平台之间的离线文件交换
-> 关键原则：包内 label id 服务人工 review 和文件交换，不等同于 nnUNet 训练 label id。
+> 更新日期：2026-06-15
+> 状态：第一阶段离线文件交换契约
+> 原则：不强制多个序列有主次；每份标签明确绑定自己的 `image_id`
 
-## 1. 这个契约解决什么
+## 1. 病例包解决什么问题
 
-早期平台不需要马上做统一服务。Case Package 用来支持这种现实场景：
+病例包是平台与标注工具之间的一份离线工作目录。它让标注者不需要访问平台数据库或训练目录，也能拿到本次工作所需的：
 
-- 标注在 Windows 本地完成。
-- 训练在远程服务器完成。
-- 标注工具可能是 Mimics，也可能是 3D Slicer 或其他工具。
-- 人工和脚本需要通过文件夹交换数据。
+- 一个或多个图像序列。
+- 每个序列需要处理的器官。
+- 可选的初始标签。
+- 器官名称和标注交换编号。
+- 工作进度目录。
+- 提交结果和问题报告目录。
 
-Case Package 的目标是让每个病例包可以被复制、打开、修正、导回和校验。
+病例包不包含 nnUNet 训练任务的整数标签编号。同一份人工标签可以在后续被多个训练任务使用。
 
-## 2. 推荐目录结构
+标注者的实际操作见[人工标注工作流](labeling_workflow.md)。
 
-同一数据集的配置集中共享，病例包只存病例独有数据：
+## 2. 推荐目录
 
 ```text
 dataset_package/
   config/
-    anatomy_vocabulary.yaml           ← 全数据集共享，一份
-    review_label_map.yaml             ← 全数据集共享，一份
+    anatomy_vocabulary.yaml
+    review_label_map.yaml
   cases/
     case_001/
       manifest.json
       images/
-        image.nii.gz
-        dicom/
+        img_noncontrast/
+          image.nii.gz
+          dicom/
+        img_arterial/
+          image.nii.gz
+          dicom/
       labels/
-        candidate_label.nii.gz
-        draft_label.nii.gz
-        verified_label.nii.gz
-        masks/
-          liver.nii.gz
-          gallbladder.nii.gz
+        img_noncontrast/
+          draft_label.nii.gz
+          masks/
+        img_arterial/
+          draft_label.nii.gz
+          masks/
+      working/
+        review_case001_001.mcs
+        bridge/
+        checkpoints/
+          review_case001_001/
+            latest.json
+            20260615T120000Z/
+              checkpoint_manifest.json
+              buffers/
+      submissions/
+        review_case001_001/
+          submission_manifest.json
+          export_manifest.json
+          buffers/
+            img_noncontrast/
+              target_noncontrast_abdomen/
+                liver.u8
+            img_arterial/
+              target_arterial_liver/
+                liver.u8
+          labels/
+            img_noncontrast/
+              target_noncontrast_abdomen/
+                liver.nii.gz
       reports/
-        geometry_check.json
+        ingest_report.json
+        mimics_open_report.json
+        mimics_submit_precheck.json
         review_report.json
       provenance/
-        source_labels.json
         tool_export.json
-    case_002/
-      ...
 ```
 
-`manifest.json` 通过相对路径引用共用配置：
+单序列病例也使用 `image_sets` 数组，只包含一个元素。平台不维护另一套“单图像病例”格式。
+
+`working/checkpoints/` 是可选灾备内容。它保存全部受管 Mask 的 gzip 压缩 `.u8.gz` recovery backup 和 manifest，
+用于 `.mcs` 损坏时重建，不代表提交，也不进入标签生命周期。Mimics 脚本默认只保留最新 3 份 recovery backup，
+更旧目录可自动清理。
+
+## 3. 三种名称和编号表
+
+| 文件或对象 | 用途 |
+| --- | --- |
+| `anatomy_vocabulary.yaml` | 统一不同数据集和工具对同一器官的名称 |
+| `review_label_map.yaml` | 规定标注交换文件中的稳定整数标签；当前实现从完整器官词表生成，避免逐病例改写共享配置 |
+| 任务标签编号表（TaskLabelMap） | 规定训练任务中的整数标签，只存在于训练数据快照和训练导出 |
+
+病例包不绑定某个训练任务。
+
+## 4. 病例清单（`manifest.json`）
 
 ```json
 {
-  "schema_version": "case_package.v0.2",
-  "config_ref": "../../config/"
-}
-```
-
-标注员拷贝整个 `dataset_package/` 目录即可获得所有病例和共用配置。不是每个文件都必须存在。最小病例包只需图像、manifest（含 config_ref）、一个标签输入或空标签入口。
-
-## 3. 三种 label map 的边界
-
-为了避免后续混乱，平台明确区分三种 map。Case Package 只携带前两种，训练任务编号由 Dataset Snapshot 层处理。
-
-| 名称 | 用途 | 归属 |
-| --- | --- | --- |
-| `anatomy_vocabulary.yaml` | 统一器官名称 | Case Package 共用配置（config/） |
-| `review_label_map.yaml` | 标注工具或多标签 review 文件中的 label id | Case Package 共用配置（config/） |
-| `task_label_maps.yaml` | 各训练任务的 label id | Dataset Snapshot 层 |
-
-示例：
-
-```yaml
-anatomy_vocabulary:
-  liver:
-    display_name: Liver
-  gallbladder:
-    display_name: Gallbladder
-
-review_label_map:
-  label_file: labels/draft_label.nii.gz
-  labels:
-    liver: 10
-    gallbladder: 11
-
-```
-
-同一个 `liver` 在 review 文件里可以是 10，在 `CT5_Liver` 训练任务里可以是 2，在全身合并 mask 里又可以是另一个编号。这不是冲突，而是不同层级的编号。
-
-其中 `task_label_maps.yaml` 只在训练快照导出时出现。Case Package 不应该提前绑定某个训练任务，否则同一个病例包会被某个任务的 label id 锁死。
-
-## 4. Manifest 必填信息
-
-```json
-{
-  "schema_version": "case_package.v0.2",
-  "package_id": "pkg_20260606_case001",
+  "schema_version": "case_package.v0.5",
+  "package_id": "pkg_case001",
   "case_id": "case001",
-  "created_at": "2026-06-06T10:00:00+08:00",
+  "leakage_group_id": "subject_pseudo_001",
+  "study_id": "study_pseudo_001",
+  "patient_id_hash": "hmac-sha256:...",
+  "study_instance_uid_hash": "hmac-sha256:...",
+  "data_governance": {
+    "deidentification_status": "pending",
+    "profile": "internal_dicom_profile_v1",
+    "profile_version": "1.0",
+    "strict_deidentification": false
+  },
+  "created_at": "2026-06-12T10:00:00+08:00",
   "config_ref": "../../config/",
   "config_sha256": {
     "anatomy_vocabulary.yaml": "TO_BE_FILLED",
     "review_label_map.yaml": "TO_BE_FILLED"
   },
-  "modality": "CT",
-  "image": {
-    "primary_path": "images/image.nii.gz",
-    "dicom_path": "images/dicom",
-    "sha256": "TO_BE_FILLED",
-    "shape": [512, 512, 300],
-    "spacing": [0.8, 0.8, 1.0],
-    "orientation_note": "recorded by exporter"
-  },
+  "image_sets": [
+    {
+      "image_id": "img_noncontrast",
+      "modality": "CT",
+      "image_path": "images/img_noncontrast/image.nii.gz",
+      "dicom_path": "images/img_noncontrast/dicom",
+      "sha256": "TO_BE_FILLED",
+      "dicom_sha256": "TO_BE_FILLED",
+      "mimics_import": {
+        "strategy": "derived_dicom_series",
+        "source_image_path": "images/img_noncontrast/image.nii.gz"
+      },
+      "shape": [512, 512, 300],
+      "spacing": [0.8, 0.8, 1.0],
+      "origin": [-200.0, -180.0, -300.0],
+      "direction": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+      "coordinate_system": "LPS"
+    },
+    {
+      "image_id": "img_arterial",
+      "modality": "CT",
+      "dicom_path": "images/img_arterial/dicom",
+      "sha256": "TO_BE_FILLED",
+      "shape": [512, 512, 280],
+      "spacing": [0.8, 0.8, 1.0],
+      "origin": [-200.0, -180.0, -280.0],
+      "direction": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+      "coordinate_system": "LPS"
+    }
+  ],
   "review": {
+    "review_id": "review_case001_001",
     "tool": "mimics",
-    "single_user_save_as_verified": true
+    "status": "ready",
+    "assignee": "annotator_03",
+    "targets": [
+      {
+        "target_id": "target_noncontrast_abdomen",
+        "image_id": "img_noncontrast",
+        "organs": ["liver", "kidney_left", "kidney_right"],
+        "base_label_id": "label_noncontrast_v1",
+        "base_label_sha256": "sha256:..."
+      },
+      {
+        "target_id": "target_arterial_liver",
+        "image_id": "img_arterial",
+        "organs": ["liver", "hepatic_artery"]
+      }
+    ]
   }
 }
 ```
 
-`shape`、`spacing`、方向信息和共享配置 hash 必须由导出脚本写入，导回时用于校验。Case Package 不携带训练 `label_policy`；训练准入属于 Dataset Snapshot。
+平台生成的清单还可包含 `initial_labels`，逐项记录初始 Mask 的 `image_id`、器官、相对路径、文件哈希、`label_id`、生命周期和使用限制。该数组由 `sp package create` 生成，不要求操作者手写。
 
-## 5. 标签状态
+### 4.1 必须满足的规则
 
-| 状态 | 文件示例 | 说明 | 默认训练准入 |
-| --- | --- | --- | --- |
-| `candidate_label` | `labels/candidate_label.nii.gz` | 模型或公开算法输出 | 否 |
-| `draft_label` | `labels/draft_label.nii.gz` | 给人工修正的初始标签 | 否 |
-| `verified_label` | `labels/verified_label.nii.gz` | 人工保存确认标签 | 是 |
-| `rejected_label` | 可只记录在报告中 | 已判定不可用 | 否 |
+1. `image_sets` 至少包含一个图像序列。
+2. 每个 `image_id` 在包内唯一。
+3. `review.targets` 至少包含一个目标组。
+4. 每个目标组有唯一 `target_id`，并引用已存在的 `image_id`。
+5. 目标组的 `organs` 不能为空。
+6. `base_label_id` 和 `base_label_sha256` 要么同时存在，要么同时省略。
+7. `assignee` 第一阶段可选，只用于中央协调和工作包筛选。标注端不查询或修改 Registry；中央改派只影响后续导出，不会远程改写已经发出的工作包。
+8. 不同目标组的标签分别绑定自己的图像空间，不能假设多个序列已配准。
+9. `target_id` 是最小提交单位；组内器官一起完成或一起进入复查。
+   `known_absent` 只是兼容字段，仅在数据来源已有明确事实时使用，例如外部结构化记录已说明某器官不存在。
+   它不能用于根据扫描部位猜测“哪些器官不需要标”。正常流程里，标注者打开病例后才判断目标器官是存在、无法确认还是需要复查；这些结果写入提交清单的 `organ_outcomes`。
+10. `data_governance.deidentification_status` 是治理记录，不是默认阻断条件。只有 `strict_deidentification: true` 时，去标识风险才阻断病例包创建。
+11. `leakage_group_id` 和 `study_id` 对所有来源必填。
+12. `patient_id_hash` 和 `study_instance_uid_hash` 只在来源可靠且已按治理规则伪名化时记录。
 
-第一阶段单人保存即可记为 `verified_label`。后续如果要双人审核，可以在 `review_report.json` 中增加 reviewer 和 arbitration 字段，不需要改变目录结构。
+去标识声明不能替代导入阶段的 DICOM 标签检查。检查结果写入 `reports/ingest_report.json`；默认用于提示风险，严格治理场景再开启阻断。
 
-候选标签即使被某次训练接受，文件名和生命周期状态仍保持 `candidate_label`；准入结果只写 Dataset Snapshot，不回写 Case Package。
+### 4.2 哪些文件校验值必须稳定
 
-## 6. 导入标注工具
+`manifest.json` 中以下文件要记录校验值：
 
-标注工具 Adapter 需要读取：
+- 图像。
+- Mimics 派生 DICOM：仅当同一个 image set 同时有 `image_path` 和 `dicom_path` 时，使用 `dicom_sha256` 单独记录。
+- 器官名称表。
+- 标注交换编号表。
+- 基础标签。
+- 完成提交的结果。
 
-- `manifest.json`
-- `images/image.nii.gz` 或 `images/dicom/`
-- `labels/draft_label.nii.gz` 或 `labels/masks/*.nii.gz`
-- `config/anatomy_vocabulary.yaml`
-- `config/review_label_map.yaml`
+`checksums.sha256` 只用于复制或归档整个目录时的可选传输检查。工作过程中的 `.mcs`、报告和任务状态会变化，因此不要求整个工作目录始终保持同一个包级校验值。
 
-Adapter 可以自由决定如何把平台标签转成工具内部对象。例如 Mimics 可能更适合逐器官 mask；3D Slicer 可能可以读取单个多标签 labelmap。平台不关心工具内部形式，只关心导回结果是否符合契约。
+## 5. 标注任务和目标组状态
 
-## 7. 导回平台
+第一阶段使用：
 
-导回时至少产出：
+- `ready`
+- `in_progress`
+- `needs_review`
+- `completed`
+- `blocked`
+- `deferred`
+
+固定用户动作：
+
+- `save_progress`
+- `submit_complete`
+- `submit_for_review`
+- `report_blocked`
+
+这些动作不需要在每个清单中重复定义。在线锁定、任务领取、“提交中”和“退回”属于后续服务化。
+
+完成提交时同步运行质量检查：
 
 ```text
-labels/verified_label.nii.gz
-reports/geometry_check.json
+目标组检查通过
+-> 目标组 completed
+-> 创建 verified_label
+
+目标组检查失败
+-> 目标组 in_progress
+-> 生成问题报告
+```
+
+标注任务状态由所有目标组汇总：
+
+- 所有目标组完成，任务才是 `completed`。
+- 任一目标组需要复查，任务显示 `needs_review`。
+- 一个目标组失败不会撤销其他已完成目标组。
+
+## 6. 标签输入
+
+每个图像序列可以包含：
+
+```text
+labels/{image_id}/source_label.nii.gz
+labels/{image_id}/candidate_label.nii.gz
+labels/{image_id}/draft_label.nii.gz
+labels/{image_id}/masks/{organ}.nii.gz
+```
+
+| 状态 | 在病例包中的意义 | 是否自动进入训练 |
+| --- | --- | --- |
+| `source_label` | 外部数据集自带标签 | 否，由训练数据快照中的规则判断 |
+| `candidate_label` | 模型或算法候选标签 | 否，可由训练数据快照中的规则接受 |
+| `draft_label` | 人工正在修正或等待复查 | 否 |
+| `verified_label` | 完成提交且平台检查通过后创建 | 仍受训练任务和使用限制约束 |
+| `rejected_label` | 已明确拒绝 | 否 |
+
+保存 `.mcs` 不改变标签状态。
+
+## 7. 标注工具适配器读取什么
+
+工具适配器读取：
+
+- `manifest.json`
+- `image_sets`
+- `review.targets`
+- 可选初始标签
+- 器官名称表
+- 标注交换编号表
+
+工具内部可以有“当前活动图像”、当前图层或当前分割等状态，但这些状态不能替代目标组中的 `image_id`。
+
+Mimics 21.0 的实际交换路径由可行性验证决定：
+
+1. 直接文件导入导出稳定时，优先使用直接路径。
+2. 只有 Mask 体素数组交换稳定时，才启用外部格式脚本和 `.u8` 文件桥接。
+3. 空间关系无法可靠往返时，切换标注工具。
+
+## 8. 提交结果目录
+
+每次提交至少包含：
+
+```text
+submissions/{review_id}/submission_manifest.json
+submissions/{review_id}/export_manifest.json
+submissions/{review_id}/buffers/{image_id}/{target_id}/{organ}.u8
 reports/review_report.json
 provenance/tool_export.json
 ```
 
-如果工具只能导出逐器官 mask，可以先放入：
+`export_manifest.json` 中的 buffer `path` 必须相对病例包根目录保存，并声明
+`path_base: package_root`。这样 Mimics 工作站生成的完整病例包可以迁移回平台机器，
+且平台会拒绝逃逸到病例包目录之外的相对路径。
 
-```text
-labels/masks/
-  liver.nii.gz
-  gallbladder.nii.gz
+最小 `submission_manifest.json`：
+
+```json
+{
+  "schema_version": "review_submission.v1",
+  "submission_id": "submission_6d5c...",
+  "review_id": "review_case001_001",
+  "submitted_at": "2026-06-24T10:30:00Z",
+  "target_ids": ["target_noncontrast_abdomen"],
+  "action": "submit_complete",
+  "assignee": "annotator_03",
+  "base_labels": {
+    "target_noncontrast_abdomen": {
+      "label_id": "label_noncontrast_v1",
+      "sha256": "sha256:..."
+    }
+  },
+  "organ_outcomes": {
+    "target_noncontrast_abdomen": {
+      "liver": "present",
+      "kidney_left": "present",
+      "kidney_right": "confirmed_absent"
+    }
+  }
+}
 ```
 
-再由平台合并为 `verified_label.nii.gz`。合并时必须使用 `review_label_map.yaml` 或新的导出 map，不允许按文件名顺序随意编号。
+`organ_outcomes` 允许 `present`、`confirmed_absent` 和 `uncertain`。`submit_complete` 不能包含 `uncertain`；空 Mask 只有明确声明 `confirmed_absent` 才能作为完成结果。
 
-## 8. 校验规则
+`submission_id` 和 `submitted_at` 均由 Mimics 提交脚本自动写入。Console 使用不可重复的 `submission_id` 区分上一版提交和新提交，因此即使重新打开与提交发生在同一秒，也不会把正在修订的病例错误恢复成旧的 `submitted` 状态；标注者不需要填写这些字段。
 
-| 校验项 | 失败级别 | 说明 |
-| --- | --- | --- |
-| 图像文件 hash 与 manifest 不一致 | error | 包可能被改动或错配 |
-| 导回标签 shape 不一致 | error | 不能入库 |
-| spacing/origin/direction/affine 不一致 | error | 不能直接训练 |
-| label id 不在 map 中 | error | 可能有工具导出残留标签 |
-| 必需器官缺失 | warning 或 error | 由任务决定 |
-| 只有 draft 没有 verified | warning | 不能作为人工确认标签入库 |
+如果工具直接导出 NIfTI，可以写入：
 
-## 9. 与 nnUNet 的关系
+```text
+submissions/{review_id}/labels/{image_id}/{organ}.nii.gz
+```
 
-nnUNet 不直接读取 Case Package。平台先把 Case Package 导回 Data Registry，再由 Dataset Snapshot 选择病例和标签，最后通过 nnUNet Adapter 导出当前训练管线需要的目录。
+提交清单必须声明本次提交的 `target_ids`。被声明为完成的目标组必须包含该组全部器官。
+只有来源数据在建包前已经明确给出 `known_absent` 时，这些器官才不导出也不计入完成检查；
+普通标注任务不能为了减少工作量预先填 `known_absent`。不同目标组可以分次提交。
+
+单个 Mask 导出只用于调试，或目标组本身只有一个器官。
+
+## 9. 提交检查
+
+| 检查项 | 失败处理 |
+| --- | --- |
+| 清单格式、配置引用或文件校验值错误 | 阻断 |
+| `image_id` 缺失或重复 | 阻断 |
+| `target_id` 缺失、重复或没有器官 | 阻断 |
+| 标签与目标图像的空间关系无法解释 | 阻断 |
+| 未知器官或未知标签值 | 阻断 |
+| 完成提交缺少目标组中的 Mask | 阻断该目标组 |
+| `review_id`、`target_id` 或基础标签版本不匹配 | 拒绝登记 |
+| `enforce_assignee=true` 且提交身份不匹配 | 拒绝登记 |
+| 标签内容检查失败 | 回到 `in_progress` 并生成问题报告 |
+
+不能仅因为数组大小相同就复制 affine。任何重采样必须创建新的文件记录并保存变换过程。
+
+如果目录中有 `checksums.sha256`，提交前检查会验证其中列出的文件；没有该文件不报错。完成提交后应对提交结果单独记录校验值。
+
+## 10. 多人协作和继续修订
+
+第一阶段不实现在线锁服务：
+
+- 任务清单可以记录 `assignee`，也可以留空；它不进入标注工作包的运行依赖。
+- Review Task 可追加 `worklist_exports` 导出历史，默认防止同一 review 被重复分发；该记录不包含标注机路径或实时进度。
+- 协调者避免把同一目标组同时分给两个人。
+- 同一病例的不同目标组可以并行。
+- 提交时用 `target_id` 和基础标签校验值阻止旧版本覆盖。
+- 第二人复核或继续修订人工确认标签时，创建新标注任务。
+- 旧标签记录和旧训练数据快照保持不变。
+
+## 11. 为什么 nnUNet 不直接读取病例包
 
 ```mermaid
 flowchart LR
-    accTitle: Case Package To nnUNet
-    accDescr: Case packages are reviewed and registered before task-specific snapshots are exported to nnUNet format.
+    accTitle: 病例包到训练数据的关系
+    accDescr: 病例包提交结果先进入资产登记册，再由训练数据快照选择，最后通过 nnUNet 工具适配器导出。
 
-    package["Case Package"]
-    registry["Data Registry"]
-    snapshot["Dataset Snapshot"]
-    adapter["nnUNet Adapter"]
-    nnunet["nnUNet_raw"]
+    package["病例包"]
+    registry["资产登记册"]
+    snapshot["训练数据快照"]
+    adapter["nnUNet 工具适配器"]
+    nnunet["nnUNet 输入目录"]
 
     package --> registry
     registry --> snapshot
@@ -198,49 +388,13 @@ flowchart LR
     adapter --> nnunet
 ```
 
-这能保证同一病例包可以服务多个训练任务，而不是被某个任务的 label id 永久绑定。
+病例包服务人工标注。nnUNet 工具适配器根据训练数据快照和任务标签编号表，选择具体图像、标签版本和整数编号。
 
-## 10. 共用配置的存储策略
+## 12. 仍需实际验证
 
-### 10.1 设计
-
-`anatomy_vocabulary.yaml` 和 `review_label_map.yaml` 是跨病例通用的——同一个数据集的所有病例共享同一套器官名称和标注编号体系。因此采用**集中存储 + 引用**的方式，而不是每个病例包复制一份。
-
-```text
-dataset_package/
-  config/
-    anatomy_vocabulary.yaml        ← 全数据集共享，一份
-    review_label_map.yaml          ← 全数据集共享，一份
-  cases/
-    case_001/
-      manifest.json                ← config_ref: "../../config/"
-      images/... labels/... reports/... provenance/...
-    case_002/
-      manifest.json                ← config_ref: "../../config/"
-      ...
-```
-
-### 10.2 理由
-
-- 100 个病例不需要 100 份完全相同的 yaml
-- 改器官名称或 label 编号时只需改一次
-- 标注员拷贝整个 `dataset_package/` 即可，仍然离线自包含
-- `check_case_package.py` 顺着 `config_ref` 校验配置文件的 SHA-256 hash，保证一致性
-
-### 10.3 `task_label_maps.yaml` 的归属
-
-`task_label_maps.yaml` 与具体训练任务绑定，而不是与病例绑定。同一个病例可能同时参与 `CT3_Lung`（肺叶任务）和 `CT5_Liver`（肝胆任务），在不同任务里使用不同的标签编号。
-
-因此 `task_label_maps.yaml` 的合理归宿是 **Dataset Snapshot（数据集快照）层**，而非每个 Case Package 中：
-
-- Case Package 内只需包含 `anatomy_vocabulary.yaml`（器官名称）和 `review_label_map.yaml`（标注工具编号）。
-- 训练任务标签编号由 nnUNet Adapter 在导出时根据任务定义生成，不在标注环节引入。
-
-## 11. 当前未定
-
-| 问题 | 暂定处理 |
+| 问题 | 验证结果怎样影响实现 |
 | --- | --- |
-| 是否强制包含 DICOM | Mimics POC 后决定；建议 POC 阶段同时保留 DICOM 和 NIfTI |
-| candidate 是否可作为 review 输入 | 可以；必须保留 generator provenance 和 QC 报告，进入包时通常转成 `draft_label` |
-| 多人审核如何表示 | 后期扩展 `review_report.json` |
-| 是否支持多个图像序列 | 后期扩展 `images[]`，当前先单主图像 |
+| Mimics 21.0 是否有稳定直接文件路径 | 当前实现仍保留 `.u8` 桥接；实测证明直接路径同样可靠后才可简化 |
+| 多图像集上的 Mask 能否稳定绑定和切换 | 决定 Mimics 脚本能否安全自动化 |
+| `.mcs` 能否跨机器打开 | 决定它只作为本机进度文件，还是可以作为可移动工作包 |
+| 不同序列是否需要配准 | 由具体任务决定，不作为所有病例的默认前提 |

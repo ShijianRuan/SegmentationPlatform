@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://segmentation-platform/registry/schemas/dataset_snapshot.schema.json",
+  "title": "训练数据快照 Dataset Snapshot",
+  "description": "一次训练实际使用的数据清单。创建后不可修改：新标签或新规则必须创建新快照。字段说明见 platform_data_model.md §7。",
+  "type": "object",
+  "required": ["schema_version", "snapshot_id", "task_id", "task_label_map", "label_policy", "split", "cases", "preprocess_profile", "usage_constraints"],
+  "properties": {
+    "schema_version": {"const": "dataset_snapshot.v1"},
+    "snapshot_id": {"type": "string"},
+    "task_id": {"type": "string"},
+    "created_by": {"type": "string"},
+    "created_at": {"type": "string"},
+    "task_label_map": {
+      "type": "object",
+      "description": "本任务的器官->整数映射。要求从 0 连续、无空缺；允许多个器官名映射到同一非零整数（有意合并，见 ADR-034）。",
+      "required": ["background"],
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "label_policy": {
+      "type": "object",
+      "description": "本次训练的完整 resolved 标签准入规则，必须在创建时冻结（ADR-032）。内部结构灵活，故不在此过度约束。",
+      "required": ["allow_lifecycle_status"],
+      "properties": {
+        "allow_lifecycle_status": {
+          "type": "array",
+          "items": {"$ref": "_defs.schema.json#/$defs/lifecycle_status"},
+          "minItems": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "split": {
+      "type": "object",
+      "description": "划分的元数据。权威划分在每个 case 的 split、leakage_group_id、basis 和 confidence 上；这里不再保存 train/val/test 病例列表，避免与 cases 双写并产生矛盾。",
+      "required": ["leakage_key"],
+      "properties": {
+        "leakage_key": {"type": "string", "description": "用于防泄漏比较的键，通常是 leakage_group_id。"},
+        "source_split_plan": {"type": "string", "description": "可选：本次划分引用的可复用划分计划标识。"}
+      },
+      "additionalProperties": false
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["case_id", "image_id", "split", "leakage_group_id", "leakage_group_basis", "leakage_group_confidence", "segments"],
+        "properties": {
+          "case_id": {"type": "string"},
+          "image_id": {"type": "string"},
+          "split": {"type": "string", "enum": ["train", "val", "test"]},
+          "leakage_group_id": {"type": "string", "description": "冻结当时的防泄漏分组，使快照无需外部数据即可独立重现患者级泄漏检查。"},
+          "leakage_group_basis": {
+            "type": "string",
+            "enum": ["patient_pseudonym", "source_subject", "study", "case", "import_batch_unknown"]
+          },
+          "leakage_group_confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": "low 不能用于宣称患者独立的正式验证或测试。"
+          },
+          "segments": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["organ", "label_id", "label_hash", "lifecycle_status", "admission_result"],
+              "properties": {
+                "organ": {"type": "string"},
+                "label_id": {"type": "string"},
+                "label_hash": {"$ref": "_defs.schema.json#/$defs/sha256_hash"},
+                "lifecycle_status": {"$ref": "_defs.schema.json#/$defs/lifecycle_status"},
+                "admission_result": {"$ref": "_defs.schema.json#/$defs/admission_result"}
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "preprocess_profile": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": true
+    },
+    "usage_constraints": {"$ref": "_defs.schema.json#/$defs/usage_constraints"}
+  },
+  "additionalProperties": false
+}

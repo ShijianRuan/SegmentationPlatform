@@ -1,170 +1,174 @@
-# Mimics 可行性评估
+# Mimics Research 21.0 接入判断
 
-> 日期：2026-06-06（初版）；2026-06-07（更新：Web 调研补充）  
-> 状态：架构调研结论 + Web 调研补充；最终判断仍依赖本机 Mimics POC  
-> 结论一句话：Mimics 可以作为优先 POC 的人工标注/修正工具，但不能在 POC 前写成平台唯一底座。
+> 版本：v0.4
+> 更新日期：2026-06-13
+> 状态：架构判断已经收敛，是否正式采用仍需完成本机验证
 
-## 1. 评估问题
+本文只回答一个问题：**Mimics 21.0 能否作为平台的人工标注工具，以及接入时应把边界放在哪里。**
 
-平台真正关心的不是“Mimics 是否强大”，而是它能否稳定完成下面这个闭环：
+API 事实见 [Mimics 21.0 技术参考](mimics_reference.md)，实际验证步骤见 [Mimics 21.0 可行性验证计划](mimics_poc_plan.md)。
+具体开发代码和标注者使用方式见 [Mimics 适配器设计与开发流程](mimics_adapter_design.md)。
 
-```mermaid
-flowchart LR
-    accTitle: Mimics Review Loop
-    accDescr: Mimics feasibility depends on stable import of images and draft labels, manual correction, export, and geometry verification.
+## 1. 当前结论
 
-    package["Case Package<br/>图像 + 草稿标签 + 器官配置"]
-    import["导入 Mimics"]
-    edit["人工修正"]
-    export["导出 mask"]
-    validate["空间和标签校验"]
-    registry["注册为 verified_label"]
+Mimics 21.0 可以作为人工标注和标签修正工具的候选，但不应承担平台的数据登记、状态管理、训练准入和长期文件治理。
 
-    package --> import
-    import --> edit
-    edit --> export
-    export --> validate
-    validate --> registry
-```
+推荐的最小方案是：
 
-如果这个闭环稳定，Mimics 可以成为第一阶段主标注工具。如果闭环不稳定，Mimics 仍可作为人工查看/修正工具，但平台需要保留其他工具适配方案。
+1. 平台准备病例、任务清单和初始标签。
+2. Mimics 负责显示图像、编辑 Mask 和保存工作现场。
+3. 标注者明确选择“提交完成”“提交复查”或“报告阻塞”。
+4. 平台在导出后执行空间检查、内容检查、版本登记和状态更新。
 
-## 2. 当前结论
+这意味着 Mimics 是平台使用的一个工具，不是平台本身。
 
-| 使用方式 | 建议 | 理由 |
-| --- | --- | --- |
-| 作为优先 POC 工具 | 推荐 | 你已经有工具，且 Mimics 的医学图像交互能力强 |
-| 作为第一阶段唯一标注工具 | 暂不建议 | 导入导出、空间一致性、脚本能力还未用本机版本验证 |
-| 作为平台核心架构依赖 | 不建议 | 平台应依赖数据契约，而不是依赖某个商业工具 |
-| 作为人工修正工具 | 推荐验证 | 这与 Mimics 的优势最匹配 |
+## 2. 为什么仍然需要本机验证
 
-## 3. 已核实的公开事实
+官方资料可以确认 Mimics 21.0 支持 DICOM、项目文件和 Mask 脚本操作，但不能替代以下实测：
 
-| 事实 | 来源 | 可信度 | 文档中可怎么写 |
-| --- | --- | --- | --- |
-| Materialise Mimics 是医学图像分割和 3D 规划相关软件 | Materialise Mimics Core 官方资料 | 高 | Mimics 可作为人工分割/修正工具候选 |
-| Materialise Mimics Core 页面提到 Mimics Medical 28.0 和 3-matic Medical 20.0 released 2025 | Materialise Mimics Core 官方资料 | 高 | 可以说明官方当前医疗版信息，但不能替代本机版本、许可证和模块核查 |
-| 2025 Mimics 更新提到 NIfTI 和 RT-DICOM 导入导出 | Materialise 2025 update | 高 | NIfTI/RT-DICOM 支持是正向信号 |
-| 2025 Mimics 更新提到 15+ Python API 操作和 Python 兼容性增强 | Materialise 2025 update | 高 | 有自动化接入可能 |
-| 2025 Mimics 更新提到 AI-enabled segmentation | Materialise 2025 update | 高 | 可作为辅助能力，但不等于标签可直接训练 |
-| Materialise 社区存在 Mimics scripting 导出 NIfTI affine/orientation 问题讨论 | Materialise community | 中 | 必须把空间一致性列为 POC 重点 |
+- 一个目录包含多个患者、检查或序列时，实际会生成哪些 image sets；
+- Mask 的数组轴顺序与患者坐标如何对应；
+- 初始标签导入和结果导出能否稳定保持空间位置；
+- `.mcs` 项目在中断恢复和跨机器使用时有哪些限制；
+- 当前 edition、license 和安装环境是否允许脚本自动化；
+- 标注者是否能在不处理路径、Python 环境和文件转换的情况下完成任务。
 
-## 4. 不能写成事实或必须限定的内容
+其中空间位置验证是硬门槛。文件能打开、Mask 看起来大致正确，都不能代替可重复的坐标验证。
 
-下面这些说法要么公开证据不足，要么需要限定到“官方页面”或“本机 POC”：
+## 3. 推荐接入边界
 
-| 说法 | 处理方式 |
-| --- | --- |
-| “本项目可直接使用 Mimics v28 / Mimics Medical 28.0” | 官方页面提到 Mimics Medical 28.0；本项目实际可用版本、许可证和模块仍需本机确认 |
-| “20,000+ 论文引用” | 删除，除非找到 Materialise 官方或可复核来源 |
-| 具体 Python 函数名和参数，例如 `import_dicom_images()`、`get_voxel_buffer()` | 只能写成示意或待本机脚本环境确认 |
-| “多标签 NIfTI 可以稳定导入并保留 label id” | 改成 POC 项 |
-| “导出 NIfTI 一定与原 CT affine 完全一致” | 改成高风险验证项 |
-| “系统要求表” | 只有官方当前页面或本机安装文档确认后才能写 |
+| 环节 | 平台负责 | Mimics 负责 |
+|---|---|---|
+| 进入工具前 | 去标识检查、病例与序列清单、任务分配、初始标签准备 | 读取平台准备的图像和 Mask |
+| 标注中 | 记录任务归属和基础版本 | 显示、编辑、撤销、保存 `.mcs` 工作现场 |
+| 提交 | 接收提交意图和导出结果 | 按任务导出指定 Mask |
+| 提交后 | 空间检查、标签检查、版本登记、异常反馈 | 不决定标签是否可训练 |
 
-## 5. POC 必测项
+平台不强制把多序列分成“主序列”和“参考序列”。如果多个序列都需要标注，任务清单就为每个序列分别声明目标器官。脚本只在处理某个目标时临时激活对应 image set。
 
-| 编号 | 必测项 | 通过标准 |
-| --- | --- | --- |
-| M1 | 图像导入 | DICOM 或 NIfTI 能打开，方向和 spacing 正确 |
-| M2 | 草稿标签导入 | 至少一种方式能把平台草稿标签变成 Mimics 可编辑 mask |
-| M3 | 人工修正 | 修正后的 mask 名称、颜色、结构关系可管理 |
-| M4 | 标签导出 | 能导出逐器官 mask 或单个多标签文件 |
-| M5 | 空间一致性 | 导出标签与原图 shape 一致；spacing/origin/direction/affine 不一致时必须能被平台检测和修复 |
-| M6 | label 映射 | 导出的 mask 能按平台器官名称映射回统一名称 |
-| M7 | 批量可重复 | 至少能用脚本或稳定操作步骤处理多个病例 |
+## 4. 文件输入与输出
 
-其中 M5 是最关键的门槛，但要分清硬故障和可修复问题。shape 不一致通常说明标签和图像已经不是同一体素网格，不能直接进入闭环；spacing/origin/direction/affine 不一致仍然危险，但第一阶段可以由平台侧 `check_geometry.py` 检测，并在确认 shape 一致时把图像几何头信息同步给 mask。
+### 4.1 图像
 
-## 6. 如果现在就要使用 Mimics
+首选输入是原始 DICOM，因为这是 Mimics 21.0 有明确依据的主路径。
 
-可以采用保守流程：
+Mimics 21.0 的 Scripting API 有两条图像导入路径，但都不能直接保留 NIfTI 的完整几何：`import_dicom_images()` 是 DICOM 主路径，保留完整方向和坐标；`import_standard_images()` / `configure_standard_images()` 面向 BMP、TIFF、JPEG 切片序列，只接受手动指定的 xy/z resolution，不保留 NIfTI 的方向矩阵和 origin（见 `mimics_reference.md`）。图像对象 `ImageData` 有 `get_voxel_buffer()`（读）但没有 `set_voxel_buffer()`（写）——后者只存在于 Mask 对象。因此“用 nibabel 读 NIfTI 成 array，再直接注入成一个 Mimics 图像”这条路 API 不提供：这不是思路限制，是 API 客观没有写入图像体素的口（注入 Mask 体素可以，所以初始标签能进）。
 
-1. 平台导出 `case_package/`，包含图像、草稿标签、器官配置和 manifest。
-2. 优先用 DICOM 导入 Mimics；NIfTI 导入作为并行测试。
-3. 草稿标签先拆成逐器官 mask，降低多标签 NIfTI 解释风险。
-4. 人工在 Mimics 里修正。
-5. 导出逐器官 mask。
-6. 平台外部脚本合并为 `verified_label.nii.gz`。
-7. 平台用原始 CT 作为参考做几何校验。
+但“任意格式数据必须能进入标注流程”是项目既定目标，且不依赖 Mimics 原生 NIfTI API。当前实现采用的路径是：
 
-这个流程不优雅，但比一开始依赖未验证的全自动脚本更稳。
+1. 平台侧现代 Python（nibabel / pydicom / SimpleITK）把 DICOM / NIfTI / MetaImage 读成 3D array；
+2. 用 pydicom 写出一个最小可用 DICOM 序列（十几个必需 tag），这是 Mimics `import_dicom_images` 本就接受的输入，不是破解；
+3. `case_package` 同时保留原始 `image_path` 和派生 `dicom_path`，`sha256` 校验原始图像，`dicom_sha256` 校验派生 DICOM；
+4. prepare 阶段把 `dicom_path` 写入 `mimics_runtime.json`，Mimics 仍走 `import_dicom_images()`；
+5. 平台可用 `sp mimics prebuild-workspace` 或 `sp mimics prebuild-many` 启动 Mimics `-background_mode`，调用内部 `sp_open_review.py --background-prebuild`，完成 import + 创建所有目标 Mask + 注入初始 buffer + `save_project(.mcs)` 后退出；
+6. 标注者打开时优先只执行 `open_project(.mcs)`，不感知原始格式；若未提前预生成，Console 仍可在当前 Mimics 会话内完成首次导入。
 
-## 7. 失败分支
+`-background_mode` 在探针代码中已用过，不是新机制。当前代码已经接入预生成调用链：外部现代 Python 负责准备 runtime，Mimics 内 Python 负责导入、建 Mask、保存 `.mcs`。但这仍不是实机结论：批量交给标注者前，必须在 Windows + Mimics Research 21 上验证 background mode 下 `import_dicom_images` + `create_mask` + `set_voxel_buffer` + `save_project` 能无 UI 串行完成，并验证派生 DICOM 的方向、灰度和 Mask 往返。空间信息在转换时必须可无歧义恢复，否则改用原生支持该格式的标注工具（见 §9 退出条件）。
 
-| 失败点 | 后果 | 可选处理 |
-| --- | --- | --- |
-| NIfTI 图像导入方向不稳定 | 标签与训练图像可能错位 | 改用 DICOM 作为 review package 主格式 |
-| 草稿标签不能稳定导入 | 无法模型辅助标注 | 用截图/参考标签辅助人工，或换 3D Slicer/ITK-SNAP |
-| 导出只能逐器官 mask | 文件多，但可接受 | 平台合并为多标签 mask |
-| 导出 affine 不一致 | 不能直接入库 | shape 一致时可由平台复制图像几何头信息并抽检；shape 不一致时停用该路径 |
-| Python API 不足 | 自动化程度下降 | 保留手动步骤，先跑通小闭环 |
+### 4.2 初始标签和导出标签
 
-## 8. 与其他工具的关系
+Mask 对象支持读取和写入体素缓冲区。因此，必要时可以使用下面的文件交换方式：
 
-| 工具 | 适合角色 | 对 Mimics 的补充 |
-| --- | --- | --- |
-| 3D Slicer | 开源标注、插件集成、MONAI Label/TotalSegmentator 生态 | 如果 Mimics 导入导出不稳，可作为备选 |
-| MONAI Label | 模型辅助标注和主动学习参考架构 | 可学习 server-client 思路，不一定直接采用 |
-| ITK-SNAP | 简单稳定的医学图像标签编辑 | 可作为轻量校验工具 |
-| TotalSegmentator | 公开算法标签源 | 生成草稿标签或候选标签 |
+1. 外部现代 Python 读取标签文件，并把标签重采样到目标 image set 的精确网格；
+2. 外部程序写出受校验的数组文件和说明清单；
+3. Mimics 内部脚本创建逐器官 Mask，并写入数组；
+4. 提交时内部脚本读取指定 Mask；
+5. 外部程序写成 NIfTI、多标签文件或平台要求的其他格式。
 
-## 9. 推荐结论
+外部平台运行时与 Mimics Python 3.5.2 始终隔离。可选的是这条“逐器官体素文件桥”：如果本机已证明直接标签导入导出可靠，可以不启用桥接；无论采用哪条路径，都不能让标注者承担格式转换。
 
-短期：用 Mimics 做 3-5 个病例 POC，重点验证导入导出和几何一致性。
+## 5. Python 3.5 的定位
 
-中期：无论 Mimics 是否通过，都保持 Tool Adapter 设计。平台只依赖 case package 和 label artifact，不依赖 Mimics 内部工程文件。
+Mimics 21.0 使用 Python 3.5.2。兼容该版本的旧版 NumPy、nibabel 和 SimpleITK 可以安装，但不适合作为平台长期运行环境：
 
-长期：如果 Mimics POC 通过，可以把它作为主人工标注工具；如果没有通过，改为辅助工具或替换为 3D Slicer/其他工具。
+- Python 3.5 已停止维护；
+- 现代库通常不再支持它；
+- 平台还需要稳定的文件格式、数据校验、哈希和结构化清单能力。
 
-## 10. 2026-06-07 Web 调研补充：Affine 问题与 API 现状
+因此：
 
-### 10.1 Affine 问题已证实
+- Mimics 内部 Python 只调用 Mimics API；
+- 文件转换、空间处理和平台校验优先放在受维护的外部 Python；
+- 如果直接标签文件路径已经满足要求，就不额外实现体素文件桥；
+- 外部平台运行时仍负责启动、清单、日志、QC 和提交登记。
 
-Materialise 社区（2021 年）有用户报告通过 Python scripting 导出 mask 为 NIfTI 时，因 DICOM 到 NIfTI 的 affine 坐标系变换计算错误，导致导出的 mask 在 ITK-SNAP 中**三轴视图全部对调**：原矢状面显示在轴位、原轴位显示在冠状位、原冠状位需要顺时针旋转 90 度。
+标注者不应手工选择解释器、安装依赖或填写路径。阶段 A 使用 Mimics 内语义明确的 `Labeling_*.py` 直接入口；准备和收尾命令由平台侧执行。
 
-根本原因是 DICOM 的患者坐标系（LPS+：左/后/上为正）与 NIfTI 的患者坐标系（RAS+：右/前/上为正）不同。用户在 Python 脚本中手动计算 affine 矩阵时，极易犯错。
+## 6. `.mcs` 应如何理解
 
-更关键的是：用户尝试用 `nibabel.load(dicom_path).affine` 读取 Mimics 导出的 DICOM 的 affine，再套用到 mask 上，**结果仍然不正确**。这说明 Mimics 内部的几何表示与外部标准之间可能存在额外的差异。
+`.mcs` 是 Mimics 的项目文件，可保存图像、Mask、测量和当前工作状态。它适合：
 
-### 10.2 但 Mimics 2025 更新带来了关键变化
+- 中断后继续标注；
+- 保存一次任务的本地工作现场；
+- 在兼容环境中转移未完成工作。
 
-| 变化 | 影响 |
-|------|------|
-| NIfTI 导入/导出已成为**官方正式功能**（不再是脚本 hack） | 如果使用 GUI 原生导出而非 Python scripting 手动构造 affine，affine 问题可能已解决 |
-| 15+ 新 Python API 操作 | 官方路径的导出 API 可能比手写 nibabel 更可靠 |
-| Python 版本兼容性更新 | 现代 Python（≥3.8）可用 |
-| AI-enabled segmentation 内建 | 可作为辅助标注能力 |
+它不适合成为平台唯一数据文件，因为：
 
-关键判断：**使用 Mimics 官方的 NIfTI 导出功能（GUI 或官方 API），与使用 Python scripting 手动构造 NIfTI affine 的风险完全不同。** 前者可能是稳定的，后者是已知有风险的。
+- 文件可能很大；
+- 跨机器打开依赖兼容版本、edition 和 license；
+- 平台任务清单、来源记录和外部脚本不一定包含在其中；
+- 平台仍需保存原始数据、导出标签和版本记录。
 
-### 10.3 M5 的修订评估
+因此，`.mcs` 是工作检查点，不是平台的长期真相来源。
 
-原 M5（空间往返一致性）的风险分级应细化为：
+## 7. 标注者应看到的流程
 
-| 场景 | 风险 | 建议 |
-|------|:--:|------|
-| Mimics GUI 原生 NIfTI 导出 | 中等 | 需 POC 验证，但官方支持是强信号 |
-| Python scripting 手写 affine 导出 | **高** | **不建议**此路径，社区有已证实的方向错误案例 |
-| 平台侧 post-import 用脚本矫正 | 低 | 无论导出结果如何，平台侧 `check_geometry.py` 可将图像 affine 抄写到 mask 上作为保底 |
+标注者只需要：
 
-### 10.4 M5 的底线重新定义
+1. 打开分配给自己的任务；
+2. 核对病例、序列和目标器官；
+3. 编辑已有 Mask 或新建目标 Mask；
+4. 随时保存进度；
+5. 对完成的目标组选择提交完成、提交复查或报告阻塞。
 
-**M5 的硬底线是 shape 一致**（不可修复）。affine/origin/direction 不一致**可被平台检测和修复**（用 nibabel 将图像的 affine header 复制到 mask），因此不应该把 M5 整体定为 POC 硬门槛。
+标注者不需要：
 
-修订后的 M5 判定标准：
-- Shape 一致 → 通过（即使 affine 有偏差，平台可自动修复）
-- Shape 不一致 → 硬故障，Mimics 路径不可用
+- 手工维护标签生命周期状态；
+- 拆分或合并 NIfTI；
+- 复制 affine；
+- 决定标签能否进入训练；
+- 处理 Python 环境和交换目录。
 
-### 10.5 调研来源
+“保存”只表示保留工作进度。“提交完成并通过平台检查”才会创建新的已验证标签版本。
 
-- [Materialise Community: DICOM to NIfTI affine issue (2021)](https://community.materialise.com/t/dicom-to-nifti-format-using-mimics-scripting-problem-with-affine-transformation-matrix/438)
-- [Materialise Mimics 2025 Product Update](https://www.materialise.com/en/healthcare/mimics/whats-new)
-- [MIS Scripting Forum](https://community.materialise.com/c/mis-scripting-forum/5)
-- [GitHub: mimics_3matic_Python_scripting examples](https://github.com/fahimehazari/mimics_3matic_Python_scripting)
+## 8. 与标签生成域的关系
 
-## 11. 来源
+Mimics 界面可以提供“生成初始标签”的入口，但模型推理仍属于标签生成域：
 
-- [Materialise Mimics 2025 Product Update](https://www.materialise.com/en/healthcare/mimics/whats-new)
-- [Materialise Mimics Core](https://www.materialise.com/en/healthcare/mimics/mimics-core)
-- [Materialise community: DICOM to NIfTI via Mimics scripting affine issue](https://community.materialise.com/t/dicom-to-nifti-format-using-mimics-scripting-problem-with-affine-transformation-matrix/438)
+- 推理通常运行在外部 GPU 环境；
+- 生成结果必须记录模型、参数和来源；
+- 同一能力还要支持离线批量运行；
+- 标注域只负责让人查看和修正候选结果。
+
+因此采用“标注入口触发 + 独立生成适配器”，不把推理模型塞进 Mimics Python。
+
+## 9. 采用与退出条件
+
+只有同时满足以下条件，Mimics 才进入主要标注路径：
+
+1. 多患者、多检查和多序列的导入结果可预测；
+2. 每个任务目标都能绑定正确 image set；
+3. 初始标签和导出标签通过已知坐标点、人工体模和真实病例验证；
+4. 可以按任务导出一个或多个指定器官；
+5. 保存、提交、复查、阻塞和重新修订流程可执行；
+6. 标注者无需处理路径、格式和 Python 环境；
+7. 几何或脚本错误会阻断并给出明确反馈；
+8. 至少 3 至 5 个不同空间条件的病例重复通过；
+9. 平台数据契约不依赖 Mimics，仍可切换到其他标注工具。
+
+以下任一情况出现时，应退出主路径或将 Mimics 降级为疑难病例辅助工具：
+
+- 空间映射无法证明；
+- 自动导入导出不稳定且需要大量人工修补；
+- license 或脚本权限不足；
+- 多序列、修订或多人任务无法可靠区分；
+- 标注者必须长期承担格式转换和脚本操作。
+
+## 10. 不应提前承诺
+
+- Mimics 21.0 原生（Scripting API）支持 NIfTI 或 MetaImage 图像导入导出——任意格式进入标注流程靠外部转最小 DICOM + background prebuild 预生成 `.mcs` 实现（见 §4.1），不靠原生 API；
+- shape 相同就表示图像和标签对齐；
+- 任意图像数组都能通过 `set_voxel_buffer()` 注入成 Mimics 图像（注入 Mask 体素已验证，注入图像体素未确认）；
+- 一个 `.mcs` 文件可以在任何机器上独立打开；
+- 保存项目就等于标签已经验证；
+- 内置 Python 3.5 可以长期承载平台逻辑。

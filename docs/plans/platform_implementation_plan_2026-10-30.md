@@ -1,229 +1,372 @@
-# 分割平台实施计划（截至 2026-10-30）
+# 分割平台实施计划
 
-> 日期：2026-06-08  
-> 范围：离线批量分割平台 v0.1 -> v1.0  
-> 目标日期：2026-10-30  
-> 状态：执行主计划。架构设计仍以 `docs/architecture/platform_blueprint.md` 为准；近期脚本清单见 `docs/plans/implementation_backlog.md`。
+> 制定日期：2026-06-13
+> 目标日期：2026-10-30
+> 交付形态：可重复运行的离线分割平台
+> 架构依据：[平台蓝图](../architecture/platform_blueprint.md)
+> 近期具体任务：[近期任务清单](implementation_backlog.md)
 
-## 1. 总目标
+## 1. 10 月 30 日前要交付什么
 
-2026-10-30 前要搭好的不是一个完整 Web 平台，而是一套可重复运行的离线分割平台：
+目标不是在 2026 年 10 月 30 日前完成一个功能齐全的网站，而是交付一条可重复运行、可检查、可追溯的离线流程：
 
-1. 能把病例和标签打成 Case Package。
-2. 能通过 Mimics 或兜底工具完成 review。
-3. 能把导回标签登记为 `verified_label` 或其他明确状态。
-4. 能按任务生成 Dataset Snapshot。
-5. 能导出到现有 nnUNet 管线并完成训练、推理、评估。
-6. 能把模型输出登记为 `candidate_label`，再进入下一轮 `draft_label` 或 `accepted_pseudo_label`。
-
-最关键的原则：**流程首次走通不能等到 10 月 30 日。**
-
-10 月 30 日是稳定交付日期；首次闭环必须在 2026-07-24 前完成，理想时间是 2026-07-17。
-
-## 2. 交付物定义
-
-### 2.1 10 月 30 日交付物
-
-| 交付物 | 完成标准 |
-| --- | --- |
-| 文件阶段工具链 | `package_case`、`check_case_package`、`split`、`merge`、`check_geometry`、`hash` 可在 3-5 个样例和扩展病例上重复运行 |
-| 标注适配 | Mimics Adapter 至少完成 POC；若 Mimics 不可控，必须完成 3D Slicer 或 ITK-SNAP 兜底路径 |
-| 最小 Registry | 能记录 Case、Image Artifact、Label Artifact、provenance、QC 报告和 hash |
-| Dataset Snapshot | 能按任务冻结病例、标签状态、任务 label map 和训练配置 |
-| nnUNet Adapter | 能从 Dataset Snapshot 导出到现有 `pipelines/nnunet/` 可消费格式 |
-| label_generation 离线流程 | 能跑批量推理，输出 `candidate_label`、QC 报告，并生成下一轮 `draft_label` |
-| 运行文档 | 新人能按文档完成一次从病例包到训练再到候选标签回流的流程 |
-
-### 2.2 不作为 10 月 30 日强制交付
-
-| 暂不强制 | 原因 |
-| --- | --- |
-| 完整 Web UI | 数据契约和离线流程应先稳定 |
-| 复杂任务队列和调度系统 | 第一阶段手动或脚本化批处理足够 |
-| FewShot 正式生产 Adapter | 需要冻结评估集和生产级实验协议 |
-| MONAI / SAM 正式接入 | nnUNet + review 闭环优先 |
-| 正式模型发布评估体系 | 会议已确认现在讨论过早 |
-
-## 3. 总体节奏
-
-```mermaid
-gantt
-    title Segmentation Platform Implementation Timeline
-    dateFormat  YYYY-MM-DD
-    axisFormat  %m-%d
-
-    section Must pass early
-    M0 资源与样例病例确认           :m0, 2026-06-08, 7d
-    M1 文件契约脚本与 dry run        :m1, 2026-06-15, 19d
-    M2 Review 工具 POC               :m2, 2026-07-06, 12d
-    M3 首次端到端闭环                :crit, m3, 2026-07-20, 7d
-
-    section Harden platform
-    M4 Registry + Snapshot v0.1       :m4, 2026-07-27, 19d
-    M5 nnUNet Adapter 稳定化          :m5, 2026-08-10, 19d
-    M6 label_generation 离线回流       :m6, 2026-08-31, 19d
-
-    section Scale and acceptance
-    M7 扩量与多任务验证              :m7, 2026-09-21, 19d
-    M8 平台封装与操作文档            :m8, 2026-10-05, 19d
-    M9 验收、演示、冻结              :m9, 2026-10-26, 5d
+```text
+导入病例和标签
+-> 生成人工标注任务
+-> 保存或提交标注结果
+-> 创建训练数据快照
+-> 导出并运行 nnUNet
+-> 登记模型并独立评估
+-> 批量生成候选标签
+-> 候选标签进入下一轮复查或训练选择
 ```
 
-## 4. 里程碑计划
+必须具备：
 
-| 阶段 | 日期 | 目标 | 必须产出 | Check |
-| --- | --- | --- | --- | --- |
-| M0 | 2026-06-08 -> 2026-06-14 | 启动与阻塞项确认 | 3-5 个样例病例、Mimics 版本/许可证结论、训练服务器路径、第一版配置 | 没有样例病例或 Mimics 信息时，后续 POC 不启动 |
-| M1 | 2026-06-15 -> 2026-07-03 | 文件契约 dry run | 通用脚本、Case Package v0.1、preflight report、geometry report。期间并行完成 3D Slicer 最小验证 | 不依赖 Mimics，也能把病例包生成和校验跑通 |
-| M2 | 2026-07-06 -> 2026-07-17 | Review 工具 POC | Mimics 导入/导出记录，或兜底工具路径 | 2026-07-17 前如果 Mimics 仍不可控，切换兜底方案 |
-| M3 | 2026-07-20 -> 2026-07-26 | 首次端到端闭环 | 3-5 病例完成 `Case Package -> Review -> verified_label -> Snapshot -> nnUNet train/predict -> draft_label` | 这是第一个硬验收点，不能后移到 8 月 |
-| M4 | 2026-07-27 -> 2026-08-14 | Registry + Snapshot v0.1 | 最小 registry、snapshot manifest、label_policy 草案 | 任意训练结果可追溯到病例、标签、状态和任务 map |
-| M5 | 2026-08-10 -> 2026-08-28 | nnUNet Adapter 稳定化 | Snapshot -> nnUNet 导出脚本、训练记录、评估记录 | 不手工改训练目录也能复现一次训练 |
-| M6 | 2026-08-31 -> 2026-09-18 | label_generation 离线回流 | 批量推理入口、candidate package、QC routing | 模型输出能进入 `candidate_label -> draft_label / accepted_pseudo_label / rejected_label` |
-| M7 | 2026-09-21 -> 2026-10-09 | 扩量与多任务验证 | 更多病例、多任务快照、失败案例记录 | 至少 2 个训练任务完成同一套数据的不同 Snapshot |
-| M8 | 2026-10-05 -> 2026-10-23 | 平台封装与操作文档 | CLI 或脚本入口、运行手册、目录规范、错误处理说明 | 新人按文档能独立跑完一次流程 |
-| M9 | 2026-10-26 -> 2026-10-30 | 验收冻结 | demo 数据、验收报告、未解决问题清单 | 10 月 30 日前冻结 v1.0 离线流程 |
+1. 病例包可以重复生成和检查。
+2. Mimics 或备用工具可以完成人工修正。
+3. 保存进度、提交完成、提交复查和报告阻塞能够区分。
+4. 图像和标签空间不一致时能够阻止继续。
+5. 同一批数据可以按不同任务创建训练数据快照。
+6. 训练数据快照可以导出给现有 nnUNet 管线。
+7. 模型和正式评估结果可以追溯到数据、代码和配置。
+8. 模型输出作为候选标签回流，不会直接混入人工真值。
+9. 新开发者能够按文档独立完成一次流程。
 
-## 5. 首次闭环的硬定义
+首次闭环不能等到 10 月 30 日。最晚应在 **2026-07-24** 前用 3 至 5 个病例跑通，目标日期是 **2026-07-17**。
 
-首次闭环不是“脚本都写了”，而是下面 10 个检查全部通过：
+## 2. 暂不作为强制交付
 
-| # | 检查项 | 通过标准 |
-|:--:| --- | --- |
-| 1 | 样例病例 | 至少 3 个病例，最好 5 个；包含无标签、有草稿、部分标签、空间边界不同的情况 |
-| 2 | Case Package | 每个病例可生成包，manifest、image、label、config、reports、provenance 结构完整 |
-| 3 | package preflight | `check_case_package.py` 无 Error；Warning 必须写入报告 |
-| 4 | hash | 包级 hash 可生成，导回前后能识别文件变化 |
-| 5 | review 导入 | Mimics 或兜底工具能打开 CT 和逐器官 mask |
-| 6 | review 导出 | 修正后标签能导回 `verified_label.nii.gz` 或逐器官 masks |
-| 7 | 几何检查 | shape 必须一致；spacing/origin/direction/affine 不一致必须有修复或拒绝记录 |
-| 8 | Snapshot | 能冻结病例、标签状态、任务 label map 和训练配置 |
-| 9 | nnUNet 小训练 | 至少一个小任务完成数据转换、训练或快速训练、推理 |
-| 10 | 第二轮草稿 | 新模型预测能登记为 `candidate_label`，并生成下一轮 `draft_label` |
+以下能力可以在离线闭环稳定后再做：
 
-如果 2026-07-24 前第 9 或第 10 项无法完成，项目应判定为“流程未走通”，不能继续堆 UI 或更多 Adapter。
+- 完整 Web 界面。
+- 常驻流程调度服务。
+- 复杂任务队列。
+- 在线任务领取、锁定和多人仲裁。
+- 完整模型发布审批服务。
+- MONAI、SAM 或通用少样本工具适配器。
+- 自动主动学习策略。
 
-## 6. 分域实现步骤
+正式评估的数据独立性和患者泄漏检查不能延后。
 
-### 6.1 labeling 域
+## 3. 里程碑总览
 
-实现目标：能把病例交给人 review，再安全导回平台。
+本计划只使用 `M0` 至 `M9` 表示总体里程碑。Mimics 可行性验证文档中的 `P01` 等编号仅用于那份验证清单；不需要把两套编号对应起来。
 
-| 顺序 | 步骤 | 实现位置 | Check |
-|:--:| --- | --- | --- |
-| L1 | 补齐 `package_case.py` | `scripts/` | 输入 CT、可选标签和 config 后生成 Case Package |
-| L2 | 补齐 `split_multilabel_to_masks.py` | `scripts/` | 多标签 NIfTI 可拆为 `masks/{organ}.nii.gz` |
-| L3 | 补齐 `merge_masks_to_multilabel.py` | `scripts/` | 逐器官 mask 可按 `review_label_map.yaml` 合并 |
-| L4 | 补齐 `check_geometry.py` | `scripts/` | shape 不一致直接 Error；affine 类问题有 Warning/修复记录 |
-| L5 | Mimics 手动 POC | `adapters/mimics/` | 能人工导入、修正、导出至少一个病例 |
-| L6 | Mimics 脚本化 POC | `adapters/mimics/import_case_package.py` / `export_review_package.py` | 能减少重复 GUI 操作；若 API 受限，记录不能自动化的步骤 |
-| L7 | 标注员操作说明 | `adapters/mimics/README_for_annotators.md` | 标注员知道打开什么、改什么、保存什么、不能改什么 |
+本文件回答“何时达到什么结果”。具体代码包、命令、测试、工作量和前置依赖见[阶段 A 开发执行说明](development_execution_guide.md)。
 
-### 6.2 training 域
+| 里程碑 | 日期 | 目标 | 完成时必须看到的证据 |
+| --- | --- | --- | --- |
+| M0 | 2026-06-08 至 2026-06-14 | 准备资源和样例 | 3 至 5 个完成去标识检查的病例、Mimics 版本和许可情况、训练环境路径 |
+| M1 | 2026-06-15 至 2026-07-03 | 跑通与工具无关的文件流程 | 病例包、目标组、提交前检查、空间检查和示例报告可以运行 |
+| M2 | 2026-07-06 至 2026-07-17 | 验证人工标注工具 | Mimics 21.0 或备用工具完成打开、编辑、保存、重新打开和导出 |
+| M3 | 2026-07-06 至 2026-07-19 | 首次端到端闭环 | 3 至 5 个病例从标注任务走到小训练，再生成下一轮候选标签；未完成项只允许使用至 2026-07-24 的缓冲 |
+| M4 | 2026-07-27 至 2026-08-14 | 固化数据登记和训练快照 | 临时清单升级为统一格式和创建命令，M3 数据可以直接导入 |
+| M5 | 2026-08-10 至 2026-08-28 | 稳定 nnUNet 工具适配器 | 不手工整理训练目录，也能复现一次训练和独立评估 |
+| M6 | 2026-08-31 至 2026-09-18 | 稳定候选标签批量回流 | 批量运行支持逐病例成功、失败和重试 |
+| M7 | 2026-09-21 至 2026-10-09 | 扩大病例和任务范围 | 同一批数据至少服务两个训练任务，并记录失败案例 |
+| M8 | 2026-10-05 至 2026-10-23 | 收敛入口和操作文档 | 命令入口、运行手册、目录规则和错误说明完整 |
+| M9 | 2026-10-26 至 2026-10-30 | 验收和冻结 | 演示数据、验收报告、未解决问题清单和 v1.0 离线流程 |
 
-实现目标：不重写 nnUNet 核心，但让平台能稳定生成训练输入。
+部分日期重叠是有意的。例如 M5 可以在 M4 后半段开始，但 M5 的正式验收仍依赖可用的训练数据快照。
 
-| 顺序 | 步骤 | 实现位置 | Check |
-|:--:| --- | --- | --- |
-| T1 | 定义 Dataset Snapshot manifest | `docs/domains/training/` + 后续实现目录 | 包含病例、标签状态、task label map、split、hash |
-| T2 | 实现 Snapshot -> nnUNet 导出 | `adapters/nnunet/` | 生成现有 `pipelines/nnunet/` 可消费目录 |
-| T3 | 复用现有 nnUNet 五阶段 | `pipelines/nnunet/` | convert/preprocess/train/predict/evaluate 至少跑通一次 |
-| T4 | 记录 Model Record | 后续 registry 目录 | 模型能追溯到 Snapshot、任务、配置、指标 |
-| T5 | 多任务复用验证 | `adapters/nnunet/` | 同一病例可进入两个不同任务 Snapshot，label id 不冲突 |
+## 4. 首次闭环怎样算真正完成
 
-### 6.3 label_generation 域
+“脚本已经写完”不等于流程走通。下面十项必须全部通过：
 
-实现目标：把模型输出当作候选标签治理，而不是直接当真值。
+| 编号 | 检查项 | 通过标准 |
+| ---: | --- | --- |
+| 1 | 样例病例 | 至少 3 个，最好 5 个；覆盖无标签、有草稿、部分标签和空间边界不同的情况 |
+| 2 | 病例包 | 图像、目标组、配置、标签、来源和报告结构完整 |
+| 3 | 提交前检查 | `check_case_package.py` 没有错误；警告进入报告 |
+| 4 | 文件版本 | 图像、配置、基础标签和提交结果都有文件校验值 |
+| 5 | 人工标注工具 | Mimics 或备用工具能够打开图像和逐器官 mask |
+| 6 | 保存与提交 | 保存不创建正式标签；目标组可以独立完成、复查或阻塞 |
+| 7 | 空间检查 | 图像和标签的物理空间关系可以证明；解释不了的差异直接拒绝 |
+| 8 | 训练数据快照 | 固定病例、标签版本、任务编号、数据划分、准入结果及防泄漏分组依据/可信度；且 train/val/test 的 leakage group 互不相交 |
+| 9 | nnUNet 小训练 | 至少一个小任务完成导出、训练或快速训练以及推理 |
+| 10 | 第二轮候选标签 | 新模型预测登记为候选标签，并能进入下一轮人工草稿 |
 
-| 顺序 | 步骤 | 实现位置 | Check |
-|:--:| --- | --- | --- |
-| G1 | 定义 candidate package | `docs/domains/label_generation/` | 包含来源模型、输入图像、预测标签、QC 报告 |
-| G2 | 批量推理入口 | `adapters/label_generation/` | 可对病例列表生成 `candidate_label` |
-| G3 | QC routing | `adapters/label_generation/` | 输出进入 `draft_label`、`accepted_pseudo_label` 或 `rejected_label` |
-| G4 | 第二轮 Case Package | `scripts/` + `adapters/label_generation/` | candidate 可转成下一轮 review 的 draft |
-| G5 | policy 记录 | 后续 registry 目录 | `allow_status`、`trusted_sources` 不丢失 |
+如果 2026-07-24 前第 9 或第 10 项仍未完成，应明确判定“首次闭环未完成”。此时不增加 Web 界面或更多工具适配器。
 
-## 7. 每周检查节奏
+## 5. 每个里程碑怎样实施
 
-每周五做一次 30-60 分钟检查，不讨论新想法，先检查交付物。
+### M0：准备样例和环境
 
-| 检查问题 | 判断 |
-| --- | --- |
-| 本周有没有新增可运行命令？ | 没有则说明进度可能停在文档或讨论 |
-| 有没有新增可以复现的输入和输出样例？ | 没有样例就无法判断流程是否真实 |
-| 有没有新的 Error/Warning 报告？ | 没有报告通常意味着还没跑到失败边界 |
-| 本周是否推进了首次闭环 10 项检查？ | 不推进闭环的工作要谨慎 |
-| 是否出现 Mimics、服务器、数据权限阻塞？ | 阻塞超过一周必须降级或替代 |
+实施步骤：
 
-每两周做一次里程碑检查：
+1. 选择 3 至 5 个小病例。
+2. 完成去标识检查，生成当前最佳防泄漏分组，并记录分组依据和可信度。
+3. 确认病例包含哪些序列和已有标签。
+4. 记录 Mimics Research 21.0 的版本、edition、许可和 Python scripting 权限。
+5. 确认训练服务器或临时 GPU 环境。
 
-1. 对照第 4 节里程碑表。
-2. 更新完成、延迟、阻塞。
-3. 给出下一阶段是否继续、降级或砍范围。
+完成检查：
 
-## 8. 风险和降级策略
+- 未通过去标识检查的数据没有进入共享工作区。
+- 至少一个病例可以供脚本开发使用。
+- Mimics 或备用工具的实际安装环境可访问。
 
-| 风险 | 截止判断日期 | 降级策略 |
+### M1：完成通用文件工具
+
+优先实现与标注软件无关的脚本：
+
+- 扫描 DICOM、NIfTI、MHD+RAW 和 RAW+sidecar 来源。
+- 生成 Case 和 Image Artifact 的最小文件记录。
+- 区分完整、部分和仅索引空间的几何信息。
+- 生成病例包。
+- 拆分多标签文件为逐器官 mask。
+- 合并逐器官 mask。
+- 检查图像与标签空间。
+- 生成清晰的问题报告。
+
+当前已经存在：
+
+- `scripts/check_case_package.py`
+- `scripts/hash_package.py`
+
+完成检查：
+
+- 多患者、多检查和多序列来源不会被错误合并。
+- 元数据缺失会形成明确限制，不会被填入假值。
+- 不打开 Mimics，也能完整生成和检查病例包。
+- 错误病例会给出可读报告，而不是只抛出 Python 堆栈。
+
+### M2：验证 Mimics 或备用工具
+
+执行依据是 [Mimics 适配器设计与开发流程](../domains/labeling/mimics_adapter_design.md) 和 [Mimics POC 计划](../domains/labeling/mimics_poc_plan.md)。先开发诊断和能力探针；它们是验证工具，不是生产标注入口。
+
+验证顺序：
+
+1. DICOM 多序列能否正确分组。
+2. 每个标注目标能否绑定正确图像集。
+3. 能否导入初始 mask。
+4. 能否修改并保存 `.mcs`。
+5. 能否关闭后重新打开继续工作。
+6. 能否导出单个 mask 和完整目标组。
+7. 导出后空间关系是否保持正确。
+8. 脚本路径和参数能否从命令行或清单传入。
+
+Gate A 通过后才实现生产用 `prepare/open/submit/finalize`。外部现代 Python 与 Mimics Python 3.5.2 始终隔离；只有初始标签或提交结果需要格式转换时，才启用逐器官布尔缓冲区桥接。
+
+完成检查：
+
+- 标注者不需要手工修改路径、标签编号或空间信息。
+- 无法保持空间关系时，立即切换导出方式或备用工具。
+
+### M3：跑通最薄的纵向闭环
+
+这一步允许使用手写或单用途脚本生成的清单，只要字段符合当前设计。
+
+完整顺序：
+
+```text
+病例包
+-> 人工保存或提交目标组
+-> 提交检查
+-> 人工确认标签
+-> 最小训练数据快照
+-> nnUNet 小训练和推理
+-> 最小模型记录
+-> 候选标签生成批次
+-> 下一轮人工草稿
+```
+
+M3 不等待完整数据库、批量框架或 Web 界面。
+
+为避免被 Mimics 本机验证阻塞，首次闭环默认使用 NIfTI 原生工具（ITK-SNAP 或 3D Slicer）完成人工修正；Mimics 验证（M2）并行进行，不作为 M3 的前置门。Mimics 往返验证通过后，再切换为主要标注工具。
+
+### M4：把临时清单固化为通用数据结构
+
+实施步骤：
+
+1. 把 M1/M3 的最小文件记录固化为统一的病例、图像、标签和质量报告格式。
+2. 实现训练数据快照创建命令，并在创建时校验 train/val/test 的防泄漏分组互不相交（最小但必做的泄漏检查，不推迟到 M5）。
+3. 实现统一格式校验。
+4. 让 M3 临时清单能够直接导入。
+5. 记录标签版本和反向影响关系，并提供可从权威清单重建的反查索引（“问题标签 → 受影响快照和模型”）。
+
+完成检查：
+
+- 不另起一套与 M3 不兼容的格式。
+- 新标签不会改变旧训练数据快照。
+- 同一病例可以被不同任务选择。
+- 训练数据快照创建时会拒绝 train/test 患者重叠。
+- 防泄漏分组可信度为 `low` 的病例不会进入宣称患者独立的正式验证或测试。
+
+### M5：稳定 nnUNet 工具适配器
+
+实施步骤：
+
+1. 从训练数据快照选择图像和标签。
+2. 检查患者划分、缺失标签和空类别。
+3. 生成任务整数标签。
+4. 生成真实的 `dataset.json`。
+5. 调用现有 nnUNet 预处理、训练和预测。
+6. 创建模型记录。
+7. 在独立评估集上创建评估记录。
+
+完成检查：
+
+- 不手工整理 `imagesTr` 和 `labelsTr`。
+- 相同快照和配置可以重新导出。
+- 正式评估通过患者和标签来源泄漏检查。
+
+### M6：稳定候选标签批量回流
+
+实施步骤：
+
+1. 创建候选标签生成批次。
+2. 对病例列表逐项推理。
+3. 每个病例独立记录成功、失败或跳过。
+4. 成功结果登记为候选标签。
+5. 失败病例可以单独重试。
+6. 按质量证据送人工复查、保留候选或拒绝。
+
+完成检查：
+
+- 一个病例失败不会丢弃整批成功结果。
+- 重跑不会覆盖已成功标签。
+- 候选标签保持真实来源。
+
+### M7：扩大数据和任务范围
+
+至少验证：
+
+- 更多病例和异常数据。
+- 两个不同训练任务复用同一批图像。
+- 多个局部模型组成系统时的全局评估留出集。
+- 多位标注者处理不同目标组。
+- 标签被修正或拒绝后的影响查询。
+
+### M8：收敛使用入口
+
+交付：
+
+- 一套稳定平台命令和 Mimics 内语义化 `Labeling_*.py` 标注入口。
+- 从零开始的运行手册。
+- 可复制的示例数据和配置。
+- 常见错误与处理方式。
+- 目录和文件命名规则。
+
+完成检查：
+
+- 一位没有参与开发的人能够按文档完成一次流程。
+
+### M9：验收和冻结
+
+验收输出：
+
+- 可重复运行的演示。
+- 验收报告。
+- 已知限制。
+- 未解决问题和后续范围。
+- v1.0 离线流程版本标记。
+
+## 6. 分域开发清单
+
+### 人工标注与复查
+
+- 生成病例包。
+- 拆分和合并 mask。
+- 检查图像与标签空间。
+- 保存、提交、复查和阻塞状态。
+- 基础标签版本检查。
+- Mimics 或备用工具最小导入导出。
+- Mimics 工作站诊断、能力探针和 Gate A/B/C 结论。
+- 标注者操作说明。
+
+### 模型训练
+
+- 定义并创建训练数据快照。
+- 实现快照到 nnUNet 目录的导出。
+- 复用现有 nnUNet 五个步骤。
+- 创建模型记录。
+- 创建独立评估记录。
+- 验证同一数据服务多个任务。
+
+### 候选标签生成
+
+- 定义候选标签生成批次。
+- 实现病例列表批量推理。
+- 保存逐病例错误和重试。
+- 生成质量报告。
+- 把候选标签转成人工草稿。
+- 让训练数据快照按规则选择候选标签。
+
+## 7. 每周检查
+
+每周五用 30 至 60 分钟检查实际产物：
+
+1. 本周是否新增了可以运行的命令？
+2. 是否新增了可复现的输入和输出样例？
+3. 是否遇到并记录了新的错误或警告？
+4. 首次闭环十项检查推进了哪几项？
+5. Mimics、数据权限或训练环境是否阻塞超过一周？
+
+每两周对照里程碑表更新：
+
+- 已完成。
+- 延迟。
+- 阻塞。
+- 下一阶段继续、降级或缩小范围的决定。
+
+## 8. 主要风险和降级方案
+
+| 风险 | 最晚判断时间 | 降级方案 |
 | --- | --- | --- |
-| Mimics 许可证或脚本能力无法确认 | 2026-07-17 | 切换 3D Slicer / ITK-SNAP 作为 review 兜底工具 |
-| Mimics 导出 shape 不一致 | 第一次导出当天 | 不修复，直接判定导出方式不可用，换导出路径或工具 |
-| affine/spacing/origin 不一致 | 第一次导出当天 | shape 一致时尝试复制图像几何头并抽检；否则拒绝 |
-| 训练服务器不可用 | 2026-07-10 | 用小病例和本地/临时 GPU 跑最小训练；服务器后补 |
-| 样例病例迟迟不到位 | 2026-06-14 | 用公开或历史小样例先验证脚本结构，但不得替代真实验收 |
-| 任务范围过大导致闭环延迟 | 2026-07-05 | 首次闭环只选一个小任务，不等待 v500 全范围 |
-| 文档继续变但代码不动 | 任意周五检查 | 下周目标必须绑定一个可运行命令或样例输出 |
+| Mimics 许可或脚本能力无法确认 | 2026-07-17 | 切换 3D Slicer 或 ITK-SNAP 完成第一阶段复查 |
+| Mimics 导出数组大小变化 | 第一次导出当天 | 判定该导出路径不可用，不用复制头信息掩盖 |
+| 图像与标签空间无法解释 | 第一次导出当天 | 能证明时明确重采样；不能证明时拒绝 |
+| 训练服务器不可用 | 2026-07-10 | 用小病例和临时 GPU 跑最小训练 |
+| 真实样例病例延迟 | 2026-06-14 | 先用公开或历史小样例开发脚本，但不替代真实验收 |
+| 去标识状态无法证明 | 第一次生成病例包前 | 数据保留在受控原始区，先补检查报告 |
+| 任务范围太大拖慢闭环 | 2026-07-05 | 首次闭环只选一个小训练任务 |
+| 文档持续变化但代码没有进展 | 任意周五 | 下一周目标必须绑定可运行命令或样例输出 |
 
-## 9. 最小运行命令清单
+## 9. 计划中的命令入口
 
-下面不是最终命令格式，而是 10 月 30 日前平台应具备的操作能力（标注了对应的里程碑阶段）：
+下面是目标操作形式。除已注明存在的脚本外，其余仍待实现。
 
 ```bash
-# M1: 1. 生成病例包
-python scripts/package_case.py --image case_001.nii.gz --label draft.nii.gz --out packages/case_001
-
-# M1: 2. 预检查
+# 已存在：检查病例包
 python scripts/check_case_package.py packages/case_001
-python scripts/check_geometry.py packages/case_001/images/image.nii.gz packages/case_001/labels/draft_label.nii.gz
 
-# M1: 3. 拆分和合并
-python scripts/split_multilabel_to_masks.py --label draft_label.nii.gz --map review_label_map.yaml --out masks/
-python scripts/merge_masks_to_multilabel.py --masks masks/ --map review_label_map.yaml --out verified_label.nii.gz
+# 已实现阶段 A DICOM 扫描、请求生成和批量病例包创建
+sp ingest scan /data/source --output reports/source_scan.json
+sp ingest plan /data/source package_requests/ --organs-file target_organs.txt --import-batch batch_001 --workers 8
+sp package create-many package_requests/ dataset_package/ --registry registry/
 
-# M4-M5: 4. 生成训练快照（M4+）
-python scripts/create_dataset_snapshot.py --task CT5_Liver --cases registry/cases.json --out snapshots/CT5_Liver_001
+# 已实现：重建文件式 Registry 标签索引
+sp registry rebuild-index registry/
 
-# M5: 5. 导出 nnUNet 数据（M5）
-python adapters/nnunet/export_snapshot.py --snapshot snapshots/CT5_Liver_001 --out nnunet_raw/DatasetXXX
+# 待实现：检查空间关系
+sp validate geometry \
+  --image img_ct \
+  --label lbl_draft_001
 
-# M3-M5: 6. 训练和推理（M3 手动复现现有管线，M5 适配器化）
-python pipelines/nnunet/<existing_entry>.py --config Config_CT_v500.toml --task CT5_Liver
+# 待实现：创建训练数据快照
+sp snapshot create snapshot_request.yaml
 
-# M6: 7. 候选标签回流（M6）
-python adapters/label_generation/run_batch_inference.py --model models/model_001 --cases cases_to_predict.txt --out candidates/
-python adapters/label_generation/route_candidates.py --candidates candidates/ --policy label_policy.yaml --out review_queue/
+# 待实现：导出 nnUNet 数据
+sp nnunet export snap_CT5_Liver_001 --output nnunet_raw/DatasetXXX
+
+# 待实现：批量生成候选标签
+sp generate run generation_job.yaml
 ```
 
-如果一个命令暂时做不到，也要在对应阶段产出等价的手动步骤和记录文件。
+某个统一命令尚未实现时，可以用等价的手动步骤完成里程碑，但必须保存同样的输入、输出和运行记录。
 
-## 10. 10 月 30 日验收清单
+## 10. 10 月 30 日验收
 
-| # | 验收项 | 通过标准 |
-|:--:| --- | --- |
-| 1 | 端到端流程 | 至少一次完整闭环可从零复现 |
-| 2 | 数据可追溯 | 任意训练标签能追溯来源、状态、hash、QC |
-| 3 | 任务可复用 | 同一病例可进入至少两个任务 Snapshot |
-| 4 | 模型可追溯 | 任意模型能追溯 Dataset Snapshot、训练配置和评估结果 |
-| 5 | 候选标签可治理 | 模型输出不会直接混成真值，必须有状态和 policy |
-| 6 | Review 工具有兜底 | Mimics 不可用时仍有可操作替代路径 |
-| 7 | 新人可运行 | 按文档和样例命令能完成一次流程 |
-| 8 | 风险清单明确 | 未完成项、技术债和后续范围清楚记录 |
-
-## 11. 与近期 Backlog 的关系
-
-`implementation_backlog.md` 继续作为近期任务清单使用，主要服务 M0-M3。本文负责从 2026-06-08 到 2026-10-30 的总体节奏、阶段验收和降级策略。
-
-当两者冲突时：
-
-1. 架构边界以 `platform_blueprint.md` 为准。
-2. 日期和里程碑以本文为准。
-3. 具体脚本任务以 `implementation_backlog.md` 为准，但不能突破本文的硬验收点。
+| 验收项 | 通过标准 |
+| --- | --- |
+| 端到端流程 | 至少一次完整闭环可以从零复现 |
+| 数据可追溯 | 任意训练标签都能查到来源、版本、文件校验值和质量报告 |
+| 任务可复用 | 同一病例能进入至少两个不同任务的训练数据快照 |
+| 模型可追溯 | 任意模型都能查到训练数据快照、代码、配置、权重和评估记录 |
+| 候选标签可治理 | 模型输出不会直接混成人工真值 |
+| 人工工具有备用路径 | Mimics 不可用时仍能完成复查 |
+| 新开发者可运行 | 按文档和样例命令可以完成一次流程 |
+| 正式指标可信 | 评估集与训练患者、模型伪标签来源相互独立 |
+| 风险透明 | 未完成项、技术债和后续范围有明确记录 |

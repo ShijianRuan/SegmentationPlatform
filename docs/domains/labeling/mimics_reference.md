@@ -1,200 +1,391 @@
-# Mimics Research 21.0 开发者参考
+# Mimics Research 21.0 技术参考
 
-> 日期：2026-06-11
-> 来源：软件自带 Scripting Guide (Help → Scripting Guide)、API 文档、教程脚本、IFU (L-10790-02)
-> 用途：POC 验证和 Mimics Adapter 开发
+> 版本：v0.4
+> 更新日期：2026-06-13
+> 用途：为 Mimics 适配器设计和本机验证提供事实依据
 
-## 1. 关键事实
+本文区分三类信息：
 
-### 1.1 Python 环境
+- **已确认**：Mimics 21.0 官方资料中有明确依据；
+- **未确认**：资料不足，必须在当前安装环境中验证；
+- **设计结论**：平台根据已确认事实采用的边界，不是 Mimics 自带功能。
 
-- **Python 3.5.2** — Mimics 安装向导自动安装到 `C:\Program Files\Common Files\Materialise\Python\3.5.2`
-- 可在 File → Preferences → Scripting 中切换为外部 Python 3.5（如 Anaconda）
-- 通过 `pip install numpy` 等安装额外库
-- `mimics` 模块随 Mimics 安装，在 Mimics 内执行脚本时自动可用，不需显式 `import mimics`
+不要用新版 Mimics 的能力反推 21.0。
 
-### 1.2 命令行背景模式
+## 1. 资料优先级
 
-```bash
-MimicsResearch.exe -b -run_script "C:\path\to\script.py" [args]
+1. 仓库内的 [Mimics 21.0 API 文档](../../references/mimics/api_21/Mimics_API_Documentation_CN.md)。
+2. 当前安装环境的 Scripting Guide、edition、license 和实际运行结果。
+3. Materialise 官方其他版本资料，只用于识别版本变化。
+4. 社区讨论，只用于发现可能需要验证的风险。
+
+## 2. Python 和脚本入口
+
+### 2.1 已确认事实
+
+- Mimics 21 安装流程使用 Python 3.5.2。
+- Preferences 可以指向其他兼容的 Python 3.5 环境。
+- 兼容 Python 3.5 的第三方包可以通过 `pip` 安装。
+- Python 3.5 已于 2020 年 9 月 30 日停止维护。
+
+经过版本元数据核对，可用于 Python 3.5 的较新版本大致为：
+
+| 库 | 可用边界 | 对平台的含义 |
+|---|---|---|
+| nibabel | 3.0.2 仍支持 Python 3.5.1；3.1.0 起要求 Python 3.6 | 只能锁定旧版 |
+| NumPy | 1.18.5 有 CPython 3.5 Windows wheel；1.19.5 要求 Python 3.6 | 可用于薄交换脚本 |
+| SimpleITK | 2.0.2 有 CPython 3.5 Windows wheel；2.1.1 不再提供 | 仍属于冻结旧栈 |
+
+这些事实说明旧库“可以安装”，不说明它们适合作为平台主运行时。
+
+### 2.2 命令行参数
+
+官方命令行形式包括：
+
+```text
+<mimics_executable> [-help] [-background_mode] [-kill]
+                    [-save_log <filename.txt>]
+                    [-run_script <script_name.py [args]>]
 ```
 
-`-b` = background mode（无 GUI），`-k` = 完成后退出，`-save_log` = 保存日志。脚本参数通过 `sys.argv[n]` 获取。
-
-### 1.3 支持的图像导入格式
-
-来自官方 IFU (L-10790-02)："Dicom 3.0 format, BMP, TIFF, JPG and raw images" — **不含 NIfTI**。
-
-### 1.4 脚本 API 的图像导入链路
-
-```
-test_images(filenames)          → 识别格式，生成 ImageFile 对象
-    ↓
-configure_dicom_images()        → DICOM → ConfiguredImageFile
-configure_standard_images()     → BMP/TIFF/JPEG → ConfiguredImageFile
-    ↓
-split_images_into_studies()     → 按 Study 分组
-    ↓
-load_series_into_memory()       → 加载像素数据
-    ↓
-open_images_as_project()        → 在 Mimics 中打开
-
-便捷封装：
-import_dicom_images(folder)     — 一步完成 DICOM 导入
-import_standard_images(folder, xy_res, z_res) — 一步完成标准图像导入
-```
-
-## 2. Mask API（最常用）
+脚本可以通过 `sys.argv` 读取任务清单、输入目录和输出目录，因此路径不需要写死。
 
 ```python
-# 创建
+import sys
+
+manifest_path = sys.argv[1]
+output_dir = sys.argv[2]
+```
+
+脚本既可以处理一个病例，也可以循环处理多个病例。是否批量运行由脚本决定，不受 Mimics 固定限制。
+
+`-background_mode` 适合无人参与的导入、转换、导出和检查，不适合人工编辑。Scripting Library 可以把脚本暴露为 Mimics 内的一键动作。
+
+官方示例使用 Medical 版可执行文件，并说明 Research 版采用相应 Research 可执行文件。实际文件名和安装路径必须由工作站配置或 `-help` 实测获得，平台代码不能硬编码。
+
+### 2.3 设计结论
+
+Mimics Python 只负责：
+
+- 调用 Mimics API；
+- 选择 image set；
+- 创建、读取和写入 Mask；
+- 显示必要提示；
+- 保存项目和输出运行日志。
+
+外部受维护的 Python 负责：
+
+- NIfTI、MetaImage 等文件读写；
+- 重采样和空间变换；
+- 哈希、结构校验和质量检查；
+- 平台数据登记。
+
+外部 Python 不能被默认视为 Mimics 内部解释器。若需要联动，采用启动器、文件交换或经过验证的官方 listener 机制。
+
+## 3. DICOM 导入
+
+### 3.1 已确认的底层步骤
+
+官方 API 暴露了下面的处理链：
+
+```text
+test_images(...)
+  -> configure_dicom_images(...)
+  -> split_images_into_studies(...)
+  -> load_series_into_memory(...)
+  -> open_images_as_project(...) / add_images_to_project(...)
+```
+
+也有较简单的入口，例如：
+
+- `import_dicom_images(folder)`；
+- `convert_dicom_images_to_mcs(source, target)`。
+
+`split_images_into_studies()` 会使用患者、Study、Series Description、phase、protocol 和 image center 等信息组织数据。官方教程允许输入目录包含一个或多个检查。
+
+### 3.2 多患者、多检查和多序列
+
+已确认：
+
+- 一个 DICOM 序列通常成为一个 `ImageData`，也可称为一个 image set；
+- 一个 Mimics 项目可以包含多个 image sets；
+- `mimics.data.images.get_active()` 返回当前活动的 image set；
+- `add_images_to_project()` 可以加入更多 image sets；
+- Mask 等对象与具体 image set 关联。
+
+平台设计不要求人为规定“主序列”和“参考序列”。多个序列可以是平等输入，也可以各自承担不同标注目标。
+
+平台不能把 Mimics 自动分组当作病例登记的唯一依据。平台应先保存预期的患者、检查和序列清单；导入后再把实际 image sets 与清单逐项核对。
+
+脚本在处理每个任务目标前必须显式激活对应 image set，不能依赖用户最后点击的图像。
+
+## 4. 图像格式
+
+### 4.1 已确认支持
+
+21.0 的 IFU 和 API 可以确认：
+
+- DICOM 3.0；
+- BMP；
+- TIFF；
+- JPEG；
+- `test_images(..., force_raw_import=True)` 形式的 raw import 入口。
+
+`import_standard_images()` 明确面向 BMP、TIFF 和 JPEG，脚本参数只暴露 `xy_resolution`、`z_resolution`、单位、患者名和机构名。API 文档没有给出完整的 RAW header 参数契约（例如维度、数据类型、字节序、origin、direction），因此 RAW 只能作为待验证路径，不能直接进入默认设计。
+
+### 4.2 未确认支持
+
+当前 21.0 资料没有证明可以直接导入：
+
+- NIfTI（`.nii`、`.nii.gz`）；
+- MetaImage（`.mhd`、`.mha`）。
+
+若当前安装界面或 edition 提供相关功能，必须记录菜单、API、版本、模块和空间验证结果，不能只记录“文件能打开”。
+
+### 4.3 图像数组写入限制
+
+已确认 `ImageData.get_voxel_buffer()` 可以读取图像体素。当前资料没有找到可用于任意创建图像体数据的 `ImageData.set_voxel_buffer()`。
+
+因此：
+
+- “外部读取 NIfTI 后直接写成新的 Mimics 图像”不是已成立能力；
+- 第三方库可以在外部 Python 中读取 NIfTI/MHD，但读出的数组不能直接注入为 Mimics `ImageData`；
+- 只有 NIfTI 或 MetaImage 图像时，必须先生成 Mimics 已支持的导入表示；
+- 无法可靠恢复方向和坐标时，应改用原生支持该格式的工具。
+
+### 4.4 NIfTI/MHD 进入 Mimics 的最佳实践
+
+推荐顺序：
+
+1. **外部现代 Python 读取来源**：NIfTI 用 nibabel，MHD/MHA 用 SimpleITK。读取并记录 shape、spacing、origin、direction、像素类型和 hash。
+2. **优先派生 DICOM Series**：把体数据转换为最小、去标识、单 SeriesUID 的 DICOM 切片。这样 Mimics 走已验证的 `import_dicom_images()`，并保留更完整的医学空间语义。当前平台实现已经在病例包创建阶段为 Mimics review 自动生成 `images/{image_id}/dicom/`。
+3. **备选标准图像导入**：若不生成 DICOM，可派生 BMP/TIFF 切片，再通过 `test_images()`、`configure_standard_images()`、`open_images_as_project()` 或 `import_standard_images()` 导入。该路径只能显式提供 xy/z resolution，并必须单独验证方向和灰度值。
+4. **RAW 路径单独 POC**：API 有 `force_raw_import=True` 入口，但当前文档没有完整 RAW header 参数说明。只有在实机证明维度、像素类型、字节序、spacing、方向和 Mask 往返都可自动化后，RAW 才能作为优化路径。
+5. **保存 `.mcs` 作为工作区**：导入成功后保存任务专属 `.mcs`。`.mcs` 是 Mimics 工作检查点，不是平台长期标签格式。
+6. **做 P03 级验证**：记录导入后的 image set 数量、logical dimensions、spacing/origin/direction 可观察信息、角点灰度值和人工方向标记。验证通过前，不能批量交给标注者。
+
+因此，转换成 DICOM 不是唯一选择，但“某种受控中间表示”是必要的。直接依赖 Mimics 内 Python 3.5 安装 nibabel/SimpleITK 并写入 `ImageData` 不是推荐路径：依赖老、难部署，而且缺少图像体素写入 API。Mimics 内 Python 应只负责调用 Mimics API 导入已准备好的文件、创建/读取 Mask、保存 `.mcs` 和显示少量对话框。平台记录原始 `image_path` 的哈希和派生 `dicom_sha256`，避免把工具工作格式误认为原始数据。
+
+### 4.5 为什么 RAW/MHD 不是默认主路径
+
+RAW 支持要理解为“API 存在强制 raw import 的入口”，不等于“已有完整、可复现、可无人值守的医学体数据导入契约”。Mimics 21 API 暴露的标准图像导入参数主要是 `xy_resolution` 和 `z_resolution`；资料没有证明 RAW 路径可以稳定写入并恢复 NIfTI/MHD 中的完整 `origin`、`direction`、坐标系和每层位置，也没有在当前文档中说明如何脚本化提供 RAW 的维度、数据类型和字节序。
+
+MHD/MHA 确实通常用 `.mhd + .raw` 表示体数据，但 `.raw` 本身只是裸字节。关键空间信息在 `.mhd` header 中，例如尺寸、spacing、TransformMatrix、Offset 和 ElementDataFile。若 Mimics 只按 RAW 字节和手工 spacing 导入，就等于绕过了 header 中最关键的空间约束。平台可以用 SimpleITK 读取 MHD，然后写 RAW；但这并不能自动证明 Mimics 里的 image set 与平台 Image Artifact 仍处于同一物理空间。
+
+因此当前默认选择派生 DICOM，不是因为 RAW 不可行，而是因为 DICOM 可以把下面信息放进 Mimics 已验证的主导入链：
+
+- `ImageOrientationPatient`；
+- `ImagePositionPatient`；
+- `PixelSpacing` 和 `SpacingBetweenSlices`；
+- `SeriesInstanceUID` / `StudyInstanceUID`；
+- `Modality`、RescaleSlope/Intercept 等显示和灰度相关信息。
+
+RAW 路径可以作为后续优化，但进入主流程前必须满足更窄条件：
+
+- 图像是规则三维体，非剪切、非斜切；
+- RAW 的维度、像素类型、字节序和 slice 顺序可以由脚本唯一确定并传入 Mimics；
+- 方向可由 Mimics 的方向对话框或 API 预答唯一确定；
+- 导入后 P03/P05 证明角点坐标、轴顺序、翻转和 Mask 往返完全一致；
+- 文档明确该 RAW 是 Mimics 工作格式，不是原始数据替代品。
+
+DICOM 的代价也是真实存在的：代码要维护派生 DICOM 写入逻辑；存储上比 `.nii.gz` 更大，通常接近未压缩体素大小再加每层 DICOM header。阶段 A 接受这个代价，是为了优先降低静默错位风险。大规模运行时可优化为“按分配病例生成派生 DICOM”“派生 DICOM 放入可重建缓存”“`.mcs` 验证生成后按策略清理派生 DICOM”，但这些优化不能牺牲空间可验证性。
+
+## 5. 空间坐标
+
+常用 API 包括：
+
+```python
+image = mimics.data.images.get_active()
+buffer = image.get_voxel_buffer()
+tags = image.get_dicom_tags()
+info = image.get_image_information()
+
+world = image.get_voxel_center((0, 0, 0))
+index = image.get_voxel_indexes(world)
+```
+
+### 5.1 为什么 shape 不够
+
+两个数组 shape 相同，仍可能存在：
+
+- 轴顺序不同；
+- 某个轴方向相反；
+- origin 不同；
+- spacing 不同；
+- 患者坐标系不同。
+
+因此不能通过复制 NIfTI header 或 affine 来“修复”未经证明的对齐。
+
+### 5.2 推荐验证方法
+
+读取以下索引点的世界坐标：
+
+- `(0, 0, 0)`；
+- `(1, 0, 0)`；
+- `(0, 1, 0)`；
+- `(0, 0, 1)`。
+
+这些点可以确定索引轴在世界坐标中的方向和步长。再使用一个带不对称标记的人工体模检查轴交换、翻转和偏移。
+
+官方资料只证明 Mask buffer 是三维 memory view，没有充分依据把它固定写成 `(Z, Y, X)`。实际轴顺序必须通过上述测试确定。
+
+当前桥接只表达三维索引轴的排列和翻转，不执行任意角度旋转、剪切、重采样或非线性变换。
+平台只接受规则、正交、等间距的 DICOM 体素网格；检测到 gantry tilt、sheared slice grid
+或 P05 无法得到唯一排列/翻转时会阻断，而不是近似转换。
+
+发生重采样时：
+
+- 图像可根据用途选择合适插值；
+- 标签只使用最近邻插值；
+- 平台创建新的文件版本和哈希；
+- 保存输入、输出和变换记录。
+
+## 6. Mask 对象
+
+### 6.1 已确认能力
+
+```python
 mask = mimics.segment.create_mask()
 mask.name = "liver"
+mask.color = (1.0, 0.4, 0.2)
 
-# 阈值分割
-mask.threshold_low = 0
-mask.threshold_high = 1
-mimics.segment.threshold(mask=mask, threshold_min=226, threshold_max=3071)
-
-# 读写体素 — 这是 NIfTI 互操作的关键
-vp = mask.get_voxel_buffer()    # → memoryview of bool，形状 = (Z, Y, X)
-mask.set_voxel_buffer(vp)       # ← memoryview of bool，形状必须一致
-
-# 遍历/查找
-mask = mimics.data.masks[0]            # 第一个 mask
-mask = mimics.data.masks.find("liver") # 按名称查找，无匹配返回 None
-
-# 容器操作
-mimics.data.masks.duplicate(mask)
-mimics.data.masks.delete(mask)
-for m in mimics.data.masks:           # 遍历所有 mask
-    print(m.name)
+pixels = mask.get_voxel_buffer()
+mask.set_voxel_buffer(pixels)
 ```
 
-### 2.1 Mask 体素坐标系
+Mask 具有名称、颜色、关联图像、metadata、选中状态和可见状态等字段，也可以遍历、查找、复制和删除。
 
-`get_voxel_buffer()` 返回三维 memoryview，索引为 `[Z, Y, X]`。API 示例证实了这一布局：
+`set_voxel_buffer()` 可用于注入初始标签，但数组必须与目标 image set 的索引网格完全一致。
 
-```python
-vp = mask.get_voxel_buffer()
-vp[i, i, i] = True          # 画主对角线
-click = image3d.get_voxel_indexes(click)   # 世界坐标 → 体素索引
-vb[click[0], click[1], click[2]] = True    # [Z, Y, X]
-```
+### 6.2 平台推荐表示
 
-### 2.2 灰度值单位
+在 Mimics 内，一个器官使用一个 Mask，原因是：
 
-Mimics Python API 始终使用 **gray values (GV)**，不是 Hounsfield units (HU)。转换方式：
-```python
-low_gv = mimics.segment.HU2GV(low_hu)
-high_gv = mimics.segment.HU2GV(high_hu)
-```
+- 可以独立显示和隐藏；
+- 可以逐器官编辑；
+- 可以选择性导出；
+- 名称可以直接使用平台统一器官名；
+- metadata 可以保存任务、器官和来源标签标识。
 
-## 3. ImageData API（CT 图像）
+“逐器官 Mask”是 Mimics 工作表示。平台长期存储仍可同时支持逐器官文件和多标签文件。
 
-```python
-img = mimics.data.images.get_active()       # 当前活动图像
-img = mimics.data.images[0]                 # 第一个图像集
-voxels = img.get_voxel_buffer()             # 16-bit 灰度 3D 数组
-tags = img.get_dicom_tags()                 # DICOM 标签字典
-info = img.get_image_information()          # ImageInformation 对象
+## 7. 初始标签导入
 
-# 几何属性
-img.logical_dimensions      # 体素维度 (Z, Y, X)
-img.physical_dimensions     # 物理尺寸
-img.pixel_size              # 面内像素大小
-img.logical_slice_distance  # 层间距
+图像导入与标签导入不是同一条链路：
 
-# 坐标转换
-idx = img.get_voxel_indexes(world_coord)    # 世界坐标 (mm) → 体素索引
-gv = img.get_grey_value(world_coord)        # 某点的灰度值
-```
+- 图像导入要创建 image set；
+- 标签导入要把 Mask 绑定到已有 image set。
 
-## 4. 文件/项目操作
+推荐顺序：
 
-```python
-# 项目
-mimics.file.open_project("path.mcs")
-mimics.file.save_project()
-mimics.file.close_project()
+1. 先验证当前安装是否能直接导入标签并保持空间位置和名称；
+2. 直接路径不足时，外部程序读取标签并重采样到目标网格；
+3. 外部程序写出数组、哈希、shape、轴说明和 image set 标识；
+4. Mimics 脚本创建 Mask 并调用 `set_voxel_buffer()`；
+5. 使用人工体模和真实病例复核。
 
-# DICOM 导入导出
-mimics.file.import_dicom_images(source_folder="C:\\DICOM\\")
-mimics.file.export_dicom(path="C:\\output\\", filename_prefix="case001_")
+## 8. 标签导出
 
-# Part/STL 导出
-mimics.segment.calculate_part(mask=mask, quality="High")
-mimics.file.export_part(object_to_convert=part, file_name="output.stl")
+`mimics.file.export_dicom()` 用于导出活动图像切片，并可带可见 Mask 的轮廓。它不是平台标签文件的通用导出接口。
 
-# 项目合并
-mimics.file.add_images_to_project(imagedata)
-mimics.file.import_mimics_project("other.mcs")
-```
+平台推荐通过 `get_voxel_buffer()` 导出 Mask：
 
-## 5. 对话框抑制（自动化关键）
+- 可只导出指定器官；
+- 可按一次提交声明导出多个目标器官；
+- 不应依赖界面当前“可见”的对象来决定正式提交内容；
+- 输出路径和名称来自任务清单或命令行参数。
 
-```python
-mimics.dialogs.set_predefined_answer("ChangeOrientation", "default")
-mimics.dialogs.set_predefined_answer("SelectPixelSize", "X")  # 非方形像素
-```
+需要 NIfTI 或多标签文件时，由外部程序完成格式写入和器官编号合并。
 
-可用对话框 ID：`ChangeOrientation`（方向）、`SelectPixelSize`（非方形像素）。
+## 9. `.mcs` 项目文件
 
-## 6. 完整工作流示例（来自官方教程）
+`.mcs` 保存 image sets、Masks、parts、测量和工作状态。
 
-```python
-# 打开项目
-mimics.file.open_project(r'C:\MedData\DemoFiles\Hip.mcs')
+已确认：
 
-# 创建 mask 并阈值分割
-mask = mimics.segment.create_mask()
-mask.name = "Lower limb"
-mimics.segment.threshold(mask=mask, threshold_min=1250, threshold_max=2650)
+- `save_project()` 支持当前格式和旧版兼容格式；
+- Mimics 18 之后使用的现代 SQLite serialization backend 不受旧 ZIP backend 的 4 GB 限制；
+- 项目仍可能因包含完整图像和派生对象而很大；
+- 保存为 Mimics 16 至 20 兼容格式时，多 image set 项目只保存 active image set 及其关联对象；
+- 有损 JPEG 压缩会改变图像，不应作为默认标注方案。
 
-# 填充空洞
-mimics.segment.fill_holes(mask)
+跨机器使用仍取决于兼容版本、edition、license 和环境。`.mcs` 只作为工作现场，平台仍保存
+病例包、原始文件和提交结果。实现另外提供显式 Mask recovery backup；它不依赖 `.mcs` 内部结构，
+但仍要求相同 review、基础标签和 buffer mapping evidence。
 
-# 区域生长
-point = mimics.analyze.indicate_point(
-    title="Region growing point",
-    message="Please indicate a point on the part of interest")
-mask2 = mimics.segment.region_grow(
-    point=point, input_mask=mask, target_mask=None,
-    slice_type="Axial", keep_original_mask=True)
-mask2.name = "Segmented right femur"
+## 10. 对话框
 
-# 计算 3D Part 并导出 STL
-part = mimics.segment.calculate_part(mask=mask2, quality="High")
-mimics.file.export_part(object_to_convert=part, file_name=r"C:\output.stl")
+Mimics API 提供：
 
-# 保存并退出
-mimics.file.save_project()
-mimics.file.exit()
-```
+- `set_predefined_answer()`：为可预测的内置对话框预设答案；
+- `question_box()`：要求用户做少量明确选择；它返回一个按钮结果，没有原生多选返回值；
+- `message_box()`：显示提示或阻断信息。
 
-## 7. 对平台 POC 的 API 覆盖确认
+平台只应在三类场景打断标注者：
 
-| 需要的操作 | Mimics API | 状态 |
-|-----------|-----------|------|
-| CT 图像导入 (DICOM) | `import_dicom_images()` | ✅ |
-| CT 图像体素读取 | `get_voxel_buffer()` on ImageData | ✅ |
-| 创建新 mask | `create_mask()` | ✅ |
-| 写入 mask 体素 (从 NIfTI) | `set_voxel_buffer()` | ✅ |
-| 读 mask 体素 (导出 NIfTI) | `get_voxel_buffer()` | ✅ |
-| 设置 mask 名称 | `mask.name = "liver"` | ✅ |
-| 查找 mask | `mimics.data.masks.find()` | ✅ |
-| 遍历所有 mask | `for m in mimics.data.masks` | ✅ |
-| 删除 mask | `mimics.data.masks.delete()` | ✅ |
-| 复制 mask | `mimics.data.masks.duplicate()` | ✅ |
-| 抑制导入对话框 | `set_predefined_answer()` | ✅ |
-| 背景模式运行 | `MimicsResearch.exe -b -run_script` | ✅ |
-| 获取图像几何 (spacing/dims) | `logical_dimensions`, `pixel_size`, `logical_slice_distance` | ✅ |
-| 获取 DICOM 标签 | `get_dicom_tags()` | ✅ |
-| Mask 颜色设置 | API 文档未暴露 `mask.color` 属性 | ⚠️ 待确认 |
-| NIfTI 直读 | 无 | ❌ 用外部 nibabel |
+1. 打开任务时，病例、序列或目标与任务清单不一致；
+2. 提交时，选择完成、复查或阻塞；
+3. 出现无法继续的空间、数据或脚本错误。
 
-## 8. 开放风险
+只有平台预检查已经证明答案唯一时，才能自动关闭或预答对话框。方向、raw 参数和序列选择存在歧义时必须阻断。
 
-1. **Mask 颜色 API** — 文档未暴露 `mask.color`。需要在实际软件中通过 `dir(mask)` 或 Scripting Guide 确认
-2. **`get_voxel_buffer` 内存布局** — 返回 memoryview，shape=(Z,Y,X)。与 numpy/nibabel 的 (X,Y,Z) 布局交互时需验证轴顺序
-3. **Python 3.5 兼容性** — nibabel、SimpleITK 最新版可能不再支持 3.5，需在外部 Python 3.8+ 完成 NIfTI 操作
+Scripting Library 的入口由脚本目录中的 `.py` 文件自动注册。当前 21.0 文档只确认“脚本可一键运行”，没有找到为 Scripting Library 条目配置自定义图标、工具栏按钮或持久面板的接口。
+因此标注者入口直接用 `Labeling_Open_Next_Case.py`、`Labeling_Submit_Complete.py` 等脚本文件名表达动作，避免先进入功能总菜单。
+
+## 11. 任务清单和 Project Tree 注释
+
+已确认的稳定方式是通过 Scripting Library 运行语义化入口。`Labeling_View_Task_List.py` 会读取任务运行清单和受管 Mask metadata，在 Mimics 弹窗内分页展示。
+这样一百多个器官不会被塞进不可读的弹窗。
+
+未确认能力：
+
+- 是否能通过 Mimics 21 API 创建不影响图像视图的项目级 Custom/注释对象；
+- 该对象是否能稳定保存在 `.mcs` 中并显示在 Project Tree 的合适位置；
+- 该对象是否需要 Analyze 等额外模块许可。
+
+官方 21.0 API 文档能确认 `mimics.data` 暴露 masks、parts、measurements、planes、points、spheres、splines 等对象，也确认对象 metadata 可写；
+但没有在当前资料中找到“创建项目备注/任务注释对象”的明确接口。因此生产流程不能依赖 Project Tree 注释。
+若要采用该界面形态，应新增一个单独探针验证：创建任务清单对象、保存重开、检查 Project Tree 可见性、确认不会遮挡图像或被提交脚本误当成标签对象。
+
+## 12. 文件交换边界
+
+只有直接导入导出不足时，才增加外部与内部的文件交换：
+
+| 运行环境 | 负责 | 不负责 |
+|---|---|---|
+| Mimics Python 3.5 | DICOM、`.mcs`、active image、Mask、Mimics 界面 | 现代文件格式、平台数据登记、长期数据校验 |
+| 外部现代 Python | 格式转换、空间处理、哈希、结构校验、平台登记 | 替代 Mimics 界面和内部对象操作 |
+
+两者通过结构化清单、数组文件、日志和退出码通信。阶段 A 不需要跨进程服务。
+
+具体脚本、启动命令、Mask metadata 和标注者操作见 [Mimics 适配器设计与开发流程](mimics_adapter_design.md)。
+
+## 13. 本机验证问题索引
+
+| 编号 | 必须回答的问题 |
+|---|---|
+| P01 | 多患者、检查和序列如何成为 image sets |
+| P02 | 每个任务目标能否稳定绑定正确 active image |
+| P03 | 当前安装实际支持哪些图像格式 |
+| P04 | 初始 Mask 能否准确注入 |
+| P05 | buffer 轴顺序和索引到世界坐标的变换是什么 |
+| P06 | 能否选择性导出一个或多个目标 Mask |
+| P07 | `.mcs` 能否可靠恢复和有限度跨机器使用 |
+| P08 | 命令行参数和批量运行是否可靠 |
+| P09 | 对话框能否减少而不掩盖歧义 |
+| P10 | 保存、完成提交、复查和阻塞是否能区分 |
+| P11 | 已验证标签能否创建新版本继续修订 |
+| P12 | 多标注者提交能否避免明显覆盖 |
+| P13 | 异常能否生成可操作反馈 |
+| P14 | 提交结果能否进入平台登记和训练快照 |
+| P15 | 是否能创建 Project Tree 中的非阻塞任务清单对象 |
+
+详细操作只在 [可行性验证计划](mimics_poc_plan.md) 中维护。
+
+## 14. 外部版本依据
+
+- [Python 3.5.10 发布与停止维护说明](https://www.python.org/downloads/release/python-3510/)
+- [nibabel 3.0.2](https://pypi.org/project/nibabel/3.0.2/)
+- [nibabel 3.1.0](https://pypi.org/project/nibabel/3.1.0/)
+- [SimpleITK 2.0.2](https://pypi.org/project/SimpleITK/2.0.2/)
+- [SimpleITK 2.1.1](https://pypi.org/project/SimpleITK/2.1.1/)

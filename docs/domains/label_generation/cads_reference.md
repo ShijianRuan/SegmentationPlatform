@@ -1,6 +1,7 @@
 # CADS 伪标签参考
 
-> 文档状态：资料参考，已按公开来源重新核查。  
+> 文档状态：资料参考，已按公开来源重新核查。
+> 核查日期：2026-06-06
 > 当前主设计以 `docs/architecture/platform_blueprint.md` 为准；本文只说明 CADS 对平台伪标签和全身分割数据建设的启发，不把 CADS 流程直接当成本项目流程。
 
 ## 1. 先读结论
@@ -45,13 +46,12 @@ CADS 最重要的启发不是某个具体模型，而是“标签来源要分层
 | --- | --- | --- |
 | `source_label` | 外部数据集自带标签 | 需要检查标签定义和空间一致性 |
 | `candidate_label` | 算法直接生成的候选标签 | 默认不可直接训练，但任务策略可显式纳入 |
-| `accepted_pseudo_label` | 通过平台策略接收的伪标签 | 可按任务策略进入训练 |
-| `verified_label` | 人工审核并保存的标签 | 默认可进入训练 |
+| `verified_label` | 人工完成提交且平台 QC 通过的标签版本 | 默认可进入训练 |
 | `rejected_label` | 被拒绝或发现问题的标签 | 不可训练 |
 
 用户已经明确：高质量伪标签可以直接当训练标签。因此文档里不应写“只有人工审核才是金标准”。更合适的说法是：
 
-> 金标准是最终允许进入训练的标签；它可能来自人工审核，也可能来自经过策略接收的高质量伪标签。
+> 训练输入是被某个 Snapshot 明确准入的标签；它可能来自人工审核、可信外部数据，也可能来自带质量证据的候选标签。
 
 这句话里的关键是“经过策略接收”。否则后续无法解释某个模型到底是用人工标签、外部标签，还是伪标签训练出来的。
 
@@ -103,11 +103,11 @@ CADS 的公开资料明确提醒用户检查子数据集许可，但本平台不
         ↓
 经过名称映射、空间检查、质量检查
         ↓
-必要时人工审核
+必要时人工审核和修正
         ↓
-成为 accepted_pseudo_label 或 verified_label
+未提交时保持 candidate_label；完成提交且 QC 通过后生成 verified_label
         ↓
-被某个 task_label_map 导出到训练任务
+由 Snapshot label_policy 决定准入，再按 task_label_map 导出
 ```
 
 ## 6. 可以落地到平台的规则
@@ -124,7 +124,7 @@ CADS 的公开资料明确提醒用户检查子数据集许可，但本平台不
 | `label_format` | 单 mask 或多 mask |
 | `source_label_map` | 外部标签名称和 id |
 | `spatial_check` | spacing、shape、affine、方向是否通过 |
-| `admission_status` | `source_label` / `accepted_pseudo_label` / `verified_label` |
+| `lifecycle_status` | `source_label` / `candidate_label` / `verified_label` |
 
 ### 6.2 质量检查规则
 
@@ -146,7 +146,7 @@ CADS 的公开资料明确提醒用户检查子数据集许可，但本平台不
 1. 这个标签的状态是否允许进入当前任务？
 2. 这个标签的来源是否在当前任务的可信来源范围内？
 3. 这个标签是否通过了空间和名称映射检查？
-4. 当前任务是否明确允许 `accepted_pseudo_label`？
+4. 当前 Snapshot 是否明确允许该 generator 的 `candidate_label`，且所需 QC 证据是否齐全？
 
 通过这些条件后，CADS 标签才可以成为 nnUNet 训练数据的一部分。
 

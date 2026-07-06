@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://segmentation-platform/registry/schemas/_defs.schema.json",
+  "title": "共享定义（被各记录 schema 通过 $ref 引用，集中定义以防漂移）",
+  "$defs": {
+    "sha256_hash": {
+      "type": "string",
+      "pattern": "^(?:sha256:)?[0-9a-fA-F]{64}$",
+      "description": "文件内容的 SHA-256 校验值。约定：registry 记录统一写成 'sha256:<64hex>'。用于发现覆盖或传输损坏。"
+    },
+    "hmac_pseudonym": {
+      "type": "string",
+      "pattern": "^hmac-sha256:[0-9a-fA-F]{64}$",
+      "description": "患者或检查的带密钥 HMAC 伪名（如 patient_id_hash、study_instance_uid_hash）。它与文件内容的 sha256_hash 是两种不同的东西，前缀也不同，不可混用，也不能作为去标识完成证明。"
+    },
+    "lifecycle_status": {
+      "type": "string",
+      "enum": ["source_label", "candidate_label", "draft_label", "verified_label", "rejected_label"],
+      "description": "标签生命周期状态，按 segment 记录。只说明“它是什么”，不决定是否进入训练。"
+    },
+    "artifact_file_lifecycle": {
+      "type": "string",
+      "enum": ["active", "superseded", "rejected_file"],
+      "description": "整份标签文件的版本状态，不参与训练判断。"
+    },
+    "admission_result": {
+      "type": "string",
+      "enum": ["accepted", "rejected"],
+      "description": "某份标签按本次训练数据快照规则得到的准入结论，只属于该快照。"
+    },
+    "anatomy_coverage_value": {
+      "type": "string",
+      "enum": ["covered", "uncovered", "uncertain"]
+    },
+    "constraint_value": {
+      "type": "string",
+      "enum": ["allowed", "allowed_with_policy", "needs_policy", "needs_review", "forbidden"],
+      "description": "单项使用限制的取值。合并多来源时取最严结果（见数据模型 §12）。"
+    },
+    "usage_constraints": {
+      "type": "object",
+      "description": "数据或模型的使用限制。各字段取值见 constraint_value。允许追加其他约束键。",
+      "properties": {
+        "model_training": {"$ref": "#/$defs/constraint_value"},
+        "commercial_use": {"$ref": "#/$defs/constraint_value"},
+        "redistribution": {"$ref": "#/$defs/constraint_value"}
+      },
+      "additionalProperties": {"$ref": "#/$defs/constraint_value"}
+    },
+    "data_governance": {
+      "type": "object",
+      "required": ["deidentification_status"],
+      "properties": {
+        "source_zone": {"type": "string", "enum": ["restricted_raw", "working"]},
+        "deidentification_status": {
+          "type": "string",
+          "enum": ["pending", "verified", "failed"],
+          "description": "去标识检查状态。默认作为治理记录和风险提示，不阻断标注；需要强门禁时由 strict_deidentification 控制。"
+        },
+        "profile": {"type": "string"},
+        "profile_version": {"type": "string"},
+        "direct_identifiers_allowed": {"type": "boolean"},
+        "strict_deidentification": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "segment_source": {
+      "type": "object",
+      "description": "本次直接产生该 segment 的那一步。区别于 lineage（历史生成血统）。",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["imported_dataset", "manual_review", "model", "external_algorithm", "rule_script"]
+        },
+        "review_id": {"type": "string"},
+        "generator_id": {"type": "string"},
+        "name": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "lineage": {
+      "type": "object",
+      "description": "按 segment 记录的生成血统，独立于文件级 parent_label_id。contributing_generators 是传递闭包，人工修正时必须继承上游生成器（见数据模型 §5.5、ADR-033）。",
+      "required": ["derived_from_label_ids", "contributing_generators"],
+      "properties": {
+        "derived_from_label_ids": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "本 segment 直接基于的上一版标签（可与文件级 parent_label_id 不同）。"
+        },
+        "contributing_generators": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "历史上贡献过像素的全部模型 model_id 或外部算法 generator_id。纯人工从零标注时为空。"
+        }
+      },
+      "additionalProperties": false
+    },
+    "segment": {
+      "type": "object",
+      "description": "标签记录中的单个器官标签。状态、来源和血统都属于 segment，而非整份文件。",
+      "required": ["organ", "lifecycle_status", "source", "lineage"],
+      "properties": {
+        "organ": {"type": "string", "description": "平台统一器官名，必须存在于 anatomy_vocabulary。"},
+        "value": {"type": "integer", "minimum": 0, "description": "多标签文件中的整数值。"},
+        "path": {"type": "string", "description": "逐器官独立 mask 的文件路径。"},
+        "lifecycle_status": {"$ref": "#/$defs/lifecycle_status"},
+        "source": {"$ref": "#/$defs/segment_source"},
+        "lineage": {"$ref": "#/$defs/lineage"},
+        "qc_report_id": {"type": "string"}
+      },
+      "anyOf": [
+        {"required": ["value"]},
+        {"required": ["path"]}
+      ],
+      "additionalProperties": false
+    }
+  }
+}

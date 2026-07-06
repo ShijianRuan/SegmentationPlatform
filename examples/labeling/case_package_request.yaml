@@ -1,0 +1,36 @@
+schema_version: case_package_request.v1
+package_id: pkg_case_001
+case_id: case_001
+study_id: study_001
+leakage_group_id: patient_001
+leakage_group_basis: patient_pseudonym
+leakage_group_confidence: high
+
+data_governance:
+  source_zone: working
+  deidentification_status: verified
+  profile: internal_dicom_profile_v1
+  profile_version: "1"
+  direct_identifiers_allowed: false
+
+image_sets:
+  - image_id: img_venous
+    modality: CT
+    format: dicom_series
+    source: /replace/with/deidentified/dicom/series
+    source_type: internal_dicom
+    import_batch: batch_20260615
+    # Only list a populated high-risk tag here when the deidentification profile explicitly permits it.
+    allowed_dicom_tags: []
+
+review:
+  review_id: review_case_001_v1
+  tool: mimics
+  assignee: annotator_01
+  targets:
+    - target_id: abdomen_organs
+      image_id: img_venous
+      organs: [liver, spleen, kidney_left, kidney_right]
+
+# Optional. Each entry may be a binary organ mask or a multilabel file with label_map.
+initial_labels: []

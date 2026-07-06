@@ -1,0 +1,37 @@
+schema_version: snapshot_request.v1
+snapshot_id: snap_abdomen_v1
+task_id: abdomen_4organ
+created_by: offline_operator
+
+task_label_map:
+  background: 0
+  liver: 1
+  spleen: 2
+  kidney_left: 3
+  kidney_right: 4
+
+label_policy:
+  allow_lifecycle_status: [verified_label]
+
+cases:
+  - case_id: case_001
+    image_id: img_venous
+    split: train
+    segments:
+      - organ: liver
+        label_id: replace_with_registered_label_id
+      - organ: spleen
+        label_id: replace_with_registered_label_id
+      - organ: kidney_left
+        label_id: replace_with_registered_label_id
+      - organ: kidney_right
+        label_id: replace_with_registered_label_id
+
+preprocess_profile:
+  name: nnunet_default_planning
+
+usage_constraints:
+  model_training: allowed
+  commercial_use: needs_policy
+  redistribution: forbidden
+

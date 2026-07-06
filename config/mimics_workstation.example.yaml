@@ -1,0 +1,38 @@
+schema_version: mimics_workstation.v1
+
+expected_product: Mimics Research
+expected_version: "21.0"
+edition: Research
+license_modules: [Scripting]
+
+# Windows workstation paths. Environment variables such as %PROGRAMFILES% are allowed.
+executable: 'C:\Program Files\Materialise\Mimics Research 21.0\MimicsResearch.exe'
+runtime_script_dir: 'C:\SegmentationPlatform\adapters\mimics\runtime_py35'
+probe_script_dir: 'C:\SegmentationPlatform\adapters\mimics\probes'
+work_root: 'D:\SegmentationPlatform\work'
+doctor_timeout_seconds: 180
+
+# Only add an answer after the platform precheck proves that it is unambiguous.
+# Example after P01/P03/P05 approval:
+# predefined_dialog_answers:
+#   ChangeOrientation: default
+predefined_dialog_answers: {}
+
+# P05 must determine these values on each workstation build.
+# Keep status=unverified until the evidence has been reviewed.
+buffer_mapping:
+  schema_version: mimics_buffer_mapping.v1
+  status: unverified
+  evidence_id: ""
+  platform_to_mimics_axes: [0, 1, 2]
+  platform_to_mimics_flips: [false, false, false]
+
+# Optional escape hatch when P05 proves that one image_id needs a different mapping.
+# Keep this empty for the normal one-mapping-per-workstation path.
+# buffer_mapping_by_image_id:
+#   img_venous:
+#     schema_version: mimics_buffer_mapping.v1
+#     status: verified
+#     evidence_id: P05_WORKSTATION_01_IMG_VENOUS_20260615
+#     platform_to_mimics_axes: [2, 1, 0]
+#     platform_to_mimics_flips: [false, false, false]

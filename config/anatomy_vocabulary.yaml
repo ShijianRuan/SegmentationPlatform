@@ -1,0 +1,411 @@
+# 平台统一器官名称表（Anatomy Vocabulary）
+#
+# 这份表只回答“这是哪个器官”。它【不】保存训练用的整数编号——
+# 那些编号按训练任务分别定义在 pipelines/nnunet/ModelMap*.toml（TaskLabelMap）
+# 和合并输出编号表（Combine Map）中。同一器官在不同任务里可以是不同整数。
+# 依据：平台蓝图 §7.1、ADR-002、ADR-017。
+#
+# 来源：由 pipelines/nnunet/ModelMap*.toml 中实际出现的器官名生成（共 126 个）。
+# 收录范围 = 任何 ModelMap 出现过的器官名，包含尚未实现或由独立模型负责的任务
+#   （例如 uterus 在 ModelMap 标注为 #暂未实现）。任务的实现状态不在本表记录，
+#   本表只保证“TaskLabelMap 用到的名称都能在这里查到”。
+# 新数据集若使用别名，在对应器官的 aliases 下追加，不要新增重复的规范名。
+
+schema_version: anatomy_vocabulary.v1
+
+organs:
+  # ── 头部 ──
+  brain:
+    display_name: Brain
+    aliases: []
+  skull:
+    display_name: Skull
+    aliases: []
+
+  # ── 颈部、气道与头颈腺体 ──
+  esophagus:
+    display_name: Esophagus
+    aliases: []
+  parotid_gland_left:
+    display_name: Left parotid gland
+    aliases: []
+  parotid_gland_right:
+    display_name: Right parotid gland
+    aliases: []
+  submandibular_gland_left:
+    display_name: Left submandibular gland
+    aliases: []
+  submandibular_gland_right:
+    display_name: Right submandibular gland
+    aliases: []
+  thyroid_gland:
+    display_name: Thyroid gland
+    aliases: []
+  trachea:
+    display_name: Trachea
+    aliases: []
+
+  # ── 肺 ──
+  lung_left:
+    display_name: Left lung
+    aliases: []
+  lung_right:
+    display_name: Right lung
+    aliases: []
+  lung_lower_lobe_left:
+    display_name: Left lung lower lobe
+    aliases: []
+  lung_lower_lobe_right:
+    display_name: Right lung lower lobe
+    aliases: []
+  lung_middle_lobe_right:
+    display_name: Right lung middle lobe
+    aliases: []
+  lung_upper_lobe_left:
+    display_name: Left lung upper lobe
+    aliases: []
+  lung_upper_lobe_right:
+    display_name: Right lung upper lobe
+    aliases: []
+
+  # ── 心脏与大血管 ──
+  aorta:
+    display_name: Aorta
+    aliases: []
+  atrial_appendage_left:
+    display_name: Left atrial appendage
+    aliases: []
+  brachiocephalic_trunk:
+    display_name: Brachiocephalic trunk
+    aliases: []
+  brachiocephalic_vein_left:
+    display_name: Left brachiocephalic vein
+    aliases: []
+  brachiocephalic_vein_right:
+    display_name: Right brachiocephalic vein
+    aliases: []
+  common_carotid_artery_left:
+    display_name: Left common carotid artery
+    aliases: []
+  common_carotid_artery_right:
+    display_name: Right common carotid artery
+    aliases: []
+  heart:
+    display_name: Heart
+    aliases: []
+  iliac_artery_left:
+    display_name: Left iliac artery
+    aliases: []
+  iliac_artery_right:
+    display_name: Right iliac artery
+    aliases: []
+  iliac_vena_left:
+    display_name: Left iliac vena
+    aliases: []
+  iliac_vena_right:
+    display_name: Right iliac vena
+    aliases: []
+  inferior_vena_cava:
+    display_name: Inferior vena cava
+    aliases: []
+  portal_vein_and_splenic_vein:
+    display_name: Portal vein and splenic vein
+    aliases: []
+  pulmonary_vein:
+    display_name: Pulmonary vein
+    aliases: []
+  subclavian_artery_left:
+    display_name: Left subclavian artery
+    aliases: []
+  subclavian_artery_right:
+    display_name: Right subclavian artery
+    aliases: []
+  superior_vena_cava:
+    display_name: Superior vena cava
+    aliases: []
+
+  # ── 胸廓骨骼 ──
+  costal_cartilages:
+    display_name: Costal cartilages
+    aliases: []
+  rib_left_1:
+    display_name: Left rib 1
+    aliases: []
+  rib_left_10:
+    display_name: Left rib 10
+    aliases: []
+  rib_left_11:
+    display_name: Left rib 11
+    aliases: []
+  rib_left_12:
+    display_name: Left rib 12
+    aliases: []
+  rib_left_2:
+    display_name: Left rib 2
+    aliases: []
+  rib_left_3:
+    display_name: Left rib 3
+    aliases: []
+  rib_left_4:
+    display_name: Left rib 4
+    aliases: []
+  rib_left_5:
+    display_name: Left rib 5
+    aliases: []
+  rib_left_6:
+    display_name: Left rib 6
+    aliases: []
+  rib_left_7:
+    display_name: Left rib 7
+    aliases: []
+  rib_left_8:
+    display_name: Left rib 8
+    aliases: []
+  rib_left_9:
+    display_name: Left rib 9
+    aliases: []
+  rib_right_1:
+    display_name: Right rib 1
+    aliases: []
+  rib_right_10:
+    display_name: Right rib 10
+    aliases: []
+  rib_right_11:
+    display_name: Right rib 11
+    aliases: []
+  rib_right_12:
+    display_name: Right rib 12
+    aliases: []
+  rib_right_2:
+    display_name: Right rib 2
+    aliases: []
+  rib_right_3:
+    display_name: Right rib 3
+    aliases: []
+  rib_right_4:
+    display_name: Right rib 4
+    aliases: []
+  rib_right_5:
+    display_name: Right rib 5
+    aliases: []
+  rib_right_6:
+    display_name: Right rib 6
+    aliases: []
+  rib_right_7:
+    display_name: Right rib 7
+    aliases: []
+  rib_right_8:
+    display_name: Right rib 8
+    aliases: []
+  rib_right_9:
+    display_name: Right rib 9
+    aliases: []
+  sternum:
+    display_name: Sternum
+    aliases: []
+
+  # ── 腹盆腔脏器 ──
+  adrenal_gland_left:
+    display_name: Left adrenal gland
+    aliases: [adrenal_left, left_adrenal_gland]
+  adrenal_gland_right:
+    display_name: Right adrenal gland
+    aliases: [adrenal_right, right_adrenal_gland]
+  breast:
+    display_name: Breast
+    aliases: []
+  colon:
+    display_name: Colon
+    aliases: []
+  duodenum:
+    display_name: Duodenum
+    aliases: []
+  gallbladder:
+    display_name: Gallbladder
+    aliases: []
+  kidney_left:
+    display_name: Left kidney
+    aliases: [left_kidney]
+  kidney_right:
+    display_name: Right kidney
+    aliases: [right_kidney]
+  kidney_cyst_left:
+    display_name: Left kidney cyst
+    aliases: []
+  kidney_cyst_right:
+    display_name: Right kidney cyst
+    aliases: []
+  liver:
+    display_name: Liver
+    aliases: [hepatic]
+  pancreas:
+    display_name: Pancreas
+    aliases: []
+  prostate:
+    display_name: Prostate
+    aliases: []
+  small_bowel:
+    display_name: Small bowel
+    aliases: []
+  spleen:
+    display_name: Spleen
+    aliases: []
+  stomach:
+    display_name: Stomach
+    aliases: []
+  urinary_bladder:
+    display_name: Urinary bladder
+    aliases: []
+  uterus:
+    display_name: Uterus
+    aliases: []
+
+  # ── 肌肉 ──
+  autochthon_left:
+    display_name: Left autochthon
+    aliases: []
+  autochthon_right:
+    display_name: Right autochthon
+    aliases: []
+  gluteus_maximus_left:
+    display_name: Left gluteus maximus
+    aliases: []
+  gluteus_maximus_right:
+    display_name: Right gluteus maximus
+    aliases: []
+  gluteus_medius_left:
+    display_name: Left gluteus medius
+    aliases: []
+  gluteus_medius_right:
+    display_name: Right gluteus medius
+    aliases: []
+  gluteus_minimus_left:
+    display_name: Left gluteus minimus
+    aliases: []
+  gluteus_minimus_right:
+    display_name: Right gluteus minimus
+    aliases: []
+  iliopsoas_left:
+    display_name: Left iliopsoas
+    aliases: []
+  iliopsoas_right:
+    display_name: Right iliopsoas
+    aliases: []
+
+  # ── 脊柱与中轴 ──
+  intervertebral_discs:
+    display_name: Intervertebral discs
+    aliases: []
+  sacrum:
+    display_name: Sacrum
+    aliases: []
+  spinal_cord:
+    display_name: Spinal cord
+    aliases: []
+  vertebrae_C1:
+    display_name: Vertebra C1
+    aliases: []
+  vertebrae_C2:
+    display_name: Vertebra C2
+    aliases: []
+  vertebrae_C3:
+    display_name: Vertebra C3
+    aliases: []
+  vertebrae_C4:
+    display_name: Vertebra C4
+    aliases: []
+  vertebrae_C5:
+    display_name: Vertebra C5
+    aliases: []
+  vertebrae_C6:
+    display_name: Vertebra C6
+    aliases: []
+  vertebrae_C7:
+    display_name: Vertebra C7
+    aliases: []
+  vertebrae_L1:
+    display_name: Vertebra L1
+    aliases: []
+  vertebrae_L2:
+    display_name: Vertebra L2
+    aliases: []
+  vertebrae_L3:
+    display_name: Vertebra L3
+    aliases: []
+  vertebrae_L4:
+    display_name: Vertebra L4
+    aliases: []
+  vertebrae_L5:
+    display_name: Vertebra L5
+    aliases: []
+  vertebrae_S1:
+    display_name: Vertebra S1
+    aliases: []
+  vertebrae_T1:
+    display_name: Vertebra T1
+    aliases: []
+  vertebrae_T10:
+    display_name: Vertebra T10
+    aliases: []
+  vertebrae_T11:
+    display_name: Vertebra T11
+    aliases: []
+  vertebrae_T12:
+    display_name: Vertebra T12
+    aliases: []
+  vertebrae_T2:
+    display_name: Vertebra T2
+    aliases: []
+  vertebrae_T3:
+    display_name: Vertebra T3
+    aliases: []
+  vertebrae_T4:
+    display_name: Vertebra T4
+    aliases: []
+  vertebrae_T5:
+    display_name: Vertebra T5
+    aliases: []
+  vertebrae_T6:
+    display_name: Vertebra T6
+    aliases: []
+  vertebrae_T7:
+    display_name: Vertebra T7
+    aliases: []
+  vertebrae_T8:
+    display_name: Vertebra T8
+    aliases: []
+  vertebrae_T9:
+    display_name: Vertebra T9
+    aliases: []
+
+  # ── 四肢带骨骼 ──
+  clavicula_left:
+    display_name: Left clavicula
+    aliases: []
+  clavicula_right:
+    display_name: Right clavicula
+    aliases: []
+  femur_left:
+    display_name: Left femur
+    aliases: []
+  femur_right:
+    display_name: Right femur
+    aliases: []
+  hip_left:
+    display_name: Left hip
+    aliases: []
+  hip_right:
+    display_name: Right hip
+    aliases: []
+  humerus_left:
+    display_name: Left humerus
+    aliases: []
+  humerus_right:
+    display_name: Right humerus
+    aliases: []
+  scapula_left:
+    display_name: Left scapula
+    aliases: []
+  scapula_right:
+    display_name: Right scapula
+    aliases: []
